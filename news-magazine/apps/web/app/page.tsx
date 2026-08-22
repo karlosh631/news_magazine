@@ -1,9 +1,16 @@
+import Link from "next/link";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
 import { NewsCard } from "@/components/NewsCard";
 import { BreakingNewsTicker } from "@/components/BreakingNewsTicker";
 import { EmptyState } from "@/components/EmptyState";
 
+/*
+ * Revalidate the homepage every 60 seconds.
+ *
+ * This means newly ingested articles can appear automatically
+ * without manually rebuilding/deploying the website.
+ */
 export const revalidate = 60;
 
 /* =========================================================
@@ -35,7 +42,7 @@ type BreakingArticle = {
 };
 
 /* =========================================================
-   CATEGORY ORDER
+   CATEGORY DISPLAY ORDER
    ========================================================= */
 
 const CATEGORY_ORDER = [
@@ -54,31 +61,36 @@ const CATEGORY_ORDER = [
 async function getHomepageData() {
   const supabase = createServerSupabaseClient();
 
-  /* -------------------------------------------------------
-     GET CATEGORIES
-     ------------------------------------------------------- */
+  /*
+   * Fetch categories first.
+   *
+   * We intentionally do this separately instead of relying on
+   * Supabase foreign-table relationships. This makes the
+   * application work even if the database relationship is not
+   * configured for nested selects.
+   */
+  const {
+    data: categories,
+    error: categoriesError,
+  } = await supabase
+    .from("categories")
+    .select("id, slug, name");
 
-  const { data: categories, error: categoryError } =
-    await supabase
-      .from("categories")
-      .select("id, slug, name");
-
-  if (categoryError) {
+  if (categoriesError) {
     console.error(
-      "Homepage category query failed:",
-      categoryError
+      "[Homepage] Failed to load categories:",
+      categoriesError
     );
   }
 
   const allCategories: Category[] = categories ?? [];
 
-  /* -------------------------------------------------------
-     GET BREAKING + LATEST IN PARALLEL
-     ------------------------------------------------------- */
-
+  /*
+   * Fetch breaking and latest news simultaneously.
+   */
   const [
-    { data: breaking, error: breakingError },
-    { data: latest, error: latestError },
+    breakingResponse,
+    latestResponse,
   ] = await Promise.all([
     supabase
       .from("articles")
@@ -96,36 +108,50 @@ async function getHomepageData() {
     supabase
       .from("articles")
       .select(
-        "id, slug, headline, excerpt, featured_image_url, published_at, primary_category_id"
+        [
+          "id",
+          "slug",
+          "headline",
+          "excerpt",
+          "featured_image_url",
+          "published_at",
+          "primary_category_id",
+        ].join(", ")
       )
       .eq("status", "published")
       .order("published_at", {
         ascending: false,
         nullsFirst: false,
       })
-      .limit(30),
+      .limit(50),
   ]);
 
-  if (breakingError) {
+  if (breakingResponse.error) {
     console.error(
-      "Homepage breaking-news query failed:",
-      breakingError
+      "[Homepage] Failed to load breaking news:",
+      breakingResponse.error
     );
   }
 
-  if (latestError) {
+  if (latestResponse.error) {
     console.error(
-      "Homepage latest-news query failed:",
-      latestError
+      "[Homepage] Failed to load latest news:",
+      latestResponse.error
     );
   }
 
-  /* -------------------------------------------------------
-     ORGANIZE ARTICLES BY CATEGORY
-     ------------------------------------------------------- */
+  const breaking: BreakingArticle[] =
+    breakingResponse.data ?? [];
 
-  const latestArticles: Article[] = latest ?? [];
+  const latest: Article[] =
+    latestResponse.data ?? [];
 
+  /*
+   * Organize latest articles into their categories.
+   *
+   * We use primary_category_id rather than category slug
+   * because articles store the category UUID.
+   */
   const categorySections = allCategories
     .filter((category) =>
       CATEGORY_ORDER.includes(category.slug)
@@ -137,7 +163,7 @@ async function getHomepageData() {
     )
     .map((category) => ({
       category,
-      articles: latestArticles
+      articles: latest
         .filter(
           (article) =>
             article.primary_category_id === category.id
@@ -146,8 +172,8 @@ async function getHomepageData() {
     }));
 
   return {
-    breaking: (breaking ?? []) as BreakingArticle[],
-    latest: latestArticles,
+    breaking,
+    latest,
     categorySections,
   };
 }
@@ -163,33 +189,40 @@ function CategorySection({
   category: Category;
   articles: Article[];
 }) {
+  /*
+   * Don't display an empty category section.
+   */
   if (articles.length === 0) {
     return null;
   }
 
   return (
-    <section className="mt-12">
+    <section
+      className="mt-12"
+      aria-labelledby={`category-${category.slug}`}
+    >
       {/* ---------------------------------------------------
-          SECTION HEADER
+          CATEGORY HEADER
           --------------------------------------------------- */}
 
       <div className="mb-5 flex items-center justify-between border-b pb-3">
-        <div>
-          <h2 className="font-headline text-2xl font-bold">
-            {category.name}
-          </h2>
-        </div>
+        <h2
+          id={`category-${category.slug}`}
+          className="font-headline text-2xl font-bold"
+        >
+          {category.name}
+        </h2>
 
-        <a
+        <Link
           href={`/category/${category.slug}`}
           className="text-sm font-medium hover:underline"
         >
           View all →
-        </a>
+        </Link>
       </div>
 
       {/* ---------------------------------------------------
-          ARTICLES
+          CATEGORY ARTICLES
           --------------------------------------------------- */}
 
       <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
@@ -209,11 +242,48 @@ function CategorySection({
    ========================================================= */
 
 export default async function HomePage() {
+  let homepage;
+
+  /*
+   * Prevent the entire homepage from crashing because of
+   * an unexpected Supabase/network error.
+   */
+  try {
+    homepage = await getHomepageData();
+  } catch (error) {
+    console.error(
+      "[Homepage] Unexpected error:",
+      error
+    );
+
+    return (
+      <main className="mx-auto max-w-6xl px-4 py-16">
+        <div className="mx-auto max-w-xl text-center">
+          <h1 className="font-headline text-3xl font-bold">
+            Unable to load news
+          </h1>
+
+          <p className="mt-3 text-gray-600">
+            We couldn't load the latest news right now.
+            Please try again shortly.
+          </p>
+
+          <Link
+            href="/"
+            className="mt-6 inline-block rounded-md border px-5 py-2 text-sm font-medium hover:bg-gray-50"
+          >
+            Refresh
+          </Link>
+        </div>
+      </main>
+    );
+  }
+
   const {
     breaking,
     latest,
     categorySections,
-  } = await getHomepageData();
+  } = homepage;
 
   return (
     <>
@@ -232,22 +302,29 @@ export default async function HomePage() {
       <main className="mx-auto max-w-6xl px-4 py-8">
 
         {/* =================================================
-            LATEST NEWS
+            LATEST NEWS HEADER
             ================================================= */}
 
-        <section>
+        <section aria-labelledby="latest-news-heading">
           <div className="mb-5 flex items-center justify-between border-b pb-3">
-            <h1 className="font-headline text-2xl font-bold">
+            <h1
+              id="latest-news-heading"
+              className="font-headline text-2xl font-bold"
+            >
               ताजा समाचार · Latest News
             </h1>
 
-            <a
+            <Link
               href="/search"
               className="text-sm font-medium hover:underline"
             >
               Search →
-            </a>
+            </Link>
           </div>
+
+          {/* -----------------------------------------------
+              NO ARTICLES
+              ----------------------------------------------- */}
 
           {latest.length === 0 ? (
             <EmptyState
@@ -255,13 +332,19 @@ export default async function HomePage() {
               description="Once sources are enabled and the ingestion service runs its first sync, articles will appear here automatically."
             />
           ) : (
+            /* ---------------------------------------------
+               LATEST NEWS GRID
+               --------------------------------------------- */
+
             <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
-              {latest.slice(0, 12).map((article) => (
-                <NewsCard
-                  key={article.id}
-                  article={article}
-                />
-              ))}
+              {latest
+                .slice(0, 12)
+                .map((article) => (
+                  <NewsCard
+                    key={article.id}
+                    article={article}
+                  />
+                ))}
             </div>
           )}
         </section>
@@ -271,13 +354,31 @@ export default async function HomePage() {
             ================================================= */}
 
         {categorySections.map(
-          ({ category, articles }) => (
+          ({
+            category,
+            articles,
+          }) => (
             <CategorySection
               key={category.id}
               category={category}
               articles={articles}
             />
           )
+        )}
+
+        {/* =================================================
+            VIEW ALL NEWS
+            ================================================= */}
+
+        {latest.length > 12 && (
+          <div className="mt-10 text-center">
+            <Link
+              href="/search"
+              className="inline-flex rounded-md border px-6 py-3 text-sm font-medium transition hover:bg-gray-50"
+            >
+              View More News
+            </Link>
+          </div>
         )}
 
       </main>

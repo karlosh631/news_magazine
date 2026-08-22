@@ -1,13 +1,30 @@
 import Link from "next/link";
 
-const NAV = [
-  { href: "/category/national", label: "National" },
-  { href: "/category/politics", label: "Politics" },
-  { href: "/category/business", label: "Business" },
-  { href: "/category/technology", label: "Technology" },
-  { href: "/category/sports", label: "Sports" },
-  { href: "/category/entertainment", label: "Entertainment" },
-  { href: "/search", label: "Search" },
+const navigation = [
+  {
+    label: "National",
+    href: "/category/national",
+  },
+  {
+    label: "Politics",
+    href: "/category/politics",
+  },
+  {
+    label: "Business",
+    href: "/category/business",
+  },
+  {
+    label: "Technology",
+    href: "/category/technology",
+  },
+  {
+    label: "Sports",
+    href: "/category/sports",
+  },
+  {
+    label: "Entertainment",
+    href: "/category/entertainment",
+  },
 ];
 
 export function Header() {
@@ -28,11 +45,11 @@ export function Header() {
           className="hidden items-center gap-5 text-sm font-medium md:flex"
           aria-label="Main navigation"
         >
-          {NAV.map((item) => (
+          {navigation.map((item) => (
             <Link
               key={item.href}
               href={item.href}
-              className="whitespace-nowrap transition-colors hover:text-primary hover:underline underline-offset-4"
+              className="transition-colors hover:text-gray-600"
             >
               {item.label}
             </Link>
@@ -50,7 +67,7 @@ export function Header() {
             </summary>
 
             <div className="absolute right-0 top-full mt-2 min-w-52 rounded-lg border bg-background p-2 shadow-lg">
-              {NAV.map((item) => (
+              {navigation.map((item) => (
                 <Link
                   key={item.href}
                   href={item.href}

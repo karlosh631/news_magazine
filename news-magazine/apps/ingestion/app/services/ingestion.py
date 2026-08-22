@@ -100,14 +100,15 @@ async def run_source_sync(source_row: dict) -> IngestionResult:
                 }).execute()
                 continue
 
-            category_id = categorizer.classify(article.headline, article.excerpt) \
+           category_id = categorizer.classify(article.headline, article.excerpt) \
                 or source_row.get("default_category_id")
 
             row = {
                 "slug": _slugify(article.headline, article.raw_metadata.get("content_hash", "")),
                 "headline": sanitize_plain_text(article.headline),
                 "language": article.language,
-                "status": "ingested",  # goes through editorial workflow before publish
+                "status": "published",  # Set to published so articles appear instantly
+                "body_html": article.body_html if hasattr(article, "body_html") and article.body_html else f"<p>{sanitize_plain_text(article.excerpt)}</p>",
                 "excerpt": sanitize_plain_text(article.excerpt),
                 "featured_image_url": article.thumbnail_url,
                 "source_id": source_row["id"],

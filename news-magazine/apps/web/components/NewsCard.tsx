@@ -1,5 +1,8 @@
+"use client";
+
 import Link from "next/link";
 import Image from "next/image";
+import { useState } from "react";
 import type { Article } from "@/types/database";
 
 type NewsCardArticle = Pick<
@@ -12,6 +15,8 @@ type NewsCardArticle = Pick<
   | "published_at"
 >;
 
+const FALLBACK_IMAGE = "/default-news.jpg";
+
 export function NewsCard({
   article,
 }: {
@@ -23,9 +28,7 @@ export function NewsCard({
       className="group block"
       aria-label={`Read: ${article.headline}`}
     >
-      {/* -------------------------------------------------- */}
       {/* IMAGE */}
-      {/* -------------------------------------------------- */}
       <div className="relative aspect-video overflow-hidden rounded-md bg-gray-100">
         <NewsCardImage
           src={article.featured_image_url}
@@ -33,31 +36,25 @@ export function NewsCard({
         />
       </div>
 
-      {/* -------------------------------------------------- */}
       {/* HEADLINE */}
-      {/* -------------------------------------------------- */}
       <h3 className="mt-3 font-headline text-lg font-semibold leading-snug group-hover:underline">
         {article.headline}
       </h3>
 
-      {/* -------------------------------------------------- */}
       {/* EXCERPT */}
-      {/* -------------------------------------------------- */}
       {article.excerpt && (
         <p className="mt-1 line-clamp-2 text-sm text-gray-600">
           {article.excerpt}
         </p>
       )}
 
-      {/* -------------------------------------------------- */}
       {/* DATE */}
-      {/* -------------------------------------------------- */}
       {article.published_at && (
         <time
           className="mt-1 block text-xs text-gray-400"
           dateTime={article.published_at}
         >
-          {new Date(article.published_at).toLocaleString("ne-NP")}
+          {formatNewsDate(article.published_at)}
         </time>
       )}
     </Link>
@@ -65,7 +62,7 @@ export function NewsCard({
 }
 
 /* =========================================================
-   IMAGE COMPONENT
+   IMAGE
    ========================================================= */
 
 function NewsCardImage({
@@ -75,26 +72,39 @@ function NewsCardImage({
   src: string | null;
   alt: string;
 }) {
-  const fallbackImage = "/default-news.jpg";
+  const [imageSrc, setImageSrc] = useState(
+    src || FALLBACK_IMAGE
+  );
 
   return (
     <Image
-      src={src || fallbackImage}
+      src={imageSrc}
       alt={alt}
       fill
       sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
       className="object-cover transition-transform duration-300 group-hover:scale-105"
       loading="lazy"
-      onError={(event) => {
-        const image = event.currentTarget;
-
-        // Prevent an infinite fallback loop.
-        if (image.src.endsWith(fallbackImage)) {
-          return;
+      onError={() => {
+        if (imageSrc !== FALLBACK_IMAGE) {
+          setImageSrc(FALLBACK_IMAGE);
         }
-
-        image.src = fallbackImage;
       }}
     />
   );
+}
+
+/* =========================================================
+   DATE
+   ========================================================= */
+
+function formatNewsDate(date: string) {
+  try {
+    return new Intl.DateTimeFormat("ne-NP", {
+      dateStyle: "medium",
+      timeStyle: "short",
+      timeZone: "Asia/Kathmandu",
+    }).format(new Date(date));
+  } catch {
+    return date;
+  }
 }

@@ -1,10 +1,19 @@
 """
 Orchestrates one full sync run for one source:
 
-  fetch -> parse -> normalize -> validate -> dedupe -> categorize
-    -> sanitize -> store -> log
+    fetch -> parse -> normalize -> validate -> dedupe -> categorize
+        -> sanitize -> store -> log
 
 A failure on one source never affects another.
+
+Security principles:
+- Only enabled + allowed sources are processed.
+- Adapter controls whether fetching is permitted.
+- RSS-provided HTML is never directly rendered as article HTML.
+- Headlines and excerpts are sanitized before database storage.
+- Full article HTML is only considered when republish_permission=True.
+- A broken article must never stop the remaining feed.
+- Database errors are logged without crashing the entire ingestion service.
 """
 
 from __future__ import annotations
@@ -26,10 +35,18 @@ from app.sources.generic_rss import GenericRssAdapter
 logger = logging.getLogger("ingestion")
 
 
+# =============================================================
+# ADAPTER REGISTRY
+# =============================================================
+
 ADAPTER_REGISTRY = {
     "generic_rss": GenericRssAdapter,
 }
 
+
+# =============================================================
+# INGESTION RESULT
+# =============================================================
 
 class IngestionResult:
     def __init__(self):
@@ -40,6 +57,10 @@ class IngestionResult:
         self.errors = 0
         self.error_details: list[dict] = []
 
+
+# =============================================================
+# MAIN SOURCE SYNC
+# =============================================================
 
 async def run_source_sync(
     source_row: dict,
@@ -52,16 +73,33 @@ async def run_source_sync(
     # CREATE SYNC LOG
     # =========================================================
 
-    sync_response = (
-        db.table("source_sync_logs")
-        .insert(
+    try:
+        sync_response = (
+            db.table("source_sync_logs")
+            .insert(
+                {
+                    "source_id": source_row["id"],
+                    "status": "running",
+                }
+            )
+            .execute()
+        )
+
+    except Exception as exc:
+        logger.exception(
+            "Unable to create sync log for source %s",
+            source_row.get("id"),
+        )
+
+        result.errors += 1
+        result.error_details.append(
             {
-                "source_id": source_row["id"],
-                "status": "running",
+                "type": "sync_log_create_error",
+                "message": str(exc),
             }
         )
-        .execute()
-    )
+
+        return result
 
     if not sync_response.data:
         raise RuntimeError(
@@ -129,7 +167,34 @@ async def run_source_sync(
 
         return result
 
-    adapter = adapter_cls(source_row)
+    try:
+        adapter = adapter_cls(
+            source_row
+        )
+    except Exception as exc:
+        result.errors += 1
+
+        logger.exception(
+            "Failed to initialize adapter for source %s",
+            source_row.get("id"),
+        )
+
+        _log_error(
+            db,
+            source_row["id"],
+            sync_log["id"],
+            "adapter_initialization_error",
+            str(exc),
+        )
+
+        _finish_sync_log(
+            db,
+            sync_log["id"],
+            "failed",
+            result,
+        )
+
+        return result
 
     dedupe = DuplicateDetector(db)
 
@@ -188,6 +253,7 @@ async def run_source_sync(
     # =========================================================
 
     try:
+
         raw = await adapter.fetch()
 
         entries = adapter.parse(
@@ -262,6 +328,41 @@ async def run_source_sync(
         try:
 
             # -------------------------------------------------
+            # VALIDATE BASIC ARTICLE DATA
+            # -------------------------------------------------
+
+            if not article.headline:
+                result.rejected += 1
+
+                _log_error(
+                    db,
+                    source_row["id"],
+                    sync_log["id"],
+                    "missing_headline",
+                    "Article has no headline.",
+                    {
+                        "source_url": (
+                            article.source_article_url
+                        ),
+                    },
+                )
+
+                continue
+
+            if not article.source_article_url:
+                result.rejected += 1
+
+                _log_error(
+                    db,
+                    source_row["id"],
+                    sync_log["id"],
+                    "missing_source_url",
+                    "Article has no source article URL.",
+                )
+
+                continue
+
+            # -------------------------------------------------
             # NORMALIZE CANONICAL URL
             # -------------------------------------------------
 
@@ -305,8 +406,12 @@ async def run_source_sync(
 
                 result.duplicates += 1
 
-                # Create source relationship.
+                # -------------------------------------------------
+                # CREATE ARTICLE-SOURCE RELATIONSHIP
+                # -------------------------------------------------
+
                 try:
+
                     (
                         db.table(
                             "article_sources"
@@ -329,6 +434,7 @@ async def run_source_sync(
 
                 except Exception:
 
+                    # Relationship may already exist.
                     logger.debug(
                         "Article-source relationship "
                         "already exists.",
@@ -362,6 +468,7 @@ async def run_source_sync(
             )
 
             if not safe_headline:
+
                 result.rejected += 1
 
                 _log_error(
@@ -392,6 +499,35 @@ async def run_source_sync(
             # -------------------------------------------------
             # BODY
             # -------------------------------------------------
+            #
+            # IMPORTANT:
+            #
+            # NormalizedArticle defines:
+            #
+            #     full_body_html
+            #
+            # NOT:
+            #
+            #     body_html
+            #
+            # We therefore use full_body_html explicitly.
+            #
+            # However, RSS-provided HTML must NEVER be blindly
+            # inserted into the database/rendered in the UI.
+            #
+            # Until a dedicated HTML sanitizer is implemented,
+            # we intentionally use the sanitized excerpt.
+            #
+            # This prevents:
+            #
+            #     <script>
+            #     <iframe>
+            #     event handlers
+            #     javascript:
+            #     malicious HTML
+            #
+            # from entering article body content.
+            # -------------------------------------------------
 
             if (
                 getattr(
@@ -404,20 +540,21 @@ async def run_source_sync(
                     False,
                 )
             ):
-                # IMPORTANT:
-                # Do not blindly trust feed HTML.
+                # Do NOT directly trust full_body_html.
                 #
-                # If full HTML republication is ever enabled,
-                # it must pass through a dedicated HTML sanitizer.
-                #
-                # For now we intentionally use the safe excerpt.
-                body_html = build_safe_paragraph(
-                    safe_excerpt
+                # A dedicated HTML sanitizer should be added
+                # before enabling full HTML republication.
+                body_html = (
+                    build_safe_paragraph(
+                        safe_excerpt
+                    )
                 )
 
             else:
-                body_html = build_safe_paragraph(
-                    safe_excerpt
+                body_html = (
+                    build_safe_paragraph(
+                        safe_excerpt
+                    )
                 )
 
             # -------------------------------------------------
@@ -427,11 +564,13 @@ async def run_source_sync(
             content_hash = ""
 
             if article.raw_metadata:
+
                 content_hash = (
                     article.raw_metadata.get(
                         "content_hash",
-                        ""
+                        "",
                     )
+                    or ""
                 )
 
             # -------------------------------------------------
@@ -450,15 +589,27 @@ async def run_source_sync(
             if not slug:
 
                 if content_hash:
+
                     slug = (
                         f"article-{content_hash[:12]}"
                     )
 
                 else:
-                    # Extremely unlikely, but prevents
-                    # an empty slug from reaching Supabase.
+
+                    # Extremely unlikely fallback.
+                    #
+                    # Use deterministic SHA-based fallback
+                    # instead of Python's randomized hash().
+                    import hashlib
+
+                    source_url_hash = hashlib.sha256(
+                        article.source_article_url.encode(
+                            "utf-8"
+                        )
+                    ).hexdigest()[:12]
+
                     slug = (
-                        f"article-{abs(hash(article.source_article_url))}"
+                        f"article-{source_url_hash}"
                     )
 
             # -------------------------------------------------
@@ -520,7 +671,9 @@ async def run_source_sync(
                     else None
                 ),
 
-                "content_hash": content_hash,
+                "content_hash": (
+                    content_hash
+                ),
 
                 "published_at": (
                     article.published_at
@@ -544,6 +697,7 @@ async def run_source_sync(
             )
 
             if not insert_response.data:
+
                 raise RuntimeError(
                     "Article insert returned no data"
                 )
@@ -557,7 +711,9 @@ async def run_source_sync(
             # =================================================
 
             (
-                db.table("article_sources")
+                db.table(
+                    "article_sources"
+                )
                 .insert(
                     {
                         "article_id": inserted[
@@ -579,8 +735,9 @@ async def run_source_sync(
 
         except Exception as exc:
 
-            # One broken article must never stop
-            # the entire feed.
+            # -------------------------------------------------
+            # ONE BROKEN ARTICLE MUST NOT STOP THE FEED
+            # -------------------------------------------------
 
             result.rejected += 1
 
@@ -619,8 +776,10 @@ async def run_source_sync(
 
     if result.errors == 0:
         status = "success"
+
     elif result.new > 0:
         status = "partial"
+
     else:
         status = "failed"
 
@@ -669,6 +828,7 @@ def _slugify(
     base = base[:80].strip("-")
 
     if hash_suffix:
+
         return (
             f"{base}-{hash_suffix[:8]}"
             if base
@@ -701,13 +861,21 @@ def _log_error(
     try:
 
         (
-            db.table("source_errors")
+            db.table(
+                "source_errors"
+            )
             .insert(
                 {
                     "source_id": source_id,
+
                     "sync_log_id": sync_log_id,
+
                     "error_type": error_type,
-                    "message": str(message)[:5000],
+
+                    "message": str(
+                        message
+                    )[:5000],
+
                     "context": context,
                 }
             )
@@ -718,7 +886,8 @@ def _log_error(
 
         # Logging failure must never crash ingestion.
         logger.exception(
-            "Failed to write source error to database"
+            "Failed to write source error "
+            "to database"
         )
 
 
@@ -736,7 +905,9 @@ def _finish_sync_log(
     try:
 
         (
-            db.table("source_sync_logs")
+            db.table(
+                "source_sync_logs"
+            )
             .update(
                 {
                     "finished_at": (

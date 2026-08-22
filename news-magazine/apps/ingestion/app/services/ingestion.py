@@ -100,7 +100,7 @@ async def run_source_sync(source_row: dict) -> IngestionResult:
                 }).execute()
                 continue
 
-           category_id = categorizer.classify(article.headline, article.excerpt) \
+          category_id = categorizer.classify(article.headline, article.excerpt) \
                 or source_row.get("default_category_id")
 
             row = {

@@ -1,97 +1,96 @@
+"""
+Content sanitization helpers.
+
+RSS/Atom content is untrusted input.
+
+Rules:
+- Never render raw feed HTML as trusted application HTML.
+- Strip HTML from headlines and excerpts.
+- Escape output before placing it inside generated HTML.
+- Limit lengths to prevent oversized database content.
+"""
+
 from __future__ import annotations
 
 import html
 import re
 
 
-# Remove dangerous HTML completely.
-_SCRIPT_STYLE_RE = re.compile(
-    r"<(script|style|iframe|object|embed|form|input|textarea|button|"
-    r"svg|math|link|meta)\b[^>]*>.*?</\1\s*>",
-    flags=re.IGNORECASE | re.DOTALL,
-)
-
-_TAG_RE = re.compile(
-    r"<[^>]*>",
-    flags=re.IGNORECASE,
-)
-
-_CONTROL_CHARS_RE = re.compile(
-    r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]"
-)
-
-_WHITESPACE_RE = re.compile(
-    r"\s+"
-)
+# Conservative limits.
+MAX_HEADLINE_LENGTH = 500
+MAX_EXCERPT_LENGTH = 2000
 
 
-def sanitize_plain_text(
-    value: str | None,
-    *,
-    max_length: int = 5000,
-) -> str:
+def _strip_html(value: str | None) -> str:
     """
-    Convert untrusted feed content into safe plain text.
+    Convert untrusted HTML/text into plain text.
 
-    This function is intentionally conservative:
-    - HTML tags are removed.
-    - Script/style and dangerous embedded elements are removed.
-    - HTML entities are decoded.
-    - Control characters are removed.
-    - Excessive whitespace is normalized.
-    - Output length is capped.
-
-    Never use this function as a replacement for an HTML sanitizer
-    when intentionally storing trusted HTML.
+    This intentionally removes all HTML instead of attempting
+    to maintain an allow-list of HTML tags.
     """
 
     if not value:
         return ""
 
-    value = str(value)
+    text = str(value)
 
-    # Remove dangerous blocks before stripping ordinary tags.
-    value = _SCRIPT_STYLE_RE.sub(" ", value)
+    # Remove script/style blocks completely.
+    text = re.sub(
+        r"<(script|style)\b[^>]*>.*?</\1>",
+        " ",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
 
-    # Remove any remaining HTML markup.
-    value = _TAG_RE.sub(" ", value)
+    # Remove comments.
+    text = re.sub(
+        r"<!--.*?-->",
+        " ",
+        text,
+        flags=re.DOTALL,
+    )
+
+    # Remove remaining HTML tags.
+    text = re.sub(
+        r"<[^>]*>",
+        " ",
+        text,
+    )
 
     # Decode entities such as:
-    # &amp; -> &
-    # &nbsp; -> space
-    value = html.unescape(value)
-
-    # Remove invisible/control characters.
-    value = _CONTROL_CHARS_RE.sub("", value)
+    # &amp; &quot; &#39; &nbsp;
+    text = html.unescape(text)
 
     # Normalize whitespace.
-    value = _WHITESPACE_RE.sub(" ", value).strip()
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    ).strip()
 
-    if max_length > 0:
-        value = value[:max_length].strip()
-
-    return value
+    return text
 
 
-def sanitize_excerpt(
+def sanitize_plain_text(
     value: str | None,
-    *,
-    max_length: int = 2000,
+    max_length: int | None = None,
 ) -> str:
     """
-    Sanitize an article/feed excerpt.
+    Return safe plain text.
+
+    No HTML is preserved.
     """
 
-    return sanitize_plain_text(
-        value,
-        max_length=max_length,
-    )
+    text = _strip_html(value)
+
+    if max_length is not None:
+        text = text[:max_length].strip()
+
+    return text
 
 
 def sanitize_headline(
     value: str | None,
-    *,
-    max_length: int = 500,
 ) -> str:
     """
     Sanitize an article headline.
@@ -99,28 +98,20 @@ def sanitize_headline(
 
     return sanitize_plain_text(
         value,
-        max_length=max_length,
+        MAX_HEADLINE_LENGTH,
     )
 
 
-def escape_html_text(
+def sanitize_excerpt(
     value: str | None,
 ) -> str:
     """
-    Escape plain text before inserting it into generated HTML.
-
-    Example:
-        <script>alert(1)</script>
-
-    becomes harmless HTML text.
+    Sanitize an article excerpt/summary.
     """
 
-    if not value:
-        return ""
-
-    return html.escape(
-        str(value),
-        quote=True,
+    return sanitize_plain_text(
+        value,
+        MAX_EXCERPT_LENGTH,
     )
 
 
@@ -128,15 +119,22 @@ def build_safe_paragraph(
     value: str | None,
 ) -> str:
     """
-    Convert plain text into a safe paragraph.
+    Convert untrusted text into safe HTML containing
+    exactly one paragraph.
 
-    This is useful when the ingestion pipeline needs a minimal
-    body_html value without allowing feed HTML to execute.
+    Important:
+    html.escape() happens AFTER stripping HTML so characters
+    such as < and > from the original feed cannot become tags.
     """
 
-    safe_text = sanitize_plain_text(value)
+    text = sanitize_excerpt(value)
 
-    if not safe_text:
+    if not text:
         return "<p></p>"
 
-    return f"<p>{escape_html_text(safe_text)}</p>"
+    escaped = html.escape(
+        text,
+        quote=True,
+    )
+
+    return f"<p>{escaped}</p>"

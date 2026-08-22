@@ -1,0 +1,9 @@
+node_modules/
+.next/
+.env
+.env.local
+apps/ingestion/.venv/
+apps/ingestion/__pycache__/
+apps/ingestion/**/__pycache__/
+.DS_Store
+*.log

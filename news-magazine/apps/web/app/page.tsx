@@ -180,7 +180,7 @@ export default function HomePage() {
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "articles" },
         (payload) => {
-          console.log("⚡ [Realtime] New Article Received:", payload.new);
+          console.log(" [Realtime] New Article Received:", payload.new);
 
           const newItem = payload.new;
           const formatted: Article = {
@@ -210,7 +210,7 @@ export default function HomePage() {
         }
       )
       .subscribe((status) => {
-        console.log("⚡ [Realtime] Subscription status:", status);
+        console.log(" [Realtime] Subscription status:", status);
       });
 
     return () => {

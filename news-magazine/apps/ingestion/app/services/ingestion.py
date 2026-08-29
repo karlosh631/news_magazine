@@ -2,7 +2,8 @@
 Orchestrates one full sync run for one source:
 
     fetch -> parse -> normalize -> validate -> dedupe -> categorize
-        -> sanitize -> Claude IEEE synthesis -> store (UPSERT) -> log
+        -> sanitize -> Claude IEEE synthesis -> media extraction
+        -> store (UPSERT) -> log
 
 A failure on one source never affects another.
 
@@ -12,7 +13,8 @@ Security principles:
 - Headlines and excerpts are sanitized before database storage.
 - Full article HTML is processed safely.
 - Claude generates structured IEEE standard content.
-- Database writes perform an idempotent UPSERT on unique constraints.
+- Database writes perform an idempotent UPSERT on unique constraints, so
+  every sync run refreshes media URLs (image/video/audio/gif) automatically.
 - A broken article must never stop the remaining feed.
 - Database errors are logged without crashing the entire ingestion service.
 """
@@ -44,6 +46,30 @@ logger = logging.getLogger("ingestion")
 # Valid IEEE Sector Taxonomies
 ALLOWED_SECTORS = ["Coding", "Hackathons", "Nepal Top News", "World News", "IT"]
 
+DEFAULT_COVER_IMAGE = (
+    "https://images.unsplash.com/photo-1518770660439-4636190af475?"
+    "auto=format&fit=crop&w=1200&q=80"
+)
+
+# Common attribute names / raw_metadata keys that adapters may use to carry
+# media links. Kept intentionally broad because different RSS feeds expose
+# media differently (media:content, enclosure, itunes tags, OG tags scraped
+# from the article HTML, etc.)
+IMAGE_ATTR_CANDIDATES = ["thumbnail_url", "image_url", "featured_image_url", "og_image"]
+VIDEO_ATTR_CANDIDATES = ["video_url", "media_video_url", "enclosure_video_url"]
+AUDIO_ATTR_CANDIDATES = ["audio_url", "media_audio_url", "enclosure_audio_url", "podcast_url"]
+GIF_ATTR_CANDIDATES = ["gif_url", "animated_image_url"]
+
+IMAGE_META_KEY_CANDIDATES = ["image_url", "thumbnail_url", "og_image", "media_image"]
+VIDEO_META_KEY_CANDIDATES = ["video_url", "enclosure_video_url", "media_video", "og_video"]
+AUDIO_META_KEY_CANDIDATES = ["audio_url", "enclosure_audio_url", "media_audio", "podcast_url"]
+GIF_META_KEY_CANDIDATES = ["gif_url", "animated_image_url", "media_gif"]
+
+IMAGE_EXT_RE = re.compile(r"\.(jpe?g|png|webp|avif)(\?|$)", re.IGNORECASE)
+VIDEO_EXT_RE = re.compile(r"\.(mp4|webm|mov|m3u8)(\?|$)", re.IGNORECASE)
+AUDIO_EXT_RE = re.compile(r"\.(mp3|wav|ogg|m4a)(\?|$)", re.IGNORECASE)
+GIF_EXT_RE = re.compile(r"\.gif(\?|$)", re.IGNORECASE)
+
 # =============================================================
 # ADAPTER REGISTRY
 # =============================================================
@@ -64,6 +90,99 @@ class IngestionResult:
         self.rejected = 0
         self.errors = 0
         self.error_details: list[dict] = []
+
+# =============================================================
+# MEDIA EXTRACTION
+# =============================================================
+
+def _first_attr(article, candidates: List[str]) -> Optional[str]:
+    """Return the first non-empty attribute value found on `article`."""
+    for attr in candidates:
+        value = getattr(article, attr, None)
+        if value:
+            return value
+    return None
+
+def _first_meta(raw_metadata: Optional[dict], candidates: List[str]) -> Optional[str]:
+    """Return the first non-empty value found in the article's raw_metadata dict."""
+    if not raw_metadata:
+        return None
+    for key in candidates:
+        value = raw_metadata.get(key)
+        if value:
+            return value
+    # Some feeds nest enclosures/media as a list of {"url": ..., "type": ...}
+    enclosures = raw_metadata.get("enclosures") or raw_metadata.get("media") or []
+    if isinstance(enclosures, list):
+        for item in enclosures:
+            if not isinstance(item, dict):
+                continue
+            url = item.get("url") or item.get("href")
+            mime = (item.get("type") or "").lower()
+            if not url:
+                continue
+            if "video" in mime or VIDEO_EXT_RE.search(url):
+                if candidates is VIDEO_META_KEY_CANDIDATES:
+                    return url
+            if "audio" in mime or AUDIO_EXT_RE.search(url):
+                if candidates is AUDIO_META_KEY_CANDIDATES:
+                    return url
+            if "gif" in mime or GIF_EXT_RE.search(url):
+                if candidates is GIF_META_KEY_CANDIDATES:
+                    return url
+            if "image" in mime or IMAGE_EXT_RE.search(url):
+                if candidates is IMAGE_META_KEY_CANDIDATES:
+                    return url
+    return None
+
+def extract_media_urls(article) -> Dict[str, Optional[str]]:
+    """
+    Best-effort extraction of image / video / audio / gif URLs from a
+    normalized article object. Looks first at dedicated attributes the
+    adapter may set, then falls back to raw_metadata (RSS enclosures,
+    media:content, OG tags, etc). Never raises — a missing/failed
+    extraction just yields None for that field so a single bad item
+    can never break the rest of the sync.
+    """
+    raw_metadata = getattr(article, "raw_metadata", None) or {}
+
+    try:
+        image_url = (
+            getattr(article, "thumbnail_url", None)
+            or _first_attr(article, IMAGE_ATTR_CANDIDATES)
+            or _first_meta(raw_metadata, IMAGE_META_KEY_CANDIDATES)
+        )
+        video_url = _first_attr(article, VIDEO_ATTR_CANDIDATES) or _first_meta(
+            raw_metadata, VIDEO_META_KEY_CANDIDATES
+        )
+        audio_url = _first_attr(article, AUDIO_ATTR_CANDIDATES) or _first_meta(
+            raw_metadata, AUDIO_META_KEY_CANDIDATES
+        )
+        gif_url = _first_attr(article, GIF_ATTR_CANDIDATES) or _first_meta(
+            raw_metadata, GIF_META_KEY_CANDIDATES
+        )
+
+        # A GIF is still valid as the "image" if nothing else is present.
+        if not image_url and gif_url:
+            image_url = gif_url
+
+        return {
+            "featured_image_url": image_url,
+            "video_url": video_url,
+            "audio_url": audio_url,
+            "gif_url": gif_url,
+        }
+    except Exception:
+        logger.exception(
+            "Media extraction failed for article: %s",
+            getattr(article, "headline", "unknown"),
+        )
+        return {
+            "featured_image_url": None,
+            "video_url": None,
+            "audio_url": None,
+            "gif_url": None,
+        }
 
 # =============================================================
 # ANTHROPIC CLAUDE IEEE SYNTHESIZER
@@ -250,7 +369,7 @@ async def run_source_sync(source_row: dict) -> IngestionResult:
         _finish_sync_log(db, sync_log_id, "failed", result)
         return result
 
-    # 6. PROCESS EACH SCRAEPD ITEM
+    # 6. PROCESS EACH SCRAPED ITEM
     for article in normalized:
         try:
             if not article.headline:
@@ -341,12 +460,14 @@ async def run_source_sync(source_row: dict) -> IngestionResult:
                 else ""
             )
 
+            # MEDIA EXTRACTION (image / video / audio / gif)
+            # Runs every sync, so re-ingesting a source refreshes media links
+            # automatically via the UPSERT below — no separate "sync media" step needed.
+            media = extract_media_urls(article)
+            cover_image = media["featured_image_url"] or DEFAULT_COVER_IMAGE
+
             # SLUG GENERATION
             slug = _slugify(ieee_paper["title"], sector_name, content_hash)
-            default_cover = (
-                article.thumbnail_url
-                or "https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=1200&q=80"
-            )
 
             post_payload = {
                 "slug": slug,
@@ -355,7 +476,10 @@ async def run_source_sync(source_row: dict) -> IngestionResult:
                 "content_ieee": ieee_paper["content_ieee"],
                 "sector": sector_name,
                 "references_json": ieee_paper.get("references", []),
-                "cover_image_url": default_cover,
+                "cover_image_url": cover_image,
+                "video_url": media["video_url"],
+                "audio_url": media["audio_url"],
+                "gif_url": media["gif_url"],
                 "published_at": article.published_at or datetime.now(timezone.utc).isoformat(),
             }
 
@@ -382,7 +506,10 @@ async def run_source_sync(source_row: dict) -> IngestionResult:
                 "status": "published",
                 "body_html": build_safe_paragraph(safe_excerpt),
                 "excerpt": safe_excerpt,
-                "featured_image_url": default_cover,
+                "featured_image_url": cover_image,
+                "video_url": media["video_url"],
+                "audio_url": media["audio_url"],
+                "gif_url": media["gif_url"],
                 "source_id": source_id,
                 "source_article_url": article.source_article_url,
                 "source_name_snapshot": source_row.get("name", "Unknown Source"),

@@ -4,8 +4,6 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
-// Keep this SVG identical to app/icon.svg (Next.js's auto-favicon file
-// convention) so the navbar icon and the browser tab icon match.
 const CATEGORIES = [
   { label: "National", slug: "national" },
   { label: "Politics", slug: "politics" },
@@ -15,7 +13,7 @@ const CATEGORIES = [
   { label: "Entertainment", slug: "entertainment" },
 ];
 
-const AUTO_REFRESH_MS = 60_000; // 1 minute, applies to every page via this shared Header
+const AUTO_REFRESH_MS = 60_000;
 
 function LogoIcon() {
   return (
@@ -45,7 +43,7 @@ export function Header() {
 
   const doRefresh = () => {
     setReloading(true);
-    router.refresh(); // re-runs server-component data fetching on whatever page you're on
+    router.refresh();
     window.setTimeout(() => setReloading(false), 700);
   };
 
@@ -54,12 +52,9 @@ export function Header() {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
-    // Solid white on mobile (no transparency/blur) per your request.
-    // md:bg-white/90 + md:backdrop-blur only kicks in at desktop widths.
     <header className="sticky top-0 z-50 border-b border-gray-200 bg-white md:bg-white/90 md:backdrop-blur">
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4">
         <Link
@@ -110,7 +105,6 @@ export function Header() {
         </div>
       </div>
 
-      {/* MOBILE DROPDOWN — solid white, never transparent */}
       {menuOpen && (
         <nav className="flex flex-col gap-1 border-t border-gray-200 bg-white px-4 py-3 md:hidden">
           {CATEGORIES.map((cat) => (

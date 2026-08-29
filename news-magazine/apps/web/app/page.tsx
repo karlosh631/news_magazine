@@ -140,12 +140,12 @@ async function fetchArticles(): Promise<Article[]> {
     slug: item.slug || item.id,
     headline: item.headline || item.title || "Untitled Article",
     excerpt: item.excerpt || item.abstract || null,
-    featured_image_url: item.featured_image_url || item.cover_image_url || null,
+    featured_image_url: item.featured_image_url || item.cover_image_url || item.image_url || null,
     video_url: item.video_url || null,
     audio_url: item.audio_url || null,
     gif_url: item.gif_url || null,
     published_at: item.published_at || null,
-    sector: item.category || "General",
+    sector: item.sector || item.category || "General",
   }));
 }
 
@@ -175,32 +175,43 @@ export default function HomePage() {
 
     // 2. Setup Supabase Realtime Listener for 'articles' table
     const articlesChannel = supabase
-      .channel("realtime-articles")
+      .channel("realtime-articles-feed")
       .on(
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "articles" },
         (payload) => {
+          console.log("⚡ [Realtime] New Article Received:", payload.new);
+
           const newItem = payload.new;
           const formatted: Article = {
             id: newItem.id || newItem.slug || String(Math.random()),
             slug: newItem.slug || newItem.id,
             headline: newItem.headline || newItem.title || "Untitled Article",
             excerpt: newItem.excerpt || newItem.abstract || null,
-            featured_image_url: newItem.featured_image_url || newItem.cover_image_url || null,
+            featured_image_url:
+              newItem.featured_image_url || newItem.cover_image_url || newItem.image_url || null,
             video_url: newItem.video_url || null,
             audio_url: newItem.audio_url || null,
             gif_url: newItem.gif_url || null,
             published_at: newItem.published_at || new Date().toISOString(),
-            sector: newItem.category || "General",
+            sector: newItem.sector || newItem.category || "General",
           };
 
           setArticles((prev) => {
-            if (prev.some((item) => item.slug === formatted.slug)) return prev;
+            // Prevent duplication
+            if (prev.some((item) => item.slug === formatted.slug || item.id === formatted.id)) {
+              return prev;
+            }
             return [formatted, ...prev];
           });
+
+          // Reset user view to Page 1 so newly inserted article is instantly visible
+          setPage(1);
         }
       )
-      .subscribe();
+      .subscribe((status) => {
+        console.log("⚡ [Realtime] Subscription status:", status);
+      });
 
     return () => {
       supabase.removeChannel(articlesChannel);

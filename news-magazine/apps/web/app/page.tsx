@@ -1,387 +1,358 @@
 import Link from "next/link";
+import Image from "next/image";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
-import { NewsCard } from "@/components/NewsCard";
-import { BreakingNewsTicker } from "@/components/BreakingNewsTicker";
-import { EmptyState } from "@/components/EmptyState";
+/* =========================================================
+   DYNAMIC ROUTING & NO-CACHE CONFIG (PER-MINUTE FRESHNESS)
+   ========================================================= */
 
-/*
- * Revalidate the homepage every 60 seconds.
- *
- * This means newly ingested articles can appear automatically
- * without manually rebuilding/deploying the website.
- */
-export const revalidate = 60;
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 /* =========================================================
    TYPES
    ========================================================= */
 
-type Category = {
-  id: string;
-  slug: string;
-  name: string;
+export type IEEEReference = {
+  id: number;
+  citation: string;
+  url?: string;
 };
 
-type Article = {
+export type Post = {
   id: string;
   slug: string;
-  headline: string;
-  excerpt: string | null;
-  featured_image_url: string | null;
-  published_at: string | null;
-  primary_category_id: string | null;
+  title: string;
+  abstract: string;
+  content_ieee: string;
+  sector: "Coding" | "Hackathons" | "Nepal Top News" | "World News" | "IT";
+  references_json: IEEEReference[];
+  cover_image_url: string | null;
+  media_type?: "image" | "video" | "audio";
+  media_url?: string | null;
+  published_at: string;
+  created_at: string;
 };
 
-type BreakingArticle = {
-  id: string;
-  slug: string;
-  headline: string;
-  featured_image_url: string | null;
-  published_at: string | null;
-};
+interface PageProps {
+  searchParams: Promise<{
+    page?: string;
+    sector?: string;
+    date?: string;
+  }>;
+}
+
+const ITEMS_PER_PAGE = 9;
+const ALL_SECTORS = ["Coding", "Hackathons", "Nepal Top News", "World News", "IT"];
 
 /* =========================================================
-   CATEGORY DISPLAY ORDER
+   DATABASE QUERY (LIFO + PAGINATION + FILTERS)
    ========================================================= */
 
-const CATEGORY_ORDER = [
-  "national",
-  "politics",
-  "business",
-  "technology",
-  "sports",
-  "entertainment",
-];
-
-/* =========================================================
-   GET HOMEPAGE DATA
-   ========================================================= */
-
-async function getHomepageData() {
+async function getPaginatedPosts(page: number, sector?: string, dateFilter?: string) {
   const supabase = createServerSupabaseClient();
+  const from = (page - 1) * ITEMS_PER_PAGE;
+  const to = from + ITEMS_PER_PAGE - 1;
 
-  /*
-   * Fetch categories first.
-   *
-   * We intentionally do this separately instead of relying on
-   * Supabase foreign-table relationships. This makes the
-   * application work even if the database relationship is not
-   * configured for nested selects.
-   */
-  const {
-    data: categories,
-    error: categoriesError,
-  } = await supabase
-    .from("categories")
-    .select("id, slug, name");
+  let query = supabase
+    .from("posts")
+    .select("*", { count: "exact" })
+    // LIFO Ordering: Latest publications show at the top
+    .order("published_at", { ascending: false })
+    .range(from, to);
 
-  if (categoriesError) {
-    console.error(
-      "[Homepage] Failed to load categories:",
-      categoriesError
-    );
+  if (sector && sector !== "ALL") {
+    query = query.eq("sector", sector);
   }
 
-  const allCategories: Category[] = categories ?? [];
-
-  /*
-   * Fetch breaking and latest news simultaneously.
-   */
-  const [
-    breakingResponse,
-    latestResponse,
-  ] = await Promise.all([
-    supabase
-      .from("articles")
-      .select(
-        "id, slug, headline, featured_image_url, published_at"
-      )
-      .eq("status", "published")
-      .eq("is_breaking", true)
-      .order("published_at", {
-        ascending: false,
-        nullsFirst: false,
-      })
-      .limit(8),
-
-    supabase
-      .from("articles")
-      .select(
-        [
-          "id",
-          "slug",
-          "headline",
-          "excerpt",
-          "featured_image_url",
-          "published_at",
-          "primary_category_id",
-        ].join(", ")
-      )
-      .eq("status", "published")
-      .order("published_at", {
-        ascending: false,
-        nullsFirst: false,
-      })
-      .limit(50),
-  ]);
-
-  if (breakingResponse.error) {
-    console.error(
-      "[Homepage] Failed to load breaking news:",
-      breakingResponse.error
-    );
+  if (dateFilter) {
+    // Filter by specific day string (YYYY-MM-DD)
+    const startDate = new Date(`${dateFilter}T00:00:00.000Z`).toISOString();
+    const endDate = new Date(`${dateFilter}T23:59:59.999Z`).toISOString();
+    query = query.gte("published_at", startDate).lte("published_at", endDate);
   }
 
-  if (latestResponse.error) {
-    console.error(
-      "[Homepage] Failed to load latest news:",
-      latestResponse.error
-    );
+  const { data, count, error } = await query;
+
+  if (error) {
+    console.error("[IEEE Engine] Database fetch error:", error);
   }
-
-  const breaking: BreakingArticle[] =
-    breakingResponse.data ?? [];
-
-  const latest: Article[] =
-    latestResponse.data ?? [];
-
-  /*
-   * Organize latest articles into their categories.
-   *
-   * We use primary_category_id rather than category slug
-   * because articles store the category UUID.
-   */
-  const categorySections = allCategories
-    .filter((category) =>
-      CATEGORY_ORDER.includes(category.slug)
-    )
-    .sort(
-      (a, b) =>
-        CATEGORY_ORDER.indexOf(a.slug) -
-        CATEGORY_ORDER.indexOf(b.slug)
-    )
-    .map((category) => ({
-      category,
-      articles: latest
-        .filter(
-          (article) =>
-            article.primary_category_id === category.id
-        )
-        .slice(0, 6),
-    }));
 
   return {
-    breaking,
-    latest,
-    categorySections,
+    posts: (data as Post[]) ?? [],
+    totalCount: count ?? 0,
+    totalPages: Math.ceil((count ?? 0) / ITEMS_PER_PAGE),
   };
 }
 
 /* =========================================================
-   CATEGORY SECTION
+   MULTIMEDIA & ANIMATED POST CARD COMPONENT
    ========================================================= */
 
-function CategorySection({
-  category,
-  articles,
-}: {
-  category: Category;
-  articles: Article[];
-}) {
-  /*
-   * Don't display an empty category section.
-   */
-  if (articles.length === 0) {
-    return null;
-  }
+function AnimatedPostCard({ post }: { post: Post }) {
+  const formattedDate = new Date(post.published_at).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 
   return (
-    <section
-      className="mt-12"
-      aria-labelledby={`category-${category.slug}`}
-    >
-      {/* ---------------------------------------------------
-          CATEGORY HEADER
-          --------------------------------------------------- */}
-
-      <div className="mb-5 flex items-center justify-between border-b pb-3">
-        <h2
-          id={`category-${category.slug}`}
-          className="font-headline text-2xl font-bold"
-        >
-          {category.name}
-        </h2>
-
-        <Link
-          href={`/category/${category.slug}`}
-          className="text-sm font-medium hover:underline"
-        >
-          View all →
-        </Link>
+    <article className="group relative flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm transition-all duration-300 hover:-translate-y-1 hover:shadow-xl hover:border-blue-500/30">
+      
+      {/* Sector Badge */}
+      <div className="absolute top-3 left-3 z-10">
+        <span className="inline-flex items-center rounded-full bg-slate-900/80 px-3 py-1 text-xs font-semibold text-white backdrop-blur-md">
+          {post.sector}
+        </span>
       </div>
 
-      {/* ---------------------------------------------------
-          CATEGORY ARTICLES
-          --------------------------------------------------- */}
-
-      <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
-        {articles.map((article) => (
-          <NewsCard
-            key={article.id}
-            article={article}
+      {/* Media Rendering Container (Images, Video, Audio) */}
+      <div className="relative h-48 w-full bg-slate-900 overflow-hidden">
+        {post.media_type === "video" && post.media_url ? (
+          <video
+            src={post.media_url}
+            controls
+            className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+            poster={post.cover_image_url || undefined}
           />
-        ))}
+        ) : post.cover_image_url ? (
+          <Image
+            src={post.cover_image_url}
+            alt={post.title}
+            fill
+            className="object-cover transition-transform duration-500 group-hover:scale-105"
+            sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-800 to-slate-950 text-slate-400">
+            <span className="text-sm font-medium">IEEE Technical Brief</span>
+          </div>
+        )}
+
+        {/* Pulse Live Animation Badge */}
+        <div className="absolute bottom-3 right-3 flex items-center space-x-1.5 rounded-full bg-emerald-500/90 px-2.5 py-0.5 text-[10px] font-bold text-white shadow-sm backdrop-blur-sm">
+          <span className="h-1.5 w-1.5 animate-ping rounded-full bg-white" />
+          <span>LIVE UPDATE</span>
+        </div>
       </div>
-    </section>
+
+      {/* Content Container */}
+      <div className="flex flex-1 flex-col p-5">
+        <div className="mb-2 text-xs font-medium text-slate-500">
+          <time dateTime={post.published_at}>{formattedDate}</time>
+        </div>
+
+        <h3 className="mb-2 text-lg font-bold leading-snug text-slate-900 transition-colors duration-200 group-hover:text-blue-600 line-clamp-2">
+          <Link href={`/article/${post.slug}`}>
+            <span className="absolute inset-0" />
+            {post.title}
+          </Link>
+        </h3>
+
+        <p className="mb-4 text-sm leading-relaxed text-slate-600 line-clamp-3">
+          {post.abstract}
+        </p>
+
+        {/* Audio Embed Player */}
+        {post.media_type === "audio" && post.media_url && (
+          <div className="mt-auto pt-2 z-20">
+            <audio controls src={post.media_url} className="w-full h-8" />
+          </div>
+        )}
+
+        {/* IEEE Ref Count Footer */}
+        <div className="mt-auto flex items-center justify-between border-t border-slate-100 pt-3 text-xs text-slate-500">
+          <span>
+            {post.references_json ? `${post.references_json.length} IEEE Ref(s)` : "Standard IEEE"}
+          </span>
+          <span className="font-semibold text-blue-600 group-hover:translate-x-1 transition-transform duration-200">
+            Read Publication →
+          </span>
+        </div>
+      </div>
+    </article>
   );
 }
 
 /* =========================================================
-   HOMEPAGE
+   MAIN HOMEPAGE WRAPPER
    ========================================================= */
 
-export default async function HomePage() {
-  let homepage;
+export default async function HomePage({ searchParams }: PageProps) {
+  const params = await searchParams;
+  const currentPage = Number(params.page) || 1;
+  const currentSector = params.sector || "ALL";
+  const currentDate = params.date || "";
 
-  /*
-   * Prevent the entire homepage from crashing because of
-   * an unexpected Supabase/network error.
-   */
-  try {
-    homepage = await getHomepageData();
-  } catch (error) {
-    console.error(
-      "[Homepage] Unexpected error:",
-      error
-    );
-
-    return (
-      <main className="mx-auto max-w-6xl px-4 py-16">
-        <div className="mx-auto max-w-xl text-center">
-          <h1 className="font-headline text-3xl font-bold">
-            Unable to load news
-          </h1>
-
-          <p className="mt-3 text-gray-600">
-            We couldn't load the latest news right now.
-            Please try again shortly.
-          </p>
-
-          <Link
-            href="/"
-            className="mt-6 inline-block rounded-md border px-5 py-2 text-sm font-medium hover:bg-gray-50"
-          >
-            Refresh
-          </Link>
-        </div>
-      </main>
-    );
-  }
-
-  const {
-    breaking,
-    latest,
-    categorySections,
-  } = homepage;
+  const { posts, totalPages, totalCount } = await getPaginatedPosts(
+    currentPage,
+    currentSector,
+    currentDate
+  );
 
   return (
-    <>
-      {/* ===================================================
-          BREAKING NEWS
-          =================================================== */}
+    <main className="mx-auto min-h-screen max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+      
+      {/* Header & Live Auto-Update Ticker */}
+      <header className="mb-8 border-b border-slate-200 pb-6">
+        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="relative flex h-3 w-3">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                <span className="relative inline-flex h-3 w-3 rounded-full bg-emerald-500" />
+              </span>
+              <span className="text-xs font-semibold uppercase tracking-wider text-emerald-600">
+                Auto-Updating Engine Active
+              </span>
+            </div>
+            <h1 className="mt-1 text-3xl font-extrabold tracking-tight text-slate-900 sm:text-4xl">
+              IEEE Daily Publications
+            </h1>
+            <p className="mt-1 text-sm text-slate-500">
+              Real-time LIFO IEEE standard news stream across Coding, Hackathons, Nepal & World IT.
+            </p>
+          </div>
 
-      {breaking.length > 0 && (
-        <BreakingNewsTicker items={breaking} />
+          {/* Quick Refresh Status */}
+          <div className="flex items-center gap-3">
+            <Link
+              href="/"
+              className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white transition hover:bg-slate-800 shadow-sm"
+            >
+              <svg className="h-3.5 w-3.5 animate-spin text-white" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              Auto-Sync
+            </Link>
+          </div>
+        </div>
+
+        {/* Date Filter & Sector Tabs Bar */}
+        <div className="mt-6 flex flex-wrap items-center justify-between gap-4 border-t border-slate-100 pt-4">
+          
+          {/* Sector Buttons */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Link
+              href={`/?sector=ALL${currentDate ? `&date=${currentDate}` : ""}`}
+              className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+                currentSector === "ALL"
+                  ? "bg-blue-600 text-white"
+                  : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+              }`}
+            >
+              All Sectors
+            </Link>
+            {ALL_SECTORS.map((sector) => (
+              <Link
+                key={sector}
+                href={`/?sector=${encodeURIComponent(sector)}${currentDate ? `&date=${currentDate}` : ""}`}
+                className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+                  currentSector === sector
+                    ? "bg-blue-600 text-white"
+                    : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                }`}
+              >
+                {sector}
+              </Link>
+            ))}
+          </div>
+
+          {/* Date Picker Filter */}
+          <form method="GET" className="flex items-center gap-2">
+            {currentSector !== "ALL" && (
+              <input type="hidden" name="sector" value={currentSector} />
+            )}
+            <label htmlFor="date" className="text-xs font-medium text-slate-600">
+              Filter by Date:
+            </label>
+            <input
+              type="date"
+              id="date"
+              name="date"
+              defaultValue={currentDate}
+              className="rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-700 shadow-sm focus:border-blue-500 focus:outline-none"
+            />
+            <button
+              type="submit"
+              className="rounded-md bg-slate-800 px-3 py-1 text-xs font-medium text-white hover:bg-slate-700"
+            >
+              Apply
+            </button>
+            {currentDate && (
+              <Link
+                href={`/?sector=${currentSector}`}
+                className="text-xs text-red-600 hover:underline"
+              >
+                Clear
+              </Link>
+            )}
+          </form>
+        </div>
+      </header>
+
+      {/* Publications Grid (LIFO Sequence) */}
+      {posts.length === 0 ? (
+        <div className="flex min-h-[300px] flex-col items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-slate-50/50 p-8 text-center">
+          <p className="text-base font-semibold text-slate-700">No IEEE publications found</p>
+          <p className="mt-1 text-xs text-slate-500">
+            Try resetting your filters or triggering the daily cron synthesizer at /api/cron/generate-ieee.
+          </p>
+          <Link
+            href="/"
+            className="mt-4 rounded-md bg-blue-600 px-4 py-2 text-xs font-medium text-white shadow hover:bg-blue-500"
+          >
+            Reset Filters
+          </Link>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+          {posts.map((post) => (
+            <AnimatedPostCard key={post.id} post={post} />
+          ))}
+        </div>
       )}
 
-      {/* ===================================================
-          MAIN CONTENT
-          =================================================== */}
-
-      <main className="mx-auto max-w-6xl px-4 py-8">
-
-        {/* =================================================
-            LATEST NEWS HEADER
-            ================================================= */}
-
-        <section aria-labelledby="latest-news-heading">
-          <div className="mb-5 flex items-center justify-between border-b pb-3">
-            <h1
-              id="latest-news-heading"
-              className="font-headline text-2xl font-bold"
-            >
-              ताजा समाचार · Latest News
-            </h1>
-
-            <Link
-              href="/search"
-              className="text-sm font-medium hover:underline"
-            >
-              Search →
-            </Link>
+      {/* Server Side Pagination Navigation */}
+      {totalPages > 1 && (
+        <nav className="mt-12 flex items-center justify-between border-t border-slate-200 pt-6">
+          <div className="text-xs text-slate-500">
+            Showing Page <span className="font-semibold text-slate-900">{currentPage}</span> of{" "}
+            <span className="font-semibold text-slate-900">{totalPages}</span> ({totalCount} Total Items)
           </div>
 
-          {/* -----------------------------------------------
-              NO ARTICLES
-              ----------------------------------------------- */}
+          <div className="flex items-center gap-2">
+            {currentPage > 1 ? (
+              <Link
+                href={`/?page=${currentPage - 1}${currentSector !== "ALL" ? `&sector=${currentSector}` : ""}${currentDate ? `&date=${currentDate}` : ""}`}
+                className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition"
+              >
+                ← Previous
+              </Link>
+            ) : (
+              <span className="cursor-not-allowed rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-300">
+                ← Previous
+              </span>
+            )}
 
-          {latest.length === 0 ? (
-            <EmptyState
-              title="No articles yet"
-              description="Once sources are enabled and the ingestion service runs its first sync, articles will appear here automatically."
-            />
-          ) : (
-            /* ---------------------------------------------
-               LATEST NEWS GRID
-               --------------------------------------------- */
-
-            <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
-              {latest
-                .slice(0, 12)
-                .map((article) => (
-                  <NewsCard
-                    key={article.id}
-                    article={article}
-                  />
-                ))}
-            </div>
-          )}
-        </section>
-
-        {/* =================================================
-            CATEGORY SECTIONS
-            ================================================= */}
-
-        {categorySections.map(
-          ({
-            category,
-            articles,
-          }) => (
-            <CategorySection
-              key={category.id}
-              category={category}
-              articles={articles}
-            />
-          )
-        )}
-
-        {/* =================================================
-            VIEW ALL NEWS
-            ================================================= */}
-
-        {latest.length > 12 && (
-          <div className="mt-10 text-center">
-            <Link
-              href="/search"
-              className="inline-flex rounded-md border px-6 py-3 text-sm font-medium transition hover:bg-gray-50"
-            >
-              View More News
-            </Link>
+            {currentPage < totalPages ? (
+              <Link
+                href={`/?page=${currentPage + 1}${currentSector !== "ALL" ? `&sector=${currentSector}` : ""}${currentDate ? `&date=${currentDate}` : ""}`}
+                className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition"
+              >
+                Next →
+              </Link>
+            ) : (
+              <span className="cursor-not-allowed rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-300">
+                Next →
+              </span>
+            )}
           </div>
-        )}
-
-      </main>
-    </>
+        </nav>
+      )}
+    </main>
   );
 }

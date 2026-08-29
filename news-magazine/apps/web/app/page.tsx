@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
 import { Pagination } from "@/components/Pagination";
 
@@ -16,7 +16,6 @@ const supabase = createClient(
 
 const PAGE_SIZE = 12;
 const FETCH_LIMIT = 300;
-const AUTO_REFRESH_MS = 60_000;
 const FALLBACK_IMAGE =
   "https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=1200&q=80";
 
@@ -188,7 +187,6 @@ export default function HomePage() {
   const [publications, setPublications] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const load = async () => {
     try {
@@ -202,10 +200,71 @@ export default function HomePage() {
   };
 
   useEffect(() => {
+    // 1. Initial Data Load
     load();
-    intervalRef.current = setInterval(load, AUTO_REFRESH_MS);
+
+    // 2. Realtime listener for 'posts' table
+    const postsChannel = supabase
+      .channel("realtime-posts")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "posts" },
+        (payload) => {
+          const newItem = payload.new;
+          const formatted: Post = {
+            id: newItem.id || newItem.slug || String(Math.random()),
+            slug: newItem.slug || newItem.id,
+            headline: newItem.headline || newItem.title || "Untitled Article",
+            excerpt: newItem.excerpt || newItem.abstract || null,
+            featured_image_url: newItem.featured_image_url || newItem.cover_image_url || null,
+            video_url: newItem.video_url || null,
+            audio_url: newItem.audio_url || null,
+            gif_url: newItem.gif_url || null,
+            published_at: newItem.published_at || new Date().toISOString(),
+            sector: newItem.sector || "General",
+          };
+
+          setPublications((prev) => {
+            if (prev.some((item) => item.slug === formatted.slug)) return prev;
+            return [formatted, ...prev];
+          });
+        }
+      )
+      .subscribe();
+
+    // 3. Realtime listener for 'articles' table
+    const articlesChannel = supabase
+      .channel("realtime-articles")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "articles" },
+        (payload) => {
+          const newItem = payload.new;
+          const formatted: Post = {
+            id: newItem.id || newItem.slug || String(Math.random()),
+            slug: newItem.slug || newItem.id,
+            headline: newItem.headline || newItem.title || "Untitled Article",
+            excerpt: newItem.excerpt || newItem.abstract || null,
+            featured_image_url: newItem.featured_image_url || newItem.cover_image_url || null,
+            video_url: newItem.video_url || null,
+            audio_url: newItem.audio_url || null,
+            gif_url: newItem.gif_url || null,
+            published_at: newItem.published_at || new Date().toISOString(),
+            sector: newItem.category || "General",
+          };
+
+          setPublications((prev) => {
+            if (prev.some((item) => item.slug === formatted.slug)) return prev;
+            return [formatted, ...prev];
+          });
+        }
+      )
+      .subscribe();
+
+    // Cleanup channels on unmount
     return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
+      supabase.removeChannel(postsChannel);
+      supabase.removeChannel(articlesChannel);
     };
   }, []);
 

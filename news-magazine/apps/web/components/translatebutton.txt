@@ -1,0 +1,104 @@
+"use client";
+
+import { useState } from "react";
+
+// MyMemory is free and needs no API key, but caps requests around ~500
+// chars each — so long article bodies get split into sentence-sized
+// chunks and translated in parallel, then re-joined.
+const MAX_CHUNK_CHARS = 450;
+
+function chunkText(text: string, maxLen: number): string[] {
+  const sentences = text.split(/(?<=[.!?।])\s+/); // "।" is the Devanagari sentence-ender
+  const chunks: string[] = [];
+  let current = "";
+
+  for (const sentence of sentences) {
+    if ((current + " " + sentence).trim().length > maxLen && current) {
+      chunks.push(current.trim());
+      current = sentence;
+    } else {
+      current = (current + " " + sentence).trim();
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks.length ? chunks : [text];
+}
+
+async function translateChunk(chunk: string, source: string, target: string): Promise<string> {
+  const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(chunk)}&langpair=${source}|${target}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Translation request failed (${res.status})`);
+  const data = await res.json();
+  return data?.responseData?.translatedText || chunk;
+}
+
+async function translateText(text: string, source: string, target: string): Promise<string> {
+  const chunks = chunkText(text, MAX_CHUNK_CHARS);
+  const translatedChunks = await Promise.all(chunks.map((c) => translateChunk(c, source, target)));
+  return translatedChunks.join(" ");
+}
+
+export function TranslateButton({
+  text,
+  sourceLanguage,
+  onTextChange,
+}: {
+  text: string;
+  sourceLanguage: "ne" | "en";
+  onTextChange: (text: string) => void;
+}) {
+  const [isTranslated, setIsTranslated] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const targetLanguage = sourceLanguage === "ne" ? "en" : "ne";
+  const targetLabel = targetLanguage === "en" ? "Translate to English" : "नेपालीमा अनुवाद गर्नुहोस्";
+  const revertLabel = "Show original";
+
+  const handleClick = async () => {
+    setError(null);
+
+    if (isTranslated) {
+      onTextChange(text);
+      setIsTranslated(false);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const translated = await translateText(text, sourceLanguage, targetLanguage);
+      onTextChange(translated);
+      setIsTranslated(true);
+    } catch (err) {
+      console.error("[TranslateButton] Translation failed:", err);
+      setError("Translation failed — please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-3">
+      <button
+        type="button"
+        onClick={handleClick}
+        disabled={loading}
+        className="flex items-center gap-2 rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:border-black hover:bg-gray-900 hover:text-white disabled:cursor-wait disabled:opacity-60"
+      >
+        {loading ? (
+          <>
+            <svg className="h-3.5 w-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
+              <path d="M20 11a8 8 0 1 0-2.34 5.66" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+            Translating…
+          </>
+        ) : isTranslated ? (
+          revertLabel
+        ) : (
+          targetLabel
+        )}
+      </button>
+      {error && <span className="text-xs text-red-500">{error}</span>}
+    </div>
+  );
+}

@@ -1,10 +1,10 @@
 "use client";
 
-interface PaginationProps {
+type PaginationProps = {
   currentPage: number;
   totalPages: number;
   onPageChange: (page: number) => void;
-}
+};
 
 export function Pagination({
   currentPage,
@@ -13,40 +13,29 @@ export function Pagination({
 }: PaginationProps) {
   if (totalPages <= 1) return null;
 
-  const hasPrev = currentPage > 1;
-  const hasNext = currentPage < totalPages;
-
   return (
-    <div className="mt-10 flex items-center justify-center gap-3">
+    <div className="mt-8 flex items-center justify-center gap-2">
       <button
         type="button"
-        disabled={!hasPrev}
+        disabled={currentPage === 1}
         onClick={() => onPageChange(currentPage - 1)}
-        className={`rounded-md border px-4 py-2 text-sm font-medium transition ${
-          hasPrev
-            ? "border-gray-300 text-gray-700 hover:border-black hover:bg-gray-900 hover:text-white"
-            : "cursor-not-allowed border-gray-200 text-gray-300"
-        }`}
+        className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
       >
-        ← Previous
+        Previous
       </button>
 
-      <span className="text-sm text-gray-600">
-        Page <span className="font-semibold text-gray-900">{currentPage}</span> of{" "}
-        <span className="font-semibold text-gray-900">{totalPages}</span>
+      <span className="px-3 text-sm text-gray-600">
+        Page <strong className="text-gray-900">{currentPage}</strong> of{" "}
+        <strong className="text-gray-900">{totalPages}</strong>
       </span>
 
       <button
         type="button"
-        disabled={!hasNext}
+        disabled={currentPage === totalPages}
         onClick={() => onPageChange(currentPage + 1)}
-        className={`rounded-md border px-4 py-2 text-sm font-medium transition ${
-          hasNext
-            ? "border-gray-300 text-gray-700 hover:border-black hover:bg-gray-900 hover:text-white"
-            : "cursor-not-allowed border-gray-200 text-gray-300"
-        }`}
+        className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
       >
-        Next →
+        Next
       </button>
     </div>
   );

@@ -9,9 +9,6 @@ import { createClient } from "@supabase/supabase-js";
 // CONFIG
 // =============================================================
 
-// Requires NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY to be
-// set in your Vercel project (client-side code can only use NEXT_PUBLIC_*
-// env vars — never put a service-role key here).
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL as string,
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string
@@ -46,33 +43,67 @@ type Post = {
 };
 
 // =============================================================
-// ICONS
+// ICONS & LOGO
 // =============================================================
 
-function LogoIcon() {
+function BrandLogo({ spinning }: { spinning: boolean }) {
   return (
-    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" className="shrink-0" aria-hidden="true">
-      <rect x="2" y="4" width="20" height="16" rx="2" stroke="currentColor" strokeWidth="1.6" />
-      <path d="M6 8h6M6 11h6M6 14h3" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-      <rect x="14" y="8" width="4" height="4" rx="0.5" stroke="currentColor" strokeWidth="1.4" />
-      <path d="M14 15h4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-    </svg>
-  );
-}
+    <div className="relative shrink-0">
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        viewBox="0 0 64 64"
+        className={`h-9 w-9 sm:h-10 sm:w-10 transform transition-all duration-300 ease-out 
+          group-hover:-translate-y-1 group-hover:scale-105 group-hover:rotate-2 group-hover:drop-shadow-[0_4px_14px_rgba(6,182,212,0.45)] 
+          active:translate-y-0 active:scale-95 ${spinning ? "animate-spin" : ""}`}
+      >
+        <defs>
+          <linearGradient id="nav-bg" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stopColor="#111827" />
+            <stop offset="55%" stopColor="#1d4ed8" />
+            <stop offset="100%" stopColor="#06b6d4" />
+          </linearGradient>
 
-function ReloadIcon({ spinning }: { spinning: boolean }) {
-  return (
-    <svg
-      width="18"
-      height="18"
-      viewBox="0 0 24 24"
-      fill="none"
-      className={spinning ? "animate-spin" : ""}
-      aria-hidden="true"
-    >
-      <path d="M20 11a8 8 0 1 0-2.34 5.66" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-      <path d="M20 5v6h-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
+          <linearGradient id="nav-accent" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stopColor="#ffffff" />
+            <stop offset="100%" stopColor="#dbeafe" />
+          </linearGradient>
+
+          <filter id="nav-shadow" x="-20%" y="-20%" width="140%" height="140%">
+            <feDropShadow dx="0" dy="2" stdDeviation="2" floodOpacity="0.28" />
+          </filter>
+        </defs>
+
+        {/* Background Card */}
+        <rect width="64" height="64" rx="16" fill="url(#nav-bg)" />
+
+        {/* Globe Overlay */}
+        <circle cx="32" cy="32" r="22" fill="none" stroke="#ffffff" strokeOpacity="0.12" strokeWidth="1.5" />
+        <ellipse cx="32" cy="32" rx="10" ry="22" fill="none" stroke="#ffffff" strokeOpacity="0.10" strokeWidth="1.5" />
+        <path d="M10 32h44" fill="none" stroke="#ffffff" strokeOpacity="0.10" strokeWidth="1.5" />
+
+        {/* N24 Monogram */}
+        <g filter="url(#nav-shadow)">
+          <path d="M14 44V20h5l10 15V20h6v24h-5L20 29v15z" fill="url(#nav-accent)" />
+          <path
+            d="M39 25 c0-3 2-5 6-5 c4 0 6 2 6 5 c0 3-2 5-5 7 l-4 3h9v5H35v-4 l10-8 c1-1 2-2 2-3 c0-1-1-2-2-2 c-1 0-2 1-2 3z"
+            fill="url(#nav-accent)"
+          />
+        </g>
+
+        {/* Breaking-News Pulse Indicator */}
+        <circle cx="51" cy="13" r="5" fill="#ef4444" />
+        <circle cx="51" cy="13" r="2" fill="#ffffff" />
+
+        {/* Signal Lines */}
+        <path d="M43 10h5" stroke="#ffffff" strokeWidth="2" strokeLinecap="round" opacity="0.9" />
+      </svg>
+
+      {/* Live Badge Signal Ring */}
+      <span className="absolute -top-1 -right-1 flex h-3.5 w-3.5">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-75"></span>
+        <span className="relative inline-flex h-3.5 w-3.5 rounded-full bg-red-500"></span>
+      </span>
+    </div>
   );
 }
 
@@ -86,14 +117,22 @@ function Navbar({ onReload, reloading }: { onReload: () => void; reloading: bool
   return (
     <header className="sticky top-0 z-50 border-b border-gray-200 bg-white/90 backdrop-blur">
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4">
-        <Link
-          href="/"
-          className="flex items-center gap-2 font-bold text-gray-900 transition hover:text-blue-600 sm:text-xl"
+        
+        {/* Click-to-Reload Brand Logo & Title */}
+        <button
+          type="button"
+          onClick={onReload}
+          title="Click to reload latest news stream"
+          aria-label="Reload homepage feed"
+          className="group flex items-center gap-3 border-0 bg-transparent text-left outline-none cursor-pointer focus:outline-none"
         >
-          <LogoIcon />
-          <span className="truncate">Nepal News &amp; Magazine</span>
-        </Link>
+          <BrandLogo spinning={reloading} />
+          <span className="font-bold text-gray-900 transition-colors group-hover:text-blue-600 sm:text-xl truncate">
+            Nepal News &amp; Magazine
+          </span>
+        </button>
 
+        {/* Desktop Category Navigation */}
         <nav className="hidden items-center gap-1 md:flex">
           {CATEGORIES.map((cat) => (
             <Link
@@ -106,16 +145,8 @@ function Navbar({ onReload, reloading }: { onReload: () => void; reloading: bool
           ))}
         </nav>
 
+        {/* Actions & Mobile Menu Toggle */}
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={onReload}
-            aria-label="Reload latest news"
-            className="flex h-9 w-9 items-center justify-center rounded-full border border-gray-300 text-gray-700 transition hover:border-black hover:bg-gray-900 hover:text-white active:scale-95"
-          >
-            <ReloadIcon spinning={reloading} />
-          </button>
-
           <button
             type="button"
             onClick={() => setMenuOpen((v) => !v)}
@@ -134,6 +165,7 @@ function Navbar({ onReload, reloading }: { onReload: () => void; reloading: bool
         </div>
       </div>
 
+      {/* Mobile Drawer Menu */}
       {menuOpen && (
         <nav className="flex flex-col gap-1 border-t border-gray-200 bg-white px-4 py-3 md:hidden">
           {CATEGORIES.map((cat) => (
@@ -409,58 +441,58 @@ export default function HomePage() {
       <Navbar onReload={load} reloading={reloading} />
 
       <main className="mx-auto max-w-7xl px-4 py-8">
-          <div className="mb-8 flex flex-col gap-4 border-b pb-6 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <span className="text-xs font-semibold uppercase tracking-wider text-gray-500">
-                UPDATING ENGINE
-              </span>
-              <h1 className="text-2xl font-bold text-gray-900 mt-1 sm:text-3xl">
-                Daily Publications &amp; News
-              </h1>
-              <p className="mt-1 text-sm text-gray-600">Real-time news stream across Nepal &amp; World.</p>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <input
-                type="search"
-                value={query}
-                onChange={(e) => {
-                  setQuery(e.target.value);
-                  setPage(1);
-                }}
-                placeholder="Search news..."
-                className="h-10 w-full rounded-md border border-gray-300 px-3 text-sm outline-none focus:border-black focus:ring-1 focus:ring-black sm:w-64"
-              />
-            </div>
+        <div className="mb-8 flex flex-col gap-4 border-b pb-6 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <span className="text-xs font-semibold uppercase tracking-wider text-gray-500">
+              UPDATING ENGINE
+            </span>
+            <h1 className="text-2xl font-bold text-gray-900 mt-1 sm:text-3xl">
+              Daily Publications &amp; News
+            </h1>
+            <p className="mt-1 text-sm text-gray-600">Real-time news stream across Nepal &amp; World.</p>
           </div>
 
-          {loading ? (
-            <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
-              {Array.from({ length: 6 }).map((_, i) => (
-                <div key={i} className="overflow-hidden rounded-lg border border-gray-200 bg-white">
-                  <div className="aspect-video w-full animate-pulse bg-gray-200" />
-                  <div className="space-y-2 p-4">
-                    <div className="h-4 w-5/6 animate-pulse rounded bg-gray-200" />
-                    <div className="h-4 w-2/3 animate-pulse rounded bg-gray-200" />
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : pageItems.length === 0 ? (
-            <EmptyState
-              title="No publications found"
-              description="Try a different search term, or run your ingestion worker to import the latest news."
+          <div className="flex items-center gap-2">
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setPage(1);
+              }}
+              placeholder="Search news..."
+              className="h-10 w-full rounded-md border border-gray-300 px-3 text-sm outline-none focus:border-black focus:ring-1 focus:ring-black sm:w-64"
             />
-          ) : (
-            <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
-              {pageItems.map((item) => (
-                <NewsCard key={item.id} article={item} />
-              ))}
-            </div>
-          )}
+          </div>
+        </div>
 
-          <Pagination currentPage={safePage} totalPages={totalPages} onPageChange={setPage} />
-        </main>
+        {loading ? (
+          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+                <div className="aspect-video w-full animate-pulse bg-gray-200" />
+                <div className="space-y-2 p-4">
+                  <div className="h-4 w-5/6 animate-pulse rounded bg-gray-200" />
+                  <div className="h-4 w-2/3 animate-pulse rounded bg-gray-200" />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : pageItems.length === 0 ? (
+          <EmptyState
+            title="No publications found"
+            description="Try a different search term, or run your ingestion worker to import the latest news."
+          />
+        ) : (
+          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+            {pageItems.map((item) => (
+              <NewsCard key={item.id} article={item} />
+            ))}
+          </div>
+        )}
+
+        <Pagination currentPage={safePage} totalPages={totalPages} onPageChange={setPage} />
+      </main>
     </>
   );
 }

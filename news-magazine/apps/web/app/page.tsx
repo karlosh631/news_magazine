@@ -121,13 +121,13 @@ export default async function HomePage({ searchParams }: HomePageProps) {
       <div className="mb-8 flex flex-col gap-4 border-b pb-6 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <span className="text-xs font-semibold uppercase tracking-wider text-gray-500">
-            AUTO-UPDATING ENGINE ACTIVE
+            UPDATING ENGINE
           </span>
           <h1 className="font-headline text-3xl font-bold text-gray-900 mt-1">
             Daily Publications & News
           </h1>
           <p className="mt-1 text-sm text-gray-600">
-            Real-time LIFO news stream across Coding, Hackathons, Nepal & World IT.
+            Real-time news stream across Nepal & World.
           </p>
         </div>
 

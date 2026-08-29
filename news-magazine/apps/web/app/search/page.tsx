@@ -1,202 +1,141 @@
-import Link from "next/link";
-
 import { createServerSupabaseClient } from "@/lib/supabase/server";
-import { NewsCard } from "@/components/NewsCard";
+import { NewsCard, type NewsCardArticle } from "@/components/NewsCard";
 import { EmptyState } from "@/components/EmptyState";
+import { Pagination } from "@/components/Pagination";
 
-export const revalidate = 60;
+export const revalidate = 0;
 
-type SearchArticle = {
-  id: string;
-  slug: string;
-  headline: string;
-  excerpt: string | null;
-  featured_image_url: string | null;
-  published_at: string | null;
+const PAGE_SIZE = 12;
+const FETCH_LIMIT = 300;
+
+type HomePageProps = {
+  searchParams: Promise<{ q?: string; page?: string }>;
 };
 
-type SearchPageProps = {
-  searchParams: Promise<{
-    q?: string;
-  }>;
-};
-
-async function searchArticles(query: string) {
+async function getPublications(): Promise<NewsCardArticle[]> {
   const supabase = createServerSupabaseClient();
 
-  const cleanQuery = query.trim();
+  const { data: postsData, error: postsError } = await supabase
+    .from("posts")
+    .select("*")
+    .order("published_at", { ascending: false })
+    .limit(FETCH_LIMIT);
+  if (postsError) console.error("[Database] 'posts' query error:", postsError.message);
 
-  if (!cleanQuery) {
-    return [];
-  }
-
-  /*
-   * Search published articles only.
-   *
-   * headline.ilike searches the headline.
-   * excerpt.ilike searches the excerpt.
-   */
-  const pattern = `%${cleanQuery}%`;
-
-  const { data, error } = await supabase
+  const { data: articlesData, error: articlesError } = await supabase
     .from("articles")
-    .select(
-      [
-        "id",
-        "slug",
-        "headline",
-        "excerpt",
-        "featured_image_url",
-        "published_at",
-      ].join(", ")
-    )
-    .eq("status", "published")
-    .or(
-      `headline.ilike.${pattern},excerpt.ilike.${pattern}`
-    )
-    .order("published_at", {
-      ascending: false,
-      nullsFirst: false,
-    })
-    .limit(50);
+    .select("*")
+    .order("published_at", { ascending: false })
+    .limit(FETCH_LIMIT);
+  if (articlesError) console.error("[Database] 'articles' query error:", articlesError.message);
 
-  if (error) {
-    console.error(
-      "[Search] Failed to search articles:",
-      error
-    );
+  const formattedPosts: NewsCardArticle[] = (postsData ?? []).map((item) => ({
+    id: item.id || item.slug || String(Math.random()),
+    slug: item.slug || item.id,
+    headline: item.headline || item.title || "Untitled Article",
+    excerpt: item.excerpt || item.abstract || item.content_ieee?.slice(0, 160) || null,
+    featured_image_url: item.featured_image_url || item.cover_image_url || null,
+    video_url: item.video_url || null,
+    audio_url: item.audio_url || null,
+    gif_url: item.gif_url || null,
+    published_at: item.published_at || null,
+    sector: item.sector || "General",
+  }));
 
-    return [];
+  const formattedArticles: NewsCardArticle[] = (articlesData ?? []).map((item) => ({
+    id: item.id || item.slug || String(Math.random()),
+    slug: item.slug || item.id,
+    headline: item.headline || item.title || "Untitled Article",
+    excerpt: item.excerpt || item.abstract || null,
+    featured_image_url: item.featured_image_url || item.cover_image_url || null,
+    video_url: item.video_url || null,
+    audio_url: item.audio_url || null,
+    gif_url: item.gif_url || null,
+    published_at: item.published_at || null,
+    sector: item.category || "General",
+  }));
+
+  const combined = [...formattedPosts, ...formattedArticles];
+  const uniqueMap = new Map<string, NewsCardArticle>();
+  for (const item of combined) {
+    if (item.slug && !uniqueMap.has(item.slug)) uniqueMap.set(item.slug, item);
   }
 
-  return (data ?? []) as SearchArticle[];
+  return Array.from(uniqueMap.values()).sort((a, b) => {
+    const aTime = a.published_at ? new Date(a.published_at).getTime() : 0;
+    const bTime = b.published_at ? new Date(b.published_at).getTime() : 0;
+    return bTime - aTime;
+  });
 }
 
-export default async function SearchPage({
-  searchParams,
-}: SearchPageProps) {
+export default async function HomePage({ searchParams }: HomePageProps) {
   const params = await searchParams;
-  const query = params.q?.trim() ?? "";
+  const query = (params.q || "").trim().toLowerCase();
+  const currentPage = Math.max(1, parseInt(params.page || "1", 10) || 1);
 
-  const results = await searchArticles(query);
+  let publications: NewsCardArticle[] = [];
+  try {
+    publications = await getPublications();
+  } catch (err) {
+    console.error("[HomePage] Failed to load publications:", err);
+  }
+
+  const filtered = query
+    ? publications.filter(
+        (item) =>
+          item.headline.toLowerCase().includes(query) ||
+          (item.excerpt || "").toLowerCase().includes(query)
+      )
+    : publications;
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(currentPage, totalPages);
+  const pageItems = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   return (
-    <main className="mx-auto max-w-6xl px-4 py-8">
-      {/* =================================================
-          PAGE HEADER
-          ================================================= */}
+    <main className="mx-auto max-w-7xl px-4 py-8">
+      <div className="mb-8 flex flex-col gap-4 border-b pb-6 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <span className="text-xs font-semibold uppercase tracking-wider text-gray-500">
+            UPDATING ENGINE
+          </span>
+          <h1 className="text-2xl font-bold text-gray-900 mt-1 sm:text-3xl">
+            Daily Publications &amp; News
+          </h1>
+          <p className="mt-1 text-sm text-gray-600">Real-time news stream across Nepal &amp; World.</p>
+        </div>
 
-      <div className="mb-8">
-        <h1 className="font-headline text-3xl font-bold">
-          Search News
-        </h1>
-
-        <p className="mt-2 text-sm text-gray-600">
-          Search published news by headline or excerpt.
-        </p>
-      </div>
-
-      {/* =================================================
-          SEARCH FORM
-          ================================================= */}
-
-      <form
-        action="/search"
-        method="GET"
-        className="mb-10"
-      >
-        <div className="flex flex-col gap-3 sm:flex-row">
+        <form action="/" method="GET" className="flex items-center gap-2">
           <input
             type="search"
             name="q"
-            defaultValue={query}
+            defaultValue={params.q || ""}
             placeholder="Search news..."
-            aria-label="Search news"
-            className="min-h-12 flex-1 rounded-md border border-gray-300 px-4 text-base outline-none transition focus:border-gray-500 focus:ring-2 focus:ring-gray-200"
+            className="h-10 w-full rounded-md border border-gray-300 px-3 text-sm outline-none focus:border-black focus:ring-1 focus:ring-black sm:w-64"
           />
-
           <button
             type="submit"
-            className="min-h-12 rounded-md bg-black px-6 font-medium text-white transition hover:opacity-90"
+            className="h-10 shrink-0 rounded-md bg-black px-4 text-sm font-medium text-white transition hover:bg-gray-800"
           >
             Search
           </button>
-        </div>
-      </form>
-
-      {/* =================================================
-          NO SEARCH QUERY
-          ================================================= */}
-
-      {!query && (
-        <EmptyState
-          title="Search for news"
-          description="Enter a keyword above to search the latest published articles."
-        />
-      )}
-
-      {/* =================================================
-          SEARCH RESULTS
-          ================================================= */}
-
-      {query && (
-        <section aria-labelledby="search-results-heading">
-          <div className="mb-5 border-b pb-3">
-            <h2
-              id="search-results-heading"
-              className="font-headline text-2xl font-bold"
-            >
-              Search results
-            </h2>
-
-            <p className="mt-1 text-sm text-gray-600">
-              Results for{" "}
-              <span className="font-semibold">
-                “{query}”
-              </span>
-            </p>
-          </div>
-
-          {results.length === 0 ? (
-            <EmptyState
-              title="No articles found"
-              description={`We couldn't find any published articles matching “${query}”. Try another keyword.`}
-            />
-          ) : (
-            <>
-              <p className="mb-5 text-sm text-gray-500">
-                {results.length}{" "}
-                {results.length === 1
-                  ? "article"
-                  : "articles"}{" "}
-                found
-              </p>
-
-              <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
-                {results.map((article) => (
-                  <NewsCard
-                    key={article.id}
-                    article={article}
-                  />
-                ))}
-              </div>
-            </>
-          )}
-        </section>
-      )}
-
-      {/* =================================================
-          BACK TO HOME
-          ================================================= */}
-
-      <div className="mt-12 border-t pt-6">
-        <Link
-          href="/"
-          className="text-sm font-medium hover:underline"
-        >
-          ← Back to Latest News
-        </Link>
+        </form>
       </div>
+
+      {pageItems.length === 0 ? (
+        <EmptyState
+          title="No publications found"
+          description="Try a different search term, or run your ingestion worker to import the latest news."
+        />
+      ) : (
+        <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+          {pageItems.map((item) => (
+            <NewsCard key={item.id} article={item} />
+          ))}
+        </div>
+      )}
+
+      <Pagination basePath="/" currentPage={safePage} totalPages={totalPages} searchParams={{ q: params.q }} />
     </main>
   );
 }

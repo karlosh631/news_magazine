@@ -14,7 +14,7 @@ export function Pagination({
   if (totalPages <= 1) return null;
 
   return (
-    <div className="mt-8 flex items-center justify-center gap-2">
+    <nav aria-label="Pagination" className="mt-8 flex items-center justify-center gap-2">
       <button
         type="button"
         disabled={currentPage === 1}
@@ -37,6 +37,6 @@ export function Pagination({
       >
         Next
       </button>
-    </div>
+    </nav>
   );
 }

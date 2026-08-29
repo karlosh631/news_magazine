@@ -187,7 +187,6 @@ async function fetchPublications(): Promise<Post[]> {
 export default function HomePage() {
   const [publications, setPublications] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
-  const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -210,46 +209,12 @@ export default function HomePage() {
     };
   }, []);
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return publications;
-    return publications.filter(
-      (item) =>
-        item.headline.toLowerCase().includes(q) || (item.excerpt || "").toLowerCase().includes(q)
-    );
-  }, [publications, query]);
-
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(publications.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
-  const pageItems = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  const pageItems = publications.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8">
-      <div className="mb-8 flex flex-col gap-4 border-b border-gray-200 pb-6 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <span className="text-xs font-semibold uppercase tracking-wider text-gray-500">
-            UPDATING ENGINE
-          </span>
-          <h1 className="mt-1 text-2xl font-bold text-gray-900 sm:text-3xl">
-            Daily Publications &amp; News
-          </h1>
-          <p className="mt-1 text-sm text-gray-600">Real-time news stream across Nepal &amp; World.</p>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <input
-            type="search"
-            value={query}
-            onChange={(e) => {
-              setQuery(e.target.value);
-              setPage(1);
-            }}
-            placeholder="Search news..."
-            className="h-10 w-full rounded-md border border-gray-300 px-3 text-sm outline-none focus:border-black focus:ring-1 focus:ring-black sm:w-64"
-          />
-        </div>
-      </div>
-
       {loading ? (
         <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 6 }).map((_, i) => (
@@ -265,7 +230,7 @@ export default function HomePage() {
       ) : pageItems.length === 0 ? (
         <EmptyState
           title="No publications found"
-          description="Try a different search term, or run your ingestion worker to import the latest news."
+          description="Run your ingestion worker to import the latest news."
         />
       ) : (
         <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">

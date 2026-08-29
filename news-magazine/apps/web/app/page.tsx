@@ -19,7 +19,7 @@ const FETCH_LIMIT = 300;
 const FALLBACK_IMAGE =
   "https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=1200&q=80";
 
-type Post = {
+type Article = {
   id: string;
   slug: string;
   headline: string;
@@ -33,7 +33,7 @@ type Post = {
 };
 
 // =============================================================
-// HELPERS & NEWS CARD
+// HELPERS & CARD
 // =============================================================
 
 function formatDate(value: string | null) {
@@ -49,7 +49,7 @@ function formatDate(value: string | null) {
   });
 }
 
-function NewsCard({ article }: { article: Post }) {
+function NewsCard({ article }: { article: Article }) {
   const imageSrc = article.gif_url || article.featured_image_url || FALLBACK_IMAGE;
 
   return (
@@ -123,37 +123,19 @@ function EmptyState({ title, description }: { title: string; description?: strin
 // DATA FETCH
 // =============================================================
 
-async function fetchPublications(): Promise<Post[]> {
-  const { data: postsData, error: postsError } = await supabase
-    .from("posts")
-    .select("*")
-    .order("published_at", { ascending: false })
-    .limit(FETCH_LIMIT);
-
-  if (postsError) console.error("[Database] 'posts' query error:", postsError.message);
-
-  const { data: articlesData, error: articlesError } = await supabase
+async function fetchArticles(): Promise<Article[]> {
+  const { data, error } = await supabase
     .from("articles")
     .select("*")
     .order("published_at", { ascending: false })
     .limit(FETCH_LIMIT);
 
-  if (articlesError) console.error("[Database] 'articles' query error:", articlesError.message);
+  if (error) {
+    console.error("[Database] 'articles' query error:", error.message);
+    return [];
+  }
 
-  const formattedPosts: Post[] = (postsData ?? []).map((item: any) => ({
-    id: item.id || item.slug || String(Math.random()),
-    slug: item.slug || item.id,
-    headline: item.headline || item.title || "Untitled Article",
-    excerpt: item.excerpt || item.abstract || item.content_ieee?.slice(0, 160) || null,
-    featured_image_url: item.featured_image_url || item.cover_image_url || null,
-    video_url: item.video_url || null,
-    audio_url: item.audio_url || null,
-    gif_url: item.gif_url || null,
-    published_at: item.published_at || null,
-    sector: item.sector || "General",
-  }));
-
-  const formattedArticles: Post[] = (articlesData ?? []).map((item: any) => ({
+  return (data ?? []).map((item: any) => ({
     id: item.id || item.slug || String(Math.random()),
     slug: item.slug || item.id,
     headline: item.headline || item.title || "Untitled Article",
@@ -165,74 +147,33 @@ async function fetchPublications(): Promise<Post[]> {
     published_at: item.published_at || null,
     sector: item.category || "General",
   }));
-
-  const combined = [...formattedPosts, ...formattedArticles];
-  const uniqueMap = new Map<string, Post>();
-  for (const item of combined) {
-    if (item.slug && !uniqueMap.has(item.slug)) uniqueMap.set(item.slug, item);
-  }
-
-  return Array.from(uniqueMap.values()).sort((a, b) => {
-    const aTime = a.published_at ? new Date(a.published_at).getTime() : 0;
-    const bTime = b.published_at ? new Date(b.published_at).getTime() : 0;
-    return bTime - aTime;
-  });
 }
 
 // =============================================================
-// PAGE
+// PAGE COMPONENT
 // =============================================================
 
 export default function HomePage() {
-  const [publications, setPublications] = useState<Post[]>([]);
+  const [articles, setArticles] = useState<Article[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
 
   const load = async () => {
     try {
-      const data = await fetchPublications();
-      setPublications(data);
+      const data = await fetchArticles();
+      setArticles(data);
     } catch (err) {
-      console.error("[HomePage] Failed to load publications:", err);
+      console.error("[HomePage] Failed to load articles:", err);
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    // 1. Initial Data Load
+    // 1. Initial Data Fetch
     load();
 
-    // 2. Realtime listener for 'posts' table
-    const postsChannel = supabase
-      .channel("realtime-posts")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "posts" },
-        (payload) => {
-          const newItem = payload.new;
-          const formatted: Post = {
-            id: newItem.id || newItem.slug || String(Math.random()),
-            slug: newItem.slug || newItem.id,
-            headline: newItem.headline || newItem.title || "Untitled Article",
-            excerpt: newItem.excerpt || newItem.abstract || null,
-            featured_image_url: newItem.featured_image_url || newItem.cover_image_url || null,
-            video_url: newItem.video_url || null,
-            audio_url: newItem.audio_url || null,
-            gif_url: newItem.gif_url || null,
-            published_at: newItem.published_at || new Date().toISOString(),
-            sector: newItem.sector || "General",
-          };
-
-          setPublications((prev) => {
-            if (prev.some((item) => item.slug === formatted.slug)) return prev;
-            return [formatted, ...prev];
-          });
-        }
-      )
-      .subscribe();
-
-    // 3. Realtime listener for 'articles' table
+    // 2. Setup Supabase Realtime Listener for 'articles' table
     const articlesChannel = supabase
       .channel("realtime-articles")
       .on(
@@ -240,7 +181,7 @@ export default function HomePage() {
         { event: "INSERT", schema: "public", table: "articles" },
         (payload) => {
           const newItem = payload.new;
-          const formatted: Post = {
+          const formatted: Article = {
             id: newItem.id || newItem.slug || String(Math.random()),
             slug: newItem.slug || newItem.id,
             headline: newItem.headline || newItem.title || "Untitled Article",
@@ -253,7 +194,7 @@ export default function HomePage() {
             sector: newItem.category || "General",
           };
 
-          setPublications((prev) => {
+          setArticles((prev) => {
             if (prev.some((item) => item.slug === formatted.slug)) return prev;
             return [formatted, ...prev];
           });
@@ -261,16 +202,14 @@ export default function HomePage() {
       )
       .subscribe();
 
-    // Cleanup channels on unmount
     return () => {
-      supabase.removeChannel(postsChannel);
       supabase.removeChannel(articlesChannel);
     };
   }, []);
 
-  const totalPages = Math.max(1, Math.ceil(publications.length / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(articles.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
-  const pageItems = publications.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  const pageItems = articles.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8">

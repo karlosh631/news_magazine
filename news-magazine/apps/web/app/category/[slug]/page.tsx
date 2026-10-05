@@ -25,9 +25,9 @@ interface Article {
   headline: string;
   excerpt: string | null;
   featured_image_url: string | null;
-  video_url: string | null;
-  audio_url: string | null;
-  gif_url: string | null;
+  video_url?: string | null;
+  audio_url?: string | null;
+  gif_url?: string | null;
   published_at: string | null;
   source_name_snapshot: string | null;
   canonical_url: string | null;
@@ -148,20 +148,7 @@ export default async function CategoryPage({
     error: articlesError,
   } = await db
     .from("articles")
-    .select(`
-      id,
-      slug,
-      headline,
-      excerpt,
-      featured_image_url,
-      video_url,
-      audio_url,
-      gif_url,
-      published_at,
-      source_name_snapshot,
-      canonical_url,
-      source_article_url
-    `)
+    .select("*")
     .eq("primary_category_id", category.id)
     .eq("status", "published")
     .order("published_at", {

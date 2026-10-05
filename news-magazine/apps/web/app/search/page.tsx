@@ -15,32 +15,12 @@ type HomePageProps = {
 async function getPublications(): Promise<NewsCardArticle[]> {
   const supabase = createServerSupabaseClient();
 
-  const { data: postsData, error: postsError } = await supabase
-    .from("posts")
-    .select("*")
-    .order("published_at", { ascending: false })
-    .limit(FETCH_LIMIT);
-  if (postsError) console.error("[Database] 'posts' query error:", postsError.message);
-
   const { data: articlesData, error: articlesError } = await supabase
     .from("articles")
     .select("*")
     .order("published_at", { ascending: false })
     .limit(FETCH_LIMIT);
   if (articlesError) console.error("[Database] 'articles' query error:", articlesError.message);
-
-  const formattedPosts: NewsCardArticle[] = (postsData ?? []).map((item) => ({
-    id: item.id || item.slug || String(Math.random()),
-    slug: item.slug || item.id,
-    headline: item.headline || item.title || "Untitled Article",
-    excerpt: item.excerpt || item.abstract || item.content_ieee?.slice(0, 160) || null,
-    featured_image_url: item.featured_image_url || item.cover_image_url || null,
-    video_url: item.video_url || null,
-    audio_url: item.audio_url || null,
-    gif_url: item.gif_url || null,
-    published_at: item.published_at || null,
-    sector: item.sector || "General",
-  }));
 
   const formattedArticles: NewsCardArticle[] = (articlesData ?? []).map((item) => ({
     id: item.id || item.slug || String(Math.random()),
@@ -55,7 +35,7 @@ async function getPublications(): Promise<NewsCardArticle[]> {
     sector: item.category || "General",
   }));
 
-  const combined = [...formattedPosts, ...formattedArticles];
+  const combined = formattedArticles;
   const uniqueMap = new Map<string, NewsCardArticle>();
   for (const item of combined) {
     if (item.slug && !uniqueMap.has(item.slug)) uniqueMap.set(item.slug, item);

@@ -476,30 +476,6 @@ async def run_source_sync(source_row: dict) -> IngestionResult:
             # SLUG GENERATION
             slug = _slugify(ieee_paper["title"], sector_name, content_hash)
 
-            post_payload = {
-                "slug": slug,
-                "title": ieee_paper["title"],
-                "abstract": ieee_paper["abstract"],
-                "content_ieee": ieee_paper["content_ieee"],
-                "sector": sector_name,
-                "references_json": ieee_paper.get("references", []),
-                "cover_image_url": cover_image,
-                "video_url": media["video_url"],
-                "audio_url": media["audio_url"],
-                "gif_url": media["gif_url"],
-                "published_at": article.published_at or datetime.now(timezone.utc).isoformat(),
-            }
-
-            # UPSERT POST TO DATABASE
-            upsert_response = (
-                db.table("posts")
-                .upsert(post_payload, on_conflict="slug")
-                .execute()
-            )
-
-            if not upsert_response.data:
-                raise RuntimeError("Post database upsert returned no response data.")
-
             category_id = (
                 categorizer.classify(article.headline, article.excerpt)
                 or source_row.get("default_category_id")

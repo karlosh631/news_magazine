@@ -206,6 +206,7 @@ export default async function CategoryPage({
 
   const normalizedArticles = publishedArticles
     .filter((article) => article && typeof article === "object")
+    .filter((article) => !/test realtime|demo data|sample headline/i.test(String(article.headline || "")))
     .map((article, index) => ({
       ...article,
       id: typeof article.id === "string" ? article.id : `article-${index}`,

@@ -89,6 +89,7 @@ export async function POST(request: Request) {
 
   const normalizedQuery = parsedRequest.data.query.toLocaleLowerCase();
   const context = ((data ?? []) as ArticleContext[])
+    .filter((article) => !/test realtime|demo data|sample headline/i.test(String(article.headline || "")))
     .filter((article) =>
       `${article.headline} ${article.excerpt ?? ""}`.toLocaleLowerCase().includes(normalizedQuery)
     )

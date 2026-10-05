@@ -130,7 +130,9 @@ async function fetchArticles(): Promise<Article[]> {
     return [];
   }
 
-  return (data ?? []).map((item: any) => ({
+  return (data ?? [])
+    .filter((item: any) => !/test realtime|demo data|sample headline/i.test(String(item.headline || item.title || "")))
+    .map((item: any) => ({
     id: item.id || item.slug || String(Math.random()),
     slug: item.slug || item.id,
     headline: item.headline || item.title || "Untitled Article",
@@ -141,7 +143,7 @@ async function fetchArticles(): Promise<Article[]> {
     gif_url: item.gif_url || null,
     published_at: item.published_at || null,
     sector: item.sector || item.category || "General",
-  }));
+    }));
 }
 
 // =============================================================

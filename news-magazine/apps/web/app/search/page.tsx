@@ -22,7 +22,9 @@ async function getPublications(): Promise<NewsCardArticle[]> {
     .limit(FETCH_LIMIT);
   if (articlesError) console.error("[Database] 'articles' query error:", articlesError.message);
 
-  const formattedArticles: NewsCardArticle[] = (articlesData ?? []).map((item) => ({
+  const formattedArticles: NewsCardArticle[] = (articlesData ?? [])
+    .filter((item) => !/test realtime|demo data|sample headline/i.test(String(item.headline || item.title || "")))
+    .map((item) => ({
     id: item.id || item.slug || String(Math.random()),
     slug: item.slug || item.id,
     headline: item.headline || item.title || "Untitled Article",
@@ -33,7 +35,7 @@ async function getPublications(): Promise<NewsCardArticle[]> {
     gif_url: item.gif_url || null,
     published_at: item.published_at || null,
     sector: item.category || "General",
-  }));
+    }));
 
   const combined = formattedArticles;
   const uniqueMap = new Map<string, NewsCardArticle>();

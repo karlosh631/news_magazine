@@ -151,7 +151,6 @@ export default async function CategoryPage({
     <main className="min-h-screen">
       <section className="mx-auto w-full max-w-7xl px-4 py-10 sm:px-6 lg:px-8">
         <div className="mb-8 border-b border-gray-200 pb-7">
-          <p className="text-sm font-medium uppercase tracking-wide text-gray-600">Live news</p>
           <h1 className="mt-2 font-serif text-4xl font-bold tracking-tight text-slate-900 sm:text-5xl">{categoryName} News</h1>
         </div>
         <LiveNewsFeed category={slug} />

@@ -19,8 +19,8 @@ interface Article {
   headline: string;
   excerpt: string | null;
   featured_image_url: string | null;
-  video_url?: string | null;
-  audio_url?: string | null;
+  video_url: string | null;
+  audio_url: string | null;
   gif_url?: string | null;
   published_at: string | null;
   source_name_snapshot: string | null;
@@ -144,7 +144,7 @@ export default async function CategoryPage({
     notFound();
   }
 
-  const categoryName = CATEGORY_NAMES[slug];
+  const categoryName = CATEGORY_NAMES[slug] ?? "News";
 
   let publishedArticles: Article[] = [];
 
@@ -395,6 +395,7 @@ function ArticleImage({
 
   return (
     <div className="relative aspect-[16/9] w-full overflow-hidden rounded-lg bg-gray-100">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
         src={imageUrl}
         alt={alt}

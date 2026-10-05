@@ -377,7 +377,7 @@ export default async function ArticlePage({
                 href={`/category/${category.slug}`}
                 className="text-sm font-semibold uppercase tracking-wide hover:underline"
               >
-                {category.name}
+                {category.name_en}
               </Link>
             </div>
           )}
@@ -588,7 +588,7 @@ export default async function ArticlePage({
                   href={`/category/${category.slug}`}
                   className="text-sm font-medium hover:underline"
                 >
-                  More {category.name} →
+                  More {category.name_en} →
                 </Link>
               )}
             </div>

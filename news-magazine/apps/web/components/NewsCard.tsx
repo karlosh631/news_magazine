@@ -58,6 +58,7 @@ export function NewsCard({ article }: { article: NewsCardArticle }) {
           ) : (
             /* Using standard img tag to bypass Next.js hostname whitelist issues for scraped content */
             imageSrc ? (
+              // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={imageSrc}
                 alt={article.headline}

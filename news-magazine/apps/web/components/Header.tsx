@@ -61,11 +61,15 @@ export function Header() {
   };
 
   useEffect(() => {
-    intervalRef.current = setInterval(doRefresh, AUTO_REFRESH_MS);
+    intervalRef.current = setInterval(() => {
+      setReloading(true);
+      router.refresh();
+      window.setTimeout(() => setReloading(false), 700);
+    }, AUTO_REFRESH_MS);
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, []);
+  }, [router]);
 
   useEffect(() => {
     const query = searchQuery.trim();

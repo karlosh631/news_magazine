@@ -6,6 +6,7 @@ import type { Metadata } from "next";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { ShareButtons } from "@/components/ShareButtons";
 
+export const dynamic = "force-dynamic";
 export const revalidate = 60;
 
 /* =========================================================
@@ -96,7 +97,7 @@ async function getCategory(
 
   const { data, error } = await supabase
     .from("categories")
-    .select("id, slug, name")
+    .select("id, slug, name_en")
     .eq("id", categoryId)
     .maybeSingle();
 

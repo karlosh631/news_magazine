@@ -13,7 +13,7 @@ const CATEGORIES = [
   { label: "Entertainment", slug: "entertainment" },
 ];
 
-const AUTO_REFRESH_MS = 60_000;
+const AUTO_REFRESH_MS = 15_000;
 
 type AiSearchResult = {
   query: string;

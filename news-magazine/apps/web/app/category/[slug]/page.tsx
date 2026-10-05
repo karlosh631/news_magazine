@@ -4,6 +4,9 @@ import { notFound } from "next/navigation";
 
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 interface Props {
   params: {
     slug: string;
@@ -22,6 +25,9 @@ interface Article {
   headline: string;
   excerpt: string | null;
   featured_image_url: string | null;
+  video_url: string | null;
+  audio_url: string | null;
+  gif_url: string | null;
   published_at: string | null;
   source_name_snapshot: string | null;
   canonical_url: string | null;
@@ -93,7 +99,7 @@ export default async function CategoryPage({
     error: categoryError,
   } = await db
     .from("categories")
-    .select("id, slug, name")
+    .select("id, slug, name_en")
     .eq("slug", slug)
     .maybeSingle();
 
@@ -148,6 +154,9 @@ export default async function CategoryPage({
       headline,
       excerpt,
       featured_image_url,
+      video_url,
+      audio_url,
+      gif_url,
       published_at,
       source_name_snapshot,
       canonical_url,
@@ -243,6 +252,26 @@ export default async function CategoryPage({
                   src={article.featured_image_url}
                   alt={article.headline}
                 />
+
+                {article.video_url && (
+                  <video
+                    src={article.video_url}
+                    poster={article.featured_image_url || undefined}
+                    controls
+                    playsInline
+                    preload="metadata"
+                    className="mt-3 aspect-video w-full rounded-lg bg-black object-cover"
+                  />
+                )}
+
+                {article.audio_url && (
+                  <audio
+                    src={article.audio_url}
+                    controls
+                    preload="none"
+                    className="mt-3 w-full"
+                  />
+                )}
 
                 <div className="mt-4">
                   <h2 className="font-serif text-2xl font-bold leading-tight text-slate-900">

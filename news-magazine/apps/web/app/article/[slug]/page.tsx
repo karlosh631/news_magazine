@@ -5,6 +5,7 @@ import type { Metadata } from "next";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { ShareButtons } from "@/components/ShareButtons";
 import { SafeImage } from "@/components/SafeImage";
+import { LiveArticleClient } from "@/components/LiveArticleClient";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 60;
@@ -262,6 +263,10 @@ export default async function ArticlePage({
   params,
 }: Props) {
   const { slug } = await params;
+
+  if (slug.startsWith("live-")) {
+    return <LiveArticleClient id={slug} />;
+  }
 
   const article = await getArticle(slug);
 

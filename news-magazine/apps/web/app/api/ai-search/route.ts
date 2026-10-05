@@ -88,12 +88,17 @@ export async function POST(request: Request) {
   }
 
   const normalizedQuery = parsedRequest.data.query.toLocaleLowerCase();
-  const context = ((data ?? []) as ArticleContext[])
+  const matchingContext = ((data ?? []) as ArticleContext[])
     .filter((article) => !/test realtime|demo data|sample headline/i.test(String(article.headline || "")))
     .filter((article) =>
       `${article.headline} ${article.excerpt ?? ""}`.toLocaleLowerCase().includes(normalizedQuery)
     )
     .slice(0, 8);
+  const context = matchingContext.length > 0
+    ? matchingContext
+    : ((data ?? []) as ArticleContext[])
+        .filter((article) => !/test realtime|demo data|sample headline/i.test(String(article.headline || "")))
+        .slice(0, 8);
   if (context.length === 0) {
     return NextResponse.json({
       query: parsedRequest.data.query,

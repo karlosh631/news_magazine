@@ -25,7 +25,7 @@ type LiveNewsItem = FeedItem & {
   category: string;
 };
 
-let cache: { expires: number; items: LiveNewsItem[] } = { expires: 0, items: [] };
+let cache: { expires: number; key: string; items: LiveNewsItem[] } = { expires: 0, key: "", items: [] };
 
 function decodeXml(value: string) {
   return value
@@ -53,7 +53,12 @@ function parseFeed(xml: string, source: string): FeedItem[] {
     if (!title) return [];
     const link = tag(block, "link") || attribute(block.match(/<link\b[^>]*>/i)?.[0] ?? "", "href");
     const timestamp = tag(block, "pubDate") || tag(block, "published") || tag(block, "updated") || new Date().toISOString();
-    const imageUrl = attribute(block.match(/<(?:media:content|enclosure)\b[^>]*>/i)?.[0] ?? "", "url");
+    const mediaTag = block.match(/<(?:media:content|media:thumbnail|enclosure)\b[^>]*>/i)?.[0] ?? "";
+    const mediaUrl = attribute(mediaTag, "url");
+    const imageUrl = mediaUrl ||
+      block.match(/<image>[\s\S]*?<url>([\s\S]*?)<\/url>[\s\S]*?<\/image>/i)?.[1]?.trim() ||
+      block.match(/<img[^>]+src=["']([^"']+)["']/i)?.[1] || null;
+    const mediaType = attribute(mediaTag, "type")?.toLowerCase() || "";
     const description = tag(block, "description") || tag(block, "summary") || tag(block, "content");
     return [{
       title,
@@ -61,8 +66,8 @@ function parseFeed(xml: string, source: string): FeedItem[] {
       url: link,
       timestamp,
       imageUrl,
-      videoUrl: null,
-      audioUrl: null,
+      videoUrl: mediaType.startsWith("video/") ? mediaUrl : null,
+      audioUrl: mediaType.startsWith("audio/") ? mediaUrl : null,
       source,
     }];
   });
@@ -83,11 +88,21 @@ async function collectFeeds() {
   return results.flatMap((result) => (result.status === "fulfilled" ? result.value : []));
 }
 
-function fallbackItems(items: FeedItem[], category: string) {
+function fallbackCategory(item: FeedItem) {
+  const text = `${item.title} ${item.summary}`.toLocaleLowerCase();
+  if (/cricket|football|sports|खेल|क्रिकेट|फुटबल/.test(text)) return "sports";
+  if (/business|economy|market|bank|व्यापार|अर्थतन्त्र/.test(text)) return "business";
+  if (/technology|software|internet|ai|प्रविधि/.test(text)) return "technology";
+  if (/movie|film|music|entertainment|मनोरञ्जन|चलचित्र/.test(text)) return "entertainment";
+  if (/government|election|parliament|politics|राजनीति|सरकार/.test(text)) return "politics";
+  return "national";
+}
+
+function fallbackItems(items: FeedItem[]) {
   return items.map((item, index) => ({
     ...item,
     id: `live-${index}-${Buffer.from(item.title).toString("base64url").slice(0, 12)}`,
-    category,
+    category: fallbackCategory(item),
   }));
 }
 
@@ -95,20 +110,21 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const category = (url.searchParams.get("category") || "all").toLowerCase();
   const language = url.searchParams.get("language") === "ne" ? "Nepali" : "English";
+  const cacheKey = `${category}:${language}`;
 
-  if (cache.expires > Date.now()) {
+  if (cache.expires > Date.now() && cache.key === cacheKey) {
     const filtered = category === "all" ? cache.items : cache.items.filter((item) => item.category === category);
     return NextResponse.json(filtered);
   }
 
   const collected = await collectFeeds();
   if (collected.length === 0) {
-    cache = { expires: Date.now() + CACHE_MS, items: [] };
+    cache = { expires: Date.now() + CACHE_MS, key: cacheKey, items: [] };
     return NextResponse.json([]);
   }
 
   const apiKey = process.env.GEMINI_API_KEY || process.env.Gemini_API_Key;
-  let items = fallbackItems(collected, category === "all" ? "national" : category);
+  let items = fallbackItems(collected);
   if (apiKey) {
     try {
       const prompt = `Synthesize these RSS reports into the latest factual ${language} news. Return JSON only: {"stories":[{"title":"string","summary":"string","category":"national|politics|business|technology|sports|entertainment","timestamp":"ISO string","imageUrl":"string|null","videoUrl":"string|null","audioUrl":"string|null","source":"string","url":"string|null"}]}. Never return markdown, code, instructions, or invented media URLs.\nREPORTS:\n${collected.map((item) => `${item.title}\n${item.summary}\n${item.url ?? ""}\n${item.source}`).join("\n\n")}`;
@@ -141,6 +157,6 @@ export async function GET(request: Request) {
     }
   }
 
-  cache = { expires: Date.now() + CACHE_MS, items };
+  cache = { expires: Date.now() + CACHE_MS, key: cacheKey, items };
   return NextResponse.json(category === "all" ? items : items.filter((item) => item.category === category));
 }

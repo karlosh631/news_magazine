@@ -68,6 +68,7 @@ export function Header() {
       const next = current === "en" ? "ne" : "en";
       localStorage.setItem("site-language", next);
       document.documentElement.lang = next;
+      window.dispatchEvent(new CustomEvent("site-language-change", { detail: next }));
       return next;
     });
   };
@@ -276,12 +277,12 @@ export function Header() {
               <div className="grid gap-3 md:grid-cols-[1fr_auto]">
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                    {aiSearch.confidence === "low" ? "No result found" : "News brief"}
+                    {aiSearch.confidence === "low" ? "Loading..." : "News brief"}
                   </p>
                   <p className="mt-1 text-sm leading-6 text-gray-800">{aiSearch.summary}</p>
                   {aiSearch.key_points.length > 0 && (
                     <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-gray-700">
-                      {aiSearch.key_points.map((point) => <li key={point}>{point}</li>)}
+                      {aiSearch.key_points.map((point) => <li key={point}><Link href={`/search?q=${encodeURIComponent(point)}`} className="hover:underline">{point}</Link></li>)}
                     </ul>
                   )}
                 </div>

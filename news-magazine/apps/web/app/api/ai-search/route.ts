@@ -4,7 +4,7 @@ import { z } from "zod";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
 const requestSchema = z.object({
-  query: z.string().trim().min(2).max(200),
+  query: z.string().trim().min(1).max(200),
 });
 
 const geminiResponseSchema = z.object({
@@ -33,7 +33,7 @@ function extractText(payload: unknown) {
 export async function POST(request: Request) {
   const parsedRequest = requestSchema.safeParse(await request.json().catch(() => null));
   if (!parsedRequest.success) {
-    return NextResponse.json({ error: "Enter a search query with at least 2 characters." }, { status: 400 });
+    return NextResponse.json({ error: "Enter at least one search character." }, { status: 400 });
   }
 
   const apiKey = process.env.GEMINI_API_KEY;

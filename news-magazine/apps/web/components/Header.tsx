@@ -67,6 +67,44 @@ export function Header() {
     };
   }, []);
 
+  useEffect(() => {
+    const query = searchQuery.trim();
+    if (!query) {
+      setAiSearch(null);
+      setAiSearchError("");
+      return;
+    }
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setAiSearchLoading(true);
+      setAiSearchError("");
+      try {
+        const response = await fetch("/api/ai-search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query }),
+          signal: controller.signal,
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "AI search failed.");
+        setAiSearch(payload as AiSearchResult);
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          setAiSearch(null);
+          setAiSearchError(error instanceof Error ? error.message : "AI search failed.");
+        }
+      } finally {
+        if (!controller.signal.aborted) setAiSearchLoading(false);
+      }
+    }, 450);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [searchQuery]);
+
   const handleSearchSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const query = searchQuery.trim();

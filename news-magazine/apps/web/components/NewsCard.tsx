@@ -16,9 +16,6 @@ export type NewsCardArticle = {
   sector?: string;
 };
 
-const FALLBACK_IMAGE =
-  "https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=1200&q=80";
-
 function formatNewsDate(dateString: string | null): string {
   if (!dateString) return "";
   try {
@@ -35,7 +32,7 @@ function formatNewsDate(dateString: string | null): string {
 }
 
 export function NewsCard({ article }: { article: NewsCardArticle }) {
-  const imageSrc = article.gif_url || article.featured_image_url || FALLBACK_IMAGE;
+  const imageSrc = article.gif_url || article.featured_image_url;
 
   // Prevents media control clicks (play/pause/seek) from navigating the parent Link component
   const handleMediaClick = (e: MouseEvent) => {
@@ -60,18 +57,16 @@ export function NewsCard({ article }: { article: NewsCardArticle }) {
             />
           ) : (
             /* Using standard img tag to bypass Next.js hostname whitelist issues for scraped content */
-            <img
-              src={imageSrc}
-              alt={article.headline}
-              loading="lazy"
-              className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-              onError={(e) => {
-                const target = e.currentTarget;
-                if (target.src !== FALLBACK_IMAGE) {
-                  target.src = FALLBACK_IMAGE;
-                }
-              }}
-            />
+            imageSrc ? (
+              <img
+                src={imageSrc}
+                alt={article.headline}
+                loading="lazy"
+                className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+              />
+            ) : (
+              <div className="h-full w-full animate-pulse bg-gray-200" aria-label="Loading image" />
+            )
           )}
 
           {/* BADGES (GIF & SECTOR) */}

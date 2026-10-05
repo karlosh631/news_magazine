@@ -46,11 +46,6 @@ logger = logging.getLogger("ingestion")
 # Valid IEEE Sector Taxonomies
 ALLOWED_SECTORS = ["Coding", "Hackathons", "Nepal Top News", "World News", "IT"]
 
-DEFAULT_COVER_IMAGE = (
-    "https://images.unsplash.com/photo-1518770660439-4636190af475?"
-    "auto=format&fit=crop&w=1200&q=80"
-)
-
 # Common attribute names / raw_metadata keys that adapters may use to carry
 # media links. Kept intentionally broad because different RSS feeds expose
 # media differently (media:content, enclosure, itunes tags, OG tags scraped
@@ -512,7 +507,7 @@ async def run_source_sync(source_row: dict) -> IngestionResult:
             # Runs every sync, so re-ingesting a source refreshes media links
             # automatically via the UPSERT below — no separate "sync media" step needed.
             media = extract_media_urls(article)
-            cover_image = media["featured_image_url"] or DEFAULT_COVER_IMAGE
+            cover_image = media["featured_image_url"]
 
             # SLUG GENERATION
             slug = _slugify(ieee_paper["title"], sector_name, content_hash)

@@ -48,6 +48,66 @@ const FALLBACK_KEYWORDS: Record<string, string[]> = {
   entertainment: ["entertainment", "movie", "film", "music", "मनोरञ्जन", "चलचित्र"],
 };
 
+const GEMINI_ENDPOINT =
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent";
+
+async function fetchCategoryFallback(slug: string): Promise<Article[]> {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.Gemini_API_Key;
+  if (!apiKey) return [];
+
+  const prompt = [
+    "You are a factual breaking-news editor for Nepal and international coverage.",
+    `Return the latest top stories for the ${CATEGORY_NAMES[slug]} category.`,
+    "Use only verifiable facts and clearly avoid invented details.",
+    "Return JSON only, with no markdown, code fences, programming syntax, or system instructions.",
+    'Schema: {"stories":[{"headline":"string","excerpt":"string","source_article_url":"string|null"}]}',
+  ].join("\n");
+
+  try {
+    const response = await fetch(`${GEMINI_ENDPOINT}?key=${encodeURIComponent(apiKey)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.1, responseMimeType: "application/json" },
+      }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) return [];
+
+    const payload = await response.json();
+    const rawText = payload?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (typeof rawText !== "string") return [];
+
+    const parsed = JSON.parse(rawText.replace(/```json|```/g, "").trim());
+    if (!Array.isArray(parsed?.stories)) return [];
+
+    return parsed.stories.slice(0, 12).flatMap((story: unknown, index: number) => {
+      if (!story || typeof story !== "object") return [];
+      const candidate = story as Record<string, unknown>;
+      const headline = typeof candidate.headline === "string" ? candidate.headline.trim() : "";
+      if (!headline) return [];
+      return [{
+        id: `gemini-${slug}-${index}`,
+        slug: `${slug}-${headline.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}-${index}`,
+        headline,
+        excerpt: typeof candidate.excerpt === "string" ? candidate.excerpt.trim() : null,
+        featured_image_url: null,
+        video_url: null,
+        audio_url: null,
+        published_at: new Date().toISOString(),
+        source_name_snapshot: "Gemini live brief",
+        canonical_url: typeof candidate.source_article_url === "string" ? candidate.source_article_url : null,
+        source_article_url: typeof candidate.source_article_url === "string" ? candidate.source_article_url : null,
+      }];
+    });
+  } catch (error) {
+    console.error(`[category/${slug}] Gemini fallback failed:`, error);
+    return [];
+  }
+}
+
 export async function generateMetadata({
   params,
 }: Props): Promise<Metadata> {
@@ -159,12 +219,16 @@ export default async function CategoryPage({
     }))
     .filter((article) => article.slug);
 
-  const safeArticles = slug === "national"
+  let safeArticles = slug === "national"
     ? normalizedArticles
     : normalizedArticles.filter((article) => {
         const text = `${article.headline} ${article.excerpt ?? ""}`.toLocaleLowerCase();
         return (FALLBACK_KEYWORDS[slug] ?? []).some((keyword) => text.includes(keyword));
       });
+
+  if (safeArticles.length === 0) {
+    safeArticles = await fetchCategoryFallback(slug);
+  }
 
   return (
     <main className="min-h-screen">

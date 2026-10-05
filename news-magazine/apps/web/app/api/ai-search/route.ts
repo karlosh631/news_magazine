@@ -44,7 +44,7 @@ function fallbackBrief(query: string, context: ArticleContext[]) {
     query,
     summary: first
       ? cleanNewsText(first.excerpt || first.headline)
-      : "No published coverage matched this topic yet.",
+      : "No result found",
     key_points: context.slice(0, 3).map((article) => cleanNewsText(article.headline)),
     confidence: "low" as const,
     sources: context.map(({ headline, source_article_url, published_at }) => ({
@@ -96,7 +96,7 @@ export async function POST(request: Request) {
   if (context.length === 0) {
     return NextResponse.json({
       query: parsedRequest.data.query,
-      summary: "No published coverage matched this topic yet.",
+      summary: "No result found",
       key_points: [],
       confidence: "low",
       sources: [],

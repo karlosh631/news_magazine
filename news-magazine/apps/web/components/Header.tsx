@@ -237,13 +237,13 @@ export function Header() {
       {(aiSearchLoading || aiSearch || aiSearchError) && (
         <section className="border-t border-gray-200 bg-gray-50 px-4 py-4" aria-live="polite">
           <div className="mx-auto max-w-7xl">
-            {aiSearchLoading && <p className="text-sm text-gray-600">Preparing an AI news brief...</p>}
+            {aiSearchLoading && <p className="text-sm text-gray-600">Loading...</p>}
             {aiSearchError && <p className="text-sm text-red-700">{aiSearchError}</p>}
             {aiSearch && !aiSearchLoading && (
               <div className="grid gap-3 md:grid-cols-[1fr_auto]">
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                    AI brief - {aiSearch.confidence} confidence
+                    {aiSearch.confidence === "low" ? "No result found" : "News brief"}
                   </p>
                   <p className="mt-1 text-sm leading-6 text-gray-800">{aiSearch.summary}</p>
                   {aiSearch.key_points.length > 0 && (

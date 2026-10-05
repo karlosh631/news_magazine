@@ -13,9 +13,6 @@ const supabase = createClient();
 
 const PAGE_SIZE = 12;
 const FETCH_LIMIT = 300;
-const FALLBACK_IMAGE =
-  "https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=1200&q=80";
-
 type Article = {
   id: string;
   slug: string;
@@ -47,7 +44,7 @@ function formatDate(value: string | null) {
 }
 
 function NewsCard({ article }: { article: Article }) {
-  const imageSrc = article.gif_url || article.featured_image_url || FALLBACK_IMAGE;
+  const imageSrc = article.gif_url || article.featured_image_url;
 
   return (
     <Link
@@ -67,17 +64,17 @@ function NewsCard({ article }: { article: Article }) {
             onClick={(e) => e.stopPropagation()}
           />
         ) : (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={imageSrc}
-            alt={article.headline}
-            loading="lazy"
-            className="h-full w-full object-cover transition duration-300 group-hover:scale-105"
-            onError={(e) => {
-              const target = e.currentTarget;
-              if (target.src !== FALLBACK_IMAGE) target.src = FALLBACK_IMAGE;
-            }}
-          />
+          imageSrc ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={imageSrc}
+              alt={article.headline}
+              loading="lazy"
+              className="h-full w-full object-cover transition duration-300 group-hover:scale-105"
+            />
+          ) : (
+            <div className="h-full w-full animate-pulse bg-gray-200" aria-label="Loading image" />
+          )
         )}
 
         {article.sector && (

@@ -87,21 +87,6 @@ export default async function HomePage({ searchParams }: HomePageProps) {
           <p className="mt-1 text-sm text-gray-600">Real-time news stream across Nepal &amp; World.</p>
         </div>
 
-        <form action="/" method="GET" className="flex items-center gap-2">
-          <input
-            type="search"
-            name="q"
-            defaultValue={params.q || ""}
-            placeholder="Search news..."
-            className="h-10 w-full rounded-md border border-gray-300 px-3 text-sm outline-none focus:border-black focus:ring-1 focus:ring-black sm:w-64"
-          />
-          <button
-            type="submit"
-            className="h-10 shrink-0 rounded-md bg-black px-4 text-sm font-medium text-white transition hover:bg-gray-800"
-          >
-            Search
-          </button>
-        </form>
       </div>
 
       {pageItems.length === 0 ? (

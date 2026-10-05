@@ -66,10 +66,19 @@ export function Header() {
   const toggleLanguage = () => {
     setLanguage((current) => {
       const next = current === "en" ? "ne" : "en";
+      localStorage.setItem("site-language", next);
       document.documentElement.lang = next;
       return next;
     });
   };
+
+  useEffect(() => {
+    const stored = localStorage.getItem("site-language");
+    if (stored === "en" || stored === "ne") {
+      setLanguage(stored);
+      document.documentElement.lang = stored;
+    }
+  }, []);
 
   useEffect(() => {
     intervalRef.current = setInterval(() => {
@@ -95,7 +104,7 @@ export function Header() {
       setAiSearchLoading(true);
       setAiSearchError("");
       try {
-        const response = await fetch("/api/ai-search", {
+        const response = await fetch("/api/search", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ query }),
@@ -128,7 +137,7 @@ export function Header() {
     setAiSearchLoading(true);
     setAiSearchError("");
     try {
-      const response = await fetch("/api/ai-search", {
+      const response = await fetch("/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query }),

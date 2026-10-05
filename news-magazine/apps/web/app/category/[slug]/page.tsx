@@ -8,15 +8,15 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 interface Props {
-  params: {
+  params: Promise<{
     slug: string;
-  };
+  }>;
 }
 
 interface Category {
   id: string;
   slug: string;
-  name?: string | null;
+  name_en?: string | null;
 }
 
 interface Article {
@@ -57,7 +57,8 @@ const FALLBACK_KEYWORDS: Record<string, string[]> = {
 export async function generateMetadata({
   params,
 }: Props): Promise<Metadata> {
-  const slug = params.slug?.toLowerCase();
+  const { slug: rawSlug } = await params;
+  const slug = rawSlug?.toLowerCase();
 
   const name = CATEGORY_NAMES[slug];
 
@@ -76,7 +77,8 @@ export async function generateMetadata({
 export default async function CategoryPage({
   params,
 }: Props) {
-  const slug = params.slug?.toLowerCase();
+  const { slug: rawSlug } = await params;
+  const slug = rawSlug?.toLowerCase();
 
   /*
    * ---------------------------------------------------------
@@ -90,7 +92,8 @@ export default async function CategoryPage({
 
   const categoryName = CATEGORY_NAMES[slug];
 
-  const db = createServerSupabaseClient();
+  let category: Category | null = null;
+  let publishedArticles: Article[] = [];
 
   /*
    * ---------------------------------------------------------
@@ -103,16 +106,19 @@ export default async function CategoryPage({
    * ---------------------------------------------------------
    */
 
-  const {
-    data: category,
-    error: categoryError,
-  } = await db
-    .from("categories")
-    .select("id, slug, name_en")
-    .eq("slug", slug)
-    .maybeSingle();
+  try {
+    const db = createServerSupabaseClient();
+    const categoryResult = await db
+      .from("categories")
+      .select("id, slug, name_en")
+      .eq("slug", slug)
+      .maybeSingle();
 
-  if (categoryError) console.error(`[category/${slug}] Category query failed:`, categoryError);
+    if (categoryResult.error) {
+      console.error(`[category/${slug}] Category query failed:`, categoryResult.error);
+    } else {
+      category = categoryResult.data as Category | null;
+    }
 
   /*
    * ---------------------------------------------------------
@@ -137,33 +143,28 @@ export default async function CategoryPage({
    * ---------------------------------------------------------
    */
 
-  let articleQuery = db
-    .from("articles")
-    .select("*")
-    .eq("status", "published")
-    .order("published_at", {
-      ascending: false,
-      nullsFirst: false,
-    })
-    .limit(category ? 50 : 100);
+    let articleQuery = db
+      .from("articles")
+      .select("*")
+      .eq("status", "published")
+      .order("published_at", {
+        ascending: false,
+        nullsFirst: false,
+      })
+      .limit(category ? 50 : 100);
 
-  if (category) articleQuery = articleQuery.eq("primary_category_id", category.id);
+    if (category) articleQuery = articleQuery.eq("primary_category_id", category.id);
 
-  const {
-    data: articles,
-    error: articlesError,
-  } = await articleQuery;
-
-  if (articlesError) {
-    console.error(
-      `[category/${slug}] Article query failed:`,
-      articlesError
-    );
-
-    throw new Error("Unable to load news");
+    const articlesResult = await articleQuery;
+    if (articlesResult.error) {
+      console.error(`[category/${slug}] Article query failed:`, articlesResult.error);
+    } else {
+      publishedArticles = (articlesResult.data ?? []) as Article[];
+    }
+  } catch (error) {
+    console.error(`[category/${slug}] Category page data load failed:`, error);
   }
 
-  const publishedArticles = articles ?? [];
   const safeArticles = category
     ? publishedArticles
     : slug === "national"

@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     )
     default_request_timeout_seconds: float = 10.0
     max_concurrent_fetches: int = 3
+    max_article_rows: int = 10000
 
     # Scheduler
     scheduler_enabled: bool = True

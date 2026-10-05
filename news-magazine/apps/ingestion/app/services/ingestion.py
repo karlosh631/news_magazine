@@ -195,7 +195,7 @@ def synthesize_ieee_paper(
     Calls Gemini to convert scraped news data into an IEEE formatted paper structure.
     Includes a safe fallback structure if API key or network request fails.
     """
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("Gemini_API_Key")
     if not api_key:
         logger.warning("GEMINI_API_KEY missing; using fallback structured layout.")
         return {
@@ -262,6 +262,46 @@ REQUIREMENTS:
     cleaned_json = re.sub(r"```$", "", cleaned_json).strip()
 
     return json.loads(cleaned_json)
+
+
+def prune_old_articles(db) -> int:
+    """Delete the oldest non-breaking, non-featured articles over the row cap."""
+    try:
+        max_rows = int(os.getenv("MAX_ARTICLE_ROWS", "10000"))
+        count_result = (
+            db.table("articles")
+            .select("id", count="exact")
+            .eq("status", "published")
+            .limit(1)
+            .execute()
+        )
+        total_rows = count_result.count or 0
+        if total_rows <= max_rows:
+            return 0
+
+        purge_count = max(1, int(total_rows * 0.2))
+        candidates = (
+            db.table("articles")
+            .select("id")
+            .eq("status", "published")
+            .eq("is_breaking", False)
+            .eq("is_featured", False)
+            .order("published_at", desc=False)
+            .limit(purge_count)
+            .execute()
+            .data
+            or []
+        )
+        ids = [row["id"] for row in candidates if row.get("id")]
+        if not ids:
+            return 0
+
+        db.table("articles").delete().in_("id", ids).execute()
+        logger.warning("Pruned %d old low-priority articles at row cap %d.", len(ids), max_rows)
+        return len(ids)
+    except Exception:
+        logger.exception("Article capacity check/prune failed; continuing ingestion.")
+        return 0
 
 # =============================================================
 # MAIN SOURCE SYNC
@@ -364,6 +404,7 @@ async def run_source_sync(source_row: dict) -> IngestionResult:
         result.fetched = len(entries)
         normalized = adapter.normalize(entries)
         normalized = adapter.validate(normalized)
+        prune_old_articles(db)
     except PermissionError as exc:
         result.errors += 1
         _log_error(db, source_id, sync_log_id, "not_permitted", str(exc))

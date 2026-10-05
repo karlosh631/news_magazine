@@ -2,17 +2,14 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
 import { Pagination } from "@/components/Pagination";
+import { createClient } from "@/lib/supabase/client";
 
 // =============================================================
 // CONFIG
 // =============================================================
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL as string,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string
-);
+const supabase = createClient();
 
 const PAGE_SIZE = 12;
 const FETCH_LIMIT = 300;

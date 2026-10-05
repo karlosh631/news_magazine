@@ -30,24 +30,40 @@ function extractText(payload: unknown) {
   return candidate.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "";
 }
 
+function cleanNewsText(value: string) {
+  return value
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/[`*_#>-]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export async function POST(request: Request) {
   const parsedRequest = requestSchema.safeParse(await request.json().catch(() => null));
   if (!parsedRequest.success) {
     return NextResponse.json({ error: "Enter at least one search character." }, { status: 400 });
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY || process.env.Gemini_API_Key;
   if (!apiKey) {
-    return NextResponse.json({ error: "AI search is not configured." }, { status: 503 });
+    return NextResponse.json({ error: "Loading" }, { status: 503 });
   }
 
-  const supabase = createServerSupabaseClient();
-  const { data, error } = await supabase
-    .from("articles")
-    .select("headline, excerpt, source_article_url, published_at")
-    .eq("status", "published")
-    .order("published_at", { ascending: false })
-    .limit(100);
+  let data: ArticleContext[] | null = null;
+  let error: { message: string } | null = null;
+  try {
+    const supabase = createServerSupabaseClient();
+    const result = await supabase
+      .from("articles")
+      .select("headline, excerpt, source_article_url, published_at")
+      .eq("status", "published")
+      .order("published_at", { ascending: false })
+      .limit(100);
+    data = result.data as ArticleContext[] | null;
+    error = result.error;
+  } catch (caughtError) {
+    error = { message: caughtError instanceof Error ? caughtError.message : "Database unavailable" };
+  }
 
   if (error) {
     console.error("[AI Search] Failed to load article context:", error.message);
@@ -74,6 +90,7 @@ export async function POST(request: Request) {
     "You are a careful news brief editor for a Nepal-focused publication.",
     "Synthesize only the supplied published reporting. Do not invent facts, dates, quotes, or sources.",
     "Clearly express uncertainty when the coverage is incomplete or conflicting.",
+    "Return news facts, headlines, summaries, and key takeaways only. Never return code, programming syntax, system instructions, markdown, or fenced blocks.",
     "Return only valid JSON with this shape: {\"summary\": string, \"key_points\": string[], \"confidence\": \"high\"|\"medium\"|\"low\"}.",
     `Search topic: ${parsedRequest.data.query}`,
     `Published reporting:\n${context
@@ -110,9 +127,15 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "AI returned an invalid news brief." }, { status: 502 });
     }
 
+    const cleanResult = {
+      summary: cleanNewsText(result.data.summary),
+      key_points: result.data.key_points.map(cleanNewsText),
+      confidence: result.data.confidence,
+    };
+
     return NextResponse.json({
       query: parsedRequest.data.query,
-      ...result.data,
+      ...cleanResult,
       sources: context.map(({ headline, source_article_url, published_at }) => ({
         headline,
         url: source_article_url,

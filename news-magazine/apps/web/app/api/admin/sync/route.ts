@@ -15,7 +15,10 @@ import { createServerSupabaseClient } from "@/lib/supabase/server";
  */
 export async function POST(req: NextRequest) {
   const authHeader = req.headers.get("authorization");
-  const isCron = authHeader === `Bearer ${process.env.CRON_SECRET}`;
+  const cronSecret = process.env.CRON_SECRET;
+  const ingestionUrl = process.env.INGESTION_SERVICE_URL;
+  const ingestionSecret = process.env.INGESTION_SECRET;
+  const isCron = Boolean(cronSecret && authHeader === `Bearer ${cronSecret}`);
 
   if (!isCron) {
     const supabase = createServerSupabaseClient();
@@ -34,16 +37,32 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  if (!ingestionUrl || !ingestionSecret) {
+    return NextResponse.json(
+      { success: false, error: { code: "INGESTION_NOT_CONFIGURED", message: "News sync is not configured." } },
+      { status: 503 }
+    );
+  }
+
   const body = await req.json().catch(() => ({}));
 
-  const res = await fetch(`${process.env.INGESTION_SERVICE_URL}/api/sync`, {
+  let res: Response;
+  try {
+    res = await fetch(`${ingestionUrl}/api/sync`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-ingestion-secret": process.env.INGESTION_SECRET!,
+      "x-ingestion-secret": ingestionSecret,
     },
     body: JSON.stringify(body),
-  });
+    });
+  } catch (error) {
+    console.error("[Admin Sync] Ingestion request failed:", error);
+    return NextResponse.json(
+      { success: false, error: { code: "INGESTION_UNREACHABLE", message: "News sync service is unavailable." } },
+      { status: 502 }
+    );
+  }
 
   if (!res.ok) {
     return NextResponse.json(

@@ -38,6 +38,23 @@ function cleanNewsText(value: string) {
     .trim();
 }
 
+function fallbackBrief(query: string, context: ArticleContext[]) {
+  const first = context[0];
+  return {
+    query,
+    summary: first
+      ? cleanNewsText(first.excerpt || first.headline)
+      : "No published coverage matched this topic yet.",
+    key_points: context.slice(0, 3).map((article) => cleanNewsText(article.headline)),
+    confidence: "low" as const,
+    sources: context.map(({ headline, source_article_url, published_at }) => ({
+      headline,
+      url: source_article_url,
+      published_at,
+    })),
+  };
+}
+
 export async function POST(request: Request) {
   const parsedRequest = requestSchema.safeParse(await request.json().catch(() => null));
   if (!parsedRequest.success) {
@@ -118,13 +135,13 @@ export async function POST(request: Request) {
 
     if (!response.ok) {
       console.error("[AI Search] Gemini request failed with status", response.status);
-      return NextResponse.json({ error: "AI search is temporarily unavailable." }, { status: 502 });
+      return NextResponse.json(fallbackBrief(parsedRequest.data.query, context));
     }
 
     const text = extractText(await response.json());
     const result = geminiResponseSchema.safeParse(JSON.parse(text));
     if (!result.success) {
-      return NextResponse.json({ error: "AI returned an invalid news brief." }, { status: 502 });
+      return NextResponse.json(fallbackBrief(parsedRequest.data.query, context));
     }
 
     const cleanResult = {
@@ -145,7 +162,7 @@ export async function POST(request: Request) {
   } catch (caughtError) {
     const message = caughtError instanceof Error ? caughtError.message : "Unknown error";
     console.error("[AI Search] Gemini request failed:", message);
-    return NextResponse.json({ error: "AI search timed out. Try again shortly." }, { status: 504 });
+    return NextResponse.json(fallbackBrief(parsedRequest.data.query, context));
   } finally {
     clearTimeout(timeout);
   }

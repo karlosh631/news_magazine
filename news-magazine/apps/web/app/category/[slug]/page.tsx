@@ -144,10 +144,25 @@ export default async function CategoryPage({
     console.error(`[category/${slug}] Category page data load failed:`, error);
   }
 
+  const normalizedArticles = publishedArticles
+    .filter((article) => article && typeof article === "object")
+    .map((article, index) => ({
+      ...article,
+      id: typeof article.id === "string" ? article.id : `article-${index}`,
+      slug: typeof article.slug === "string" ? article.slug : "",
+      headline: typeof article.headline === "string" ? article.headline : "Untitled news article",
+      excerpt: typeof article.excerpt === "string" ? article.excerpt : null,
+      featured_image_url: typeof article.featured_image_url === "string" ? article.featured_image_url : null,
+      video_url: typeof article.video_url === "string" ? article.video_url : null,
+      audio_url: typeof article.audio_url === "string" ? article.audio_url : null,
+      source_name_snapshot: typeof article.source_name_snapshot === "string" ? article.source_name_snapshot : null,
+    }))
+    .filter((article) => article.slug);
+
   const safeArticles = slug === "national"
-    ? publishedArticles
-    : publishedArticles.filter((article) => {
-        const text = `${article.headline ?? ""} ${article.excerpt ?? ""}`.toLocaleLowerCase();
+    ? normalizedArticles
+    : normalizedArticles.filter((article) => {
+        const text = `${article.headline} ${article.excerpt ?? ""}`.toLocaleLowerCase();
         return (FALLBACK_KEYWORDS[slug] ?? []).some((keyword) => text.includes(keyword));
       });
 

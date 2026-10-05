@@ -2,7 +2,7 @@
 Orchestrates one full sync run for one source:
 
     fetch -> parse -> normalize -> validate -> dedupe -> categorize
-        -> sanitize -> Claude IEEE synthesis -> media extraction
+        -> sanitize -> Gemini synthesis -> media extraction
         -> store (UPSERT) -> log
 
 A failure on one source never affects another.
@@ -12,7 +12,7 @@ Security principles:
 - Adapter controls whether fetching is permitted.
 - Headlines and excerpts are sanitized before database storage.
 - Full article HTML is processed safely.
-- Claude generates structured IEEE standard content.
+- Gemini generates structured IEEE standard content.
 - Database writes perform an idempotent UPSERT on unique constraints, so
   every sync run refreshes media URLs (image/video/audio/gif) automatically.
 - A broken article must never stop the remaining feed.
@@ -29,7 +29,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-import anthropic
+import httpx
 
 from app.database import get_db
 from app.services.categorizer import Categorizer
@@ -185,19 +185,19 @@ def extract_media_urls(article) -> Dict[str, Optional[str]]:
         }
 
 # =============================================================
-# ANTHROPIC CLAUDE IEEE SYNTHESIZER
+# GEMINI IEEE SYNTHESIZER
 # =============================================================
 
 def synthesize_ieee_paper(
     sector: str, headline: str, excerpt: str, source_url: str
 ) -> Dict[str, Any]:
     """
-    Calls Anthropic API to convert scraped news data into an IEEE formatted paper structure.
+    Calls Gemini to convert scraped news data into an IEEE formatted paper structure.
     Includes a safe fallback structure if API key or network request fails.
     """
-    api_key = os.getenv("ANTHROPIC_API_KEY")
+    api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        logger.warning("ANTHROPIC_API_KEY missing; using fallback structured layout.")
+        logger.warning("GEMINI_API_KEY missing; using fallback structured layout.")
         return {
             "title": headline,
             "abstract": excerpt or f"Technical briefing on recent developments in {sector}.",
@@ -216,8 +216,6 @@ def synthesize_ieee_paper(
                 }
             ],
         }
-
-    client = anthropic.Anthropic(api_key=api_key)
 
     prompt = f"""You are a distinguished IEEE Senior Fellow and technical research journalist.
 Synthesize the following article for the sector "{sector}" into a formal IEEE standard publication.
@@ -244,13 +242,22 @@ REQUIREMENTS:
 2. Embed numerical citations like [1] within content_ieee text corresponding to the references array.
 3. Output raw JSON ONLY with no code blocks or extra text."""
 
-    response = client.messages.create(
-        model="claude-3-5-sonnet-20241022",
-        max_tokens=3000,
-        messages=[{"role": "user", "content": prompt}],
+    response = httpx.post(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent",
+        params={"key": api_key},
+        json={
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 3000,
+                "responseMimeType": "application/json",
+            },
+        },
+        timeout=20.0,
     )
-
-    raw_text = response.content[0].text.strip()
+    response.raise_for_status()
+    payload = response.json()
+    raw_text = payload["candidates"][0]["content"]["parts"][0]["text"].strip()
     cleaned_json = re.sub(r"^```json\s*", "", raw_text)
     cleaned_json = re.sub(r"```$", "", cleaned_json).strip()
 

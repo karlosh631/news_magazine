@@ -15,6 +15,14 @@ const CATEGORIES = [
 
 const AUTO_REFRESH_MS = 60_000;
 
+type AiSearchResult = {
+  query: string;
+  summary: string;
+  key_points: string[];
+  confidence: "high" | "medium" | "low";
+  sources: Array<{ headline: string; url: string | null; published_at: string | null }>;
+};
+
 function LogoIcon() {
   return (
     <svg width="28" height="28" viewBox="0 0 24 24" fill="none" className="shrink-0" aria-hidden="true">
@@ -41,6 +49,9 @@ export function Header() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [aiSearch, setAiSearch] = useState<AiSearchResult | null>(null);
+  const [aiSearchError, setAiSearchError] = useState("");
+  const [aiSearchLoading, setAiSearchLoading] = useState(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const doRefresh = () => {
@@ -56,10 +67,30 @@ export function Header() {
     };
   }, []);
 
-  const handleSearchSubmit = (e: React.FormEvent) => {
+  const handleSearchSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!searchQuery.trim()) return;
-    router.push(`/search?q=${encodeURIComponent(searchQuery.trim())}`);
+    const query = searchQuery.trim();
+    if (!query) return;
+
+    setAiSearchLoading(true);
+    setAiSearchError("");
+    try {
+      const response = await fetch("/api/ai-search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "AI search failed.");
+      setAiSearch(payload as AiSearchResult);
+    } catch (error) {
+      setAiSearch(null);
+      setAiSearchError(error instanceof Error ? error.message : "AI search failed.");
+    } finally {
+      setAiSearchLoading(false);
+    }
+
+    router.push(`/search?q=${encodeURIComponent(query)}`);
     setMenuOpen(false);
   };
 
@@ -163,6 +194,44 @@ export function Header() {
             );
           })}
         </nav>
+      )}
+
+      {(aiSearchLoading || aiSearch || aiSearchError) && (
+        <section className="border-t border-gray-200 bg-gray-50 px-4 py-4" aria-live="polite">
+          <div className="mx-auto max-w-7xl">
+            {aiSearchLoading && <p className="text-sm text-gray-600">Preparing an AI news brief...</p>}
+            {aiSearchError && <p className="text-sm text-red-700">{aiSearchError}</p>}
+            {aiSearch && !aiSearchLoading && (
+              <div className="grid gap-3 md:grid-cols-[1fr_auto]">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                    AI brief - {aiSearch.confidence} confidence
+                  </p>
+                  <p className="mt-1 text-sm leading-6 text-gray-800">{aiSearch.summary}</p>
+                  {aiSearch.key_points.length > 0 && (
+                    <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-gray-700">
+                      {aiSearch.key_points.map((point) => <li key={point}>{point}</li>)}
+                    </ul>
+                  )}
+                </div>
+                <div className="text-xs text-gray-500">
+                  <p className="font-semibold text-gray-700">Sources</p>
+                  {aiSearch.sources.slice(0, 3).map((source) => (
+                    <a
+                      key={`${source.headline}-${source.url}`}
+                      href={source.url || `/search?q=${encodeURIComponent(aiSearch.query)}`}
+                      target={source.url ? "_blank" : undefined}
+                      rel={source.url ? "noreferrer" : undefined}
+                      className="mt-1 block max-w-xs truncate hover:text-blue-700"
+                    >
+                      {source.headline}
+                    </a>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </section>
       )}
     </header>
   );

@@ -13,12 +13,6 @@ interface Props {
   }>;
 }
 
-interface Category {
-  id: string;
-  slug: string;
-  name_en?: string | null;
-}
-
 interface Article {
   id: string;
   slug: string;
@@ -92,7 +86,6 @@ export default async function CategoryPage({
 
   const categoryName = CATEGORY_NAMES[slug];
 
-  let category: Category | null = null;
   let publishedArticles: Article[] = [];
 
   /*
@@ -108,18 +101,6 @@ export default async function CategoryPage({
 
   try {
     const db = createServerSupabaseClient();
-    const categoryResult = await db
-      .from("categories")
-      .select("id, slug, name_en")
-      .eq("slug", slug)
-      .maybeSingle();
-
-    if (categoryResult.error) {
-      console.error(`[category/${slug}] Category query failed:`, categoryResult.error);
-    } else {
-      category = categoryResult.data as Category | null;
-    }
-
   /*
    * ---------------------------------------------------------
    * STEP 2
@@ -151,9 +132,7 @@ export default async function CategoryPage({
         ascending: false,
         nullsFirst: false,
       })
-      .limit(category ? 50 : 100);
-
-    if (category) articleQuery = articleQuery.eq("primary_category_id", category.id);
+      .limit(100);
 
     const articlesResult = await articleQuery;
     if (articlesResult.error) {
@@ -165,14 +144,12 @@ export default async function CategoryPage({
     console.error(`[category/${slug}] Category page data load failed:`, error);
   }
 
-  const safeArticles = category
+  const safeArticles = slug === "national"
     ? publishedArticles
-    : slug === "national"
-      ? publishedArticles
-      : publishedArticles.filter((article) => {
-          const text = `${article.headline ?? ""} ${article.excerpt ?? ""}`.toLocaleLowerCase();
-          return (FALLBACK_KEYWORDS[slug] ?? []).some((keyword) => text.includes(keyword));
-        });
+    : publishedArticles.filter((article) => {
+        const text = `${article.headline ?? ""} ${article.excerpt ?? ""}`.toLocaleLowerCase();
+        return (FALLBACK_KEYWORDS[slug] ?? []).some((keyword) => text.includes(keyword));
+      });
 
   return (
     <main className="min-h-screen">

@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { notFound } from "next/navigation";
 
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
@@ -44,6 +43,15 @@ const CATEGORY_NAMES: Record<string, string> = {
 };
 
 const ALLOWED_CATEGORIES = Object.keys(CATEGORY_NAMES);
+
+const FALLBACK_KEYWORDS: Record<string, string[]> = {
+  national: ["nepal", "nepali", "नेपाल", "kathmandu", "राष्ट्रिय"],
+  politics: ["politics", "government", "election", "parliament", "राजनीति", "सरकार"],
+  business: ["business", "economy", "market", "bank", "व्यापार", "अर्थतन्त्र"],
+  technology: ["technology", "technology", "software", "internet", "ai", "प्रविधि"],
+  sports: ["sports", "cricket", "football", "खेल", "क्रिकेट", "फुटबल"],
+  entertainment: ["entertainment", "movie", "film", "music", "मनोरञ्जन", "चलचित्र"],
+};
 
 export async function generateMetadata({
   params,
@@ -103,22 +111,7 @@ export default async function CategoryPage({
     .eq("slug", slug)
     .maybeSingle();
 
-  if (categoryError) {
-    console.error(
-      `[category/${slug}] Category query failed:`,
-      categoryError
-    );
-
-    throw new Error("Unable to load category");
-  }
-
-  if (!category) {
-    /*
-     * The URL is valid but the database category
-     * does not exist.
-     */
-    notFound();
-  }
+  if (categoryError) console.error(`[category/${slug}] Category query failed:`, categoryError);
 
   /*
    * ---------------------------------------------------------
@@ -143,19 +136,22 @@ export default async function CategoryPage({
    * ---------------------------------------------------------
    */
 
-  const {
-    data: articles,
-    error: articlesError,
-  } = await db
+  let articleQuery = db
     .from("articles")
     .select("*")
-    .eq("primary_category_id", category.id)
     .eq("status", "published")
     .order("published_at", {
       ascending: false,
       nullsFirst: false,
     })
-    .limit(50);
+    .limit(category ? 50 : 100);
+
+  if (category) articleQuery = articleQuery.eq("primary_category_id", category.id);
+
+  const {
+    data: articles,
+    error: articlesError,
+  } = await articleQuery;
 
   if (articlesError) {
     console.error(
@@ -166,7 +162,15 @@ export default async function CategoryPage({
     throw new Error("Unable to load news");
   }
 
-  const safeArticles = articles ?? [];
+  const publishedArticles = articles ?? [];
+  const safeArticles = category
+    ? publishedArticles
+    : slug === "national"
+      ? publishedArticles
+      : publishedArticles.filter((article) => {
+          const text = `${article.headline ?? ""} ${article.excerpt ?? ""}`.toLocaleLowerCase();
+          return (FALLBACK_KEYWORDS[slug] ?? []).some((keyword) => text.includes(keyword));
+        });
 
   return (
     <main className="min-h-screen">

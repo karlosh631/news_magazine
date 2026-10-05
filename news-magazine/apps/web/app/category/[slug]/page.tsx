@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { notFound } from "next/navigation";
 
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
@@ -48,7 +49,7 @@ const FALLBACK_KEYWORDS: Record<string, string[]> = {
   national: ["nepal", "nepali", "नेपाल", "kathmandu", "राष्ट्रिय"],
   politics: ["politics", "government", "election", "parliament", "राजनीति", "सरकार"],
   business: ["business", "economy", "market", "bank", "व्यापार", "अर्थतन्त्र"],
-  technology: ["technology", "technology", "software", "internet", "ai", "प्रविधि"],
+  technology: ["technology", "tech", "software", "internet", "ai", "प्रविधि"],
   sports: ["sports", "cricket", "football", "खेल", "क्रिकेट", "फुटबल"],
   entertainment: ["entertainment", "movie", "film", "music", "मनोरञ्जन", "चलचित्र"],
 };

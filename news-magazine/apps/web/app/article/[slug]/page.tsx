@@ -1,10 +1,10 @@
 import Link from "next/link";
-import Image from "next/image";
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { ShareButtons } from "@/components/ShareButtons";
+import { SafeImage } from "@/components/SafeImage";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 60;
@@ -40,6 +40,7 @@ interface Article {
   video_url?: string | null;
   video_type?: string | null;
   video_thumbnail_url?: string | null;
+  audio_url?: string | null;
 
   canonical_url?: string | null;
 }
@@ -444,18 +445,14 @@ export default async function ArticlePage({
           {article.featured_image_url && (
             <figure className="mt-8">
               <div className="relative aspect-video overflow-hidden rounded-xl bg-gray-100">
-                <Image
-                  src={
-                    article.featured_image_url
-                  }
+                <SafeImage
+                  src={article.featured_image_url}
                   alt={
                     article.featured_image_alt ||
                     article.headline
                   }
-                  fill
                   priority
-                  sizes="(max-width: 768px) 100vw, 1024px"
-                  className="object-cover"
+                  className="h-full w-full object-cover"
                 />
               </div>
 
@@ -512,6 +509,18 @@ export default async function ArticlePage({
                   video playback.
                 </video>
               )}
+            </section>
+          )}
+
+          {article.audio_url && (
+            <section className="mt-8">
+              <h2 className="mb-4 font-headline text-xl font-bold">Audio</h2>
+              <audio
+                controls
+                preload="metadata"
+                src={article.audio_url}
+                className="w-full"
+              />
             </section>
           )}
 
@@ -603,15 +612,11 @@ export default async function ArticlePage({
                   >
                     {related.featured_image_url && (
                       <div className="relative aspect-video overflow-hidden rounded-lg bg-gray-100">
-                        <Image
-                          src={
-                            related.featured_image_url
-                          }
+                        <SafeImage
+                          src={related.featured_image_url}
                           alt={
                             related.headline
                           }
-                          fill
-                          sizes="(max-width: 768px) 100vw, 33vw"
                           className="object-cover transition-transform group-hover:scale-105"
                         />
                       </div>

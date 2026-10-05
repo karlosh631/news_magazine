@@ -9,10 +9,6 @@ const nextConfig = {
    * Fix TypeScript errors before production instead of relying
    * permanently on ignoreBuildErrors.
    */
-  typescript: {
-    ignoreBuildErrors: true,
-  },
-
   /*
    * Next.js Image Optimization
    *

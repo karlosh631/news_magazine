@@ -13,6 +13,8 @@ const CATEGORIES = [
   { label: "Entertainment", slug: "entertainment" },
 ];
 
+const NEPALI_CATEGORIES = ["राष्ट्रिय", "राजनीति", "व्यापार", "प्रविधि", "खेलकुद", "मनोरञ्जन"];
+
 const AUTO_REFRESH_MS = 15_000;
 
 type AiSearchResult = {
@@ -49,6 +51,7 @@ export function Header() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [language, setLanguage] = useState<"en" | "ne">("en");
   const [aiSearch, setAiSearch] = useState<AiSearchResult | null>(null);
   const [aiSearchError, setAiSearchError] = useState("");
   const [aiSearchLoading, setAiSearchLoading] = useState(false);
@@ -58,6 +61,14 @@ export function Header() {
     setReloading(true);
     router.refresh();
     window.setTimeout(() => setReloading(false), 700);
+  };
+
+  const toggleLanguage = () => {
+    setLanguage((current) => {
+      const next = current === "en" ? "ne" : "en";
+      document.documentElement.lang = next;
+      return next;
+    });
   };
 
   useEffect(() => {
@@ -148,7 +159,7 @@ export function Header() {
         </Link>
 
         <nav className="hidden items-center gap-1 md:flex">
-          {CATEGORIES.map((cat) => {
+          {CATEGORIES.map((cat, index) => {
             const href = `/category/${cat.slug}`;
             const isActive = pathname === href;
             return (
@@ -161,7 +172,7 @@ export function Header() {
                     : "text-gray-700 hover:bg-gray-100 hover:text-black"
                 }`}
               >
-                {cat.label}
+                {language === "ne" ? NEPALI_CATEGORIES[index] : cat.label}
               </Link>
             );
           })}
@@ -177,6 +188,15 @@ export function Header() {
               className="h-9 w-40 rounded-md border border-gray-300 px-3 text-xs outline-none transition focus:w-56 focus:border-black focus:ring-1 focus:ring-black"
             />
           </form>
+
+          <button
+            type="button"
+            onClick={toggleLanguage}
+            aria-label="Toggle Nepali and English labels"
+            className="h-9 min-w-9 rounded-md border border-gray-300 px-2 text-xs font-semibold text-gray-700 hover:bg-gray-100"
+          >
+            {language === "en" ? "ने" : "EN"}
+          </button>
 
           <button
             type="button"
@@ -217,7 +237,7 @@ export function Header() {
             />
           </form>
 
-          {CATEGORIES.map((cat) => {
+          {CATEGORIES.map((cat, index) => {
             const href = `/category/${cat.slug}`;
             const isActive = pathname === href;
             return (
@@ -231,7 +251,7 @@ export function Header() {
                     : "text-gray-700 hover:bg-gray-100"
                 }`}
               >
-                {cat.label}
+                {language === "ne" ? NEPALI_CATEGORIES[index] : cat.label}
               </Link>
             );
           })}

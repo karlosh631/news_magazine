@@ -118,23 +118,51 @@ export function Header({ categories }: { categories: NavCategory[] }) {
   }, []);
 
   useEffect(() => {
-    intervalRef.current = setInterval(() => {
+    const tick = () => {
+      // Never auto-refresh while the reader has something open or is
+      // typing. router.refresh() re-renders the server tree underneath
+      // the input, which is how a half-typed query used to vanish or
+      // lose focus mid-word.
+      if (searchOpen) return;
+      if (menuOpen) return;
+      const active = document.activeElement;
+      if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) return;
+      if (document.hidden) return;
+      if (window.getSelection()?.toString()) return;
+
       setReloading(true);
       router.refresh();
+      // Same signal the refresh button sends, so the client-side feed
+      // re-polls too. Without it the interval only re-rendered the
+      // server components and the visible list never changed.
+      window.dispatchEvent(new CustomEvent("news-refresh"));
       window.setTimeout(() => setReloading(false), 700);
-    }, AUTO_REFRESH_MS);
+    };
+
+    intervalRef.current = setInterval(tick, AUTO_REFRESH_MS);
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, [router]);
+  }, [router, searchOpen, menuOpen]);
 
   useEffect(() => {
     const query = searchQuery.trim();
+
+    // Empty query: clear results AND close the overlay. It used to stay
+    // open showing the previous query's hits after the reader deleted
+    // everything, which looked like search ignoring the edit.
     if (!query) {
       setAiSearch(null);
       setAiSearchError("");
+      setSearchOpen(false);
       return;
     }
+
+    // Only search while the overlay is open. Typing into a closed box
+    // (then pressing Escape before results arrived) used to fire a
+    // request for a query nobody ever sees, and the response landed
+    // after the modal was gone.
+    if (!searchOpen) return;
 
     const controller = new AbortController();
     const timer = window.setTimeout(async () => {
@@ -158,40 +186,25 @@ export function Header({ categories }: { categories: NavCategory[] }) {
       } finally {
         if (!controller.signal.aborted) setAiSearchLoading(false);
       }
-    }, 450);
+    }, 400);
 
     return () => {
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [searchQuery]);
+  }, [searchQuery, searchOpen]);
 
-  const handleSearchSubmit = async (e: React.FormEvent) => {
+  const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const query = searchQuery.trim();
     if (!query) return;
 
-    setAiSearchLoading(true);
-    setAiSearchError("");
-    try {
-      const response = await fetch("/api/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query }),
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "Search failed.");
-      setAiSearch(payload as SearchResult);
-    } catch (error) {
-      setAiSearch(null);
-      setAiSearchError(error instanceof Error ? error.message : "Search failed.");
-    } finally {
-      setAiSearchLoading(false);
-    }
-
-    router.push(`/search?q=${encodeURIComponent(query)}`);
-    closeSearch();
+    // Navigate only. The debounced effect above already issued the
+    // search for this query, and /search runs its own server-side query,
+    // so fetching again here meant three database round trips per Enter.
+    setSearchOpen(false);
     setMenuOpen(false);
+    router.push(`/search?q=${encodeURIComponent(query)}`);
   };
 
   return (

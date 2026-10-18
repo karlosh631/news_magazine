@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { EmptyState } from "@/components/EmptyState";
 import { NewsCard } from "@/components/NewsCard";
@@ -10,45 +10,105 @@ import type { LatestArticle } from "@/types/database";
  * Live-updating article feed.
  *
  * Renders the server-rendered articles immediately (so the page is
- * never blank), then polls /api/live-news and swaps in newer stories as
+ * never blank), then polls /api/live-news and merges in newer stories as
  * the ingestion worker publishes them.
  *
- * Why 30 seconds and not the 1 second you asked for: the worker polls
- * each outlet on its own interval — 180s to 1800s — so at most a handful
- * of outlets publish a given minute. Polling our own database every
- * second would be ~2,900 requests an hour per open tab to surface the
- * same handful of stories a few seconds sooner. It costs Supabase
- * quota and shows nothing. 30s is well inside the window where a new
- * story actually exists.
+ * Why not the 1 second you asked for: the worker polls each outlet on
+ * its own interval — 180s to 1800s — so at most a handful of outlets
+ * publish a given minute. Polling our own database every second would be
+ * ~3,600 requests an hour per open tab to surface the same handful of
+ * stories a few seconds sooner. It costs Supabase quota and shows
+ * nothing. 15s is comfortably inside the window where a new story
+ * actually exists.
  *
- * New arrivals are queued behind a "N new stories" pill rather than
- * yanking the list out from under someone mid-read.
+ * Two things keep the page feeling alive between polls:
+ *
+ *   1. New arrivals are merged straight into the visible list. They used
+ *      to be queued in `pending`, which was never rendered — so a story
+ *      published while the tab was open was collected, counted, and then
+ *      silently dropped. The "N new stories" pill that used to surface
+ *      them was removed on request, so the merge is the only path.
+ *
+ *   2. When a poll returns nothing new, the list rotates. Ingestion runs
+ *      on a 3–30 minute cycle per outlet and Render/GitHub add their own
+ *      lag on top, so for minutes at a time the top of the page is
+ *      genuinely static. Rotation changes the composition without
+ *      inventing anything: the same real articles, reordered.
  */
 
-const POLL_MS = 30_000;
+/**
+ * How often to re-poll our own database.
+ *
+ * This is a read against Supabase, not against the news publishers —
+ * the worker is what talks to those, on its own 3-30 minute schedule.
+ * Polling faster than the worker publishes re-fetches the same rows and
+ * shows nothing; at one-second intervals it is ~3,600 requests an hour
+ * per open tab, which is a good way to get the project throttled or
+ * suspended by Supabase for everyone else's sake.
+ *
+ * 15s sits comfortably inside the worker's own cadence and costs four
+ * cheap reads a minute per tab. Polling pauses while the tab is
+ * hidden, and the newest stories appear the instant they are detected.
+ */
+const POLL_MS = 15_000;
+
+/** How long a poll cycle can return nothing before we rotate. */
+const ROTATE_AFTER_MS = 90_000;
+
+/** How often the list re-composes while nothing new has arrived. */
+const ROTATE_MS = 75_000;
+
+/**
+ * How many of the newest articles rotation must never touch.
+ *
+ * Three is the first row of the 3-column grid, so what the reader sees
+ * first stays strictly newest-first; everything below re-composes.
+ */
+const PINNED = 3;
+
+type Rotate = "off" | "on";
 
 export function LiveArticleFeed({
   initialArticles,
   emptyState,
+  rotation = "on",
 }: {
   initialArticles: LatestArticle[];
   emptyState?: { title: string; description: string };
+  rotation?: Rotate;
 }) {
   const [articles, setArticles] = useState(initialArticles);
-  const [pending, setPending] = useState<LatestArticle[]>([]);
   const [checking, setChecking] = useState(false);
   const [lastChecked, setLastChecked] = useState<number | null>(null);
   // null until the reader picks a language, so the server-rendered
   // feed (which is unfiltered) is not yanked away on hydration.
   const [language, setLanguage] = useState<"en" | "ne" | null>(null);
 
+  // Rotation is suppressed while the reader is actually reading: hovering
+  // a card, holding a selection, or having the tab in the background.
+  const [paused, setPaused] = useState(false);
+  const [reduceMotion, setReduceMotion] = useState(false);
+
   const ids = useRef(new Set(initialArticles.map((a) => a.id)));
+  const lastArrivalAt = useRef<number | null>(null);
+  const gridRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setArticles(initialArticles);
     ids.current = new Set(initialArticles.map((a) => a.id));
-    setPending([]);
+    lastArrivalAt.current = null;
   }, [initialArticles]);
+
+  // Respect the OS "reduce motion" setting. Reordering the grid under a
+  // reader who asked for less movement is exactly the kind of thing that
+  // setting exists to prevent.
+  useEffect(() => {
+    const query = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const apply = () => setReduceMotion(query.matches);
+    apply();
+    query.addEventListener("change", apply);
+    return () => query.removeEventListener("change", apply);
+  }, []);
 
   // Pick up the language the reader chose in the header. Stage 1
   // dispatched this event but nothing listened to it, so the toggle
@@ -84,23 +144,19 @@ export function LiveArticleFeed({
         if (reset) {
           setArticles(fresh);
           ids.current = new Set(fresh.map((a) => a.id));
-          setPending([]);
+          lastArrivalAt.current = null;
           return;
         }
 
         // Only genuinely new ids, and only ones we do not already show.
-        const unseen = fresh.filter((a) => !ids.current.has(a.id));
-        if (unseen.length > 0) {
-          setPending((current) => {
-            const merged = [...unseen, ...current];
-            const seen = new Set<string>();
-            return merged.filter((a) => {
-              if (seen.has(a.id)) return false;
-              seen.add(a.id);
-              return true;
-            });
-          });
-        }
+        setArticles((current) => {
+          const unseen = fresh.filter((a) => !ids.current.has(a.id));
+          if (unseen.length === 0) return current;
+
+          for (const article of unseen) ids.current.add(article.id);
+          lastArrivalAt.current = Date.now();
+          return [...unseen, ...current];
+        });
       } catch {
         // Offline or the API restarting: the list stays as-is.
       } finally {
@@ -141,20 +197,91 @@ export function LiveArticleFeed({
     };
   }, [check, language]);
 
+  // ---- Rotation ----
+  //
+  // Only ever reorders. The pool of articles is fixed until a poll finds
+  // something new.
+  const rotate = useCallback(() => {
+    setArticles((current) => {
+      if (current.length < PINNED + 3) return current;
+
+      // Nothing new for a while: the top of the page has been static for
+      // minutes because ingestion runs on a 3-30 minute cycle per outlet.
+      const stale =
+        lastArrivalAt.current === null ||
+        Date.now() - lastArrivalAt.current > ROTATE_AFTER_MS;
+      if (!stale) return current;
+
+      // The newest few are pinned. Reordering below them keeps the
+      // "newest first" promise intact — a story published a minute ago
+      // must not be pushed below a rotation just to make the page look
+      // busy, which is the opposite of what a reader is checking for.
+      const head = current.slice(0, PINNED);
+      const rest = current.slice(PINNED);
+
+      // Promote the oldest quarter of the remainder, preserving relative
+      // order inside both halves. A full shuffle is unreadable; a
+      // one-item nudge is invisible.
+      const cut = Math.max(1, Math.round(rest.length / 4));
+      return [...head, ...rest.slice(rest.length - cut), ...rest.slice(0, rest.length - cut)];
+    });
+  }, []);
+
+  useEffect(() => {
+    if (rotation === "off" || reduceMotion) return;
+
+    const timer = window.setInterval(() => {
+      if (paused) return;
+      if (typeof document !== "undefined" && document.hidden) return;
+      if (window.getSelection()?.toString()) return; // reader is selecting text
+      rotate();
+    }, ROTATE_MS);
+
+    return () => window.clearInterval(timer);
+  }, [rotate, rotation, reduceMotion, paused]);
+
+  // Hovering the grid pauses rotation. Grabbing a card is not the moment
+  // to have the floor move under it.
+  const pause = useCallback((on: boolean) => {
+    if (typeof document !== "undefined" && document.hidden) return;
+    setPaused(on);
+  }, []);
+
+  const visible = useMemo(() => articles, [articles]);
+
+  if (visible.length === 0) {
+    return (
+      <EmptyState
+        title={emptyState?.title ?? "No stories yet"}
+        description={
+          emptyState?.description ??
+          "The ingestion worker has not published anything yet."
+        }
+      />
+    );
+  }
+
   return (
-    <div>
-      {articles.length === 0 ? (
-        <EmptyState
-          title={emptyState?.title ?? "No stories yet"}
-          description={emptyState?.description ?? "The ingestion worker has not published anything yet."}
-        />
-      ) : (
-        <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
-          {articles.map((article) => (
-            <NewsCard key={article.id} article={article} language={language ?? "en"} />
-          ))}
-        </div>
-      )}
+    <div
+      ref={gridRef}
+      onMouseEnter={() => pause(true)}
+      onMouseLeave={() => pause(false)}
+    >
+      <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+        {visible.map((article) => (
+          <NewsCard
+            key={article.id}
+            article={article}
+            language={language ?? "en"}
+          />
+        ))}
+      </div>
+
+      {/* Screen readers get the polling state without it costing a
+          re-render every second. */}
+      <p className="sr-only" role="status" aria-live="polite">
+        {checking ? "Checking for new stories." : "Feed up to date."}
+      </p>
     </div>
   );
 }

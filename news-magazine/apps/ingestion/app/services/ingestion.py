@@ -122,6 +122,7 @@ class IngestionResult:
     enriched: int = 0
     errors: int = 0
     pruned: int = 0
+    links_skipped: int = 0
     dedup_detail: str = ""
     error_details: list[dict] = field(default_factory=list)
 
@@ -134,6 +135,7 @@ class IngestionResult:
             "enriched": self.enriched,
             "errors": self.errors,
             "pruned": self.pruned,
+            "links_skipped": self.links_skipped,
             "dedup_detail": self.dedup_detail,
         }
 
@@ -358,62 +360,144 @@ async def load_categories(db) -> tuple[Categorizer, dict[str, str]]:
 # STORE
 # =============================================================
 
+# articles.id, articles.source_id and article_sources.article_id are all
+# uuid columns. Postgres will not coerce anything else, so a bad value
+# comes back as "invalid input syntax for type uuid" — which, before
+# this guard, was raised once per article and buried genuine failures.
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
+def _clean_uuid(value: Any) -> str | None:
+    """The value as a bare UUID string, or None if it is not one."""
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    return candidate if _UUID_RE.match(candidate) else None
+
+
+def _is_uuid(value: Any) -> bool:
+    """True only for a real UUID string. None, "", and dicts all fail."""
+    return _clean_uuid(value) is not None
+
+
+def _extract_id(response: Any) -> str | None:
+    """Pull the id out of a PostgREST response, or None if there isn't one."""
+    data = getattr(response, "data", None) or []
+    if not data or not isinstance(data[0], dict):
+        return None
+    return _clean_uuid(data[0].get("id"))
+
+
+async def _lookup_id_by_slug(db, slug: str) -> str | None:
+    """
+    Recover the id of a row we know was written.
+
+    PostgREST is allowed to answer an upsert with no representation
+    (`Prefer: return=minimal`, or simply a response shape that carries
+    no rows). The article is in the table either way, so treating an
+    empty response as "not stored" counted real articles as rejected and
+    permanently skipped their article_sources link.
+    """
+    try:
+        response = await db_call(
+            lambda: db.table("articles").select("id").eq("slug", slug).limit(1).execute()
+        )
+    except Exception:
+        logger.debug("slug recovery lookup failed for %s", slug)
+        return None
+
+    for row in response.data or []:
+        found = (row or {}).get("id")
+        if _is_uuid(found):
+            return found
+    return None
+
+
 async def _upsert_article_source(
     db, article_id, source_id, source_article_url, is_primary=False
-) -> bool:
+) -> str:
     """
     Record that this outlet also carried the story.
 
-    Stage 1 upserted on `source_id,source_article_url`, a unique
-    constraint that does not exist in the schema — so every call raised
-    and the table stayed permanently empty, which is why the
-    multi-outlet merge record never appeared. Migration 0009 adds the
-    real constraint; until it is applied we fall back to a read-then-
-    write so the relationship is still recorded.
+    Returns "created", "exists" or "skipped", so the caller can tell a
+    genuinely new outlet from one we have already recorded. That
+    distinction is what keeps `source_count` honest: bumping it on every
+    poll turned "reported by 4 outlets" into a number that climbed
+    every few minutes for as long as the story stayed inside the dedup
+    window.
+
+    Deliberately read-then-insert rather than an ON CONFLICT upsert.
+    Migration 0009 declares TWO unique indexes — (article_id, source_id)
+    and (source_id, source_article_url) — and ON CONFLICT can only name
+    one. Upserting on the first still raised a unique violation on the
+    second when an outlet re-filed the same story under a new URL. An
+    explicit existence check has no such blind spot, and it works
+    whether or not 0009 has been applied.
+
+    Only ever called with an id that already exists in `articles`. Both
+    ids are shape-checked first: a link cannot be written without an
+    article row, so when there is no valid id the call is skipped
+    quietly instead of raising a raw Postgres type error.
     """
-    if not article_id or not source_id or not source_article_url:
-        return False
+    article_uuid = _clean_uuid(article_id)
+    if not article_uuid:
+        if article_id:
+            logger.debug(
+                "article_sources: skipping link, article_id %r is not a uuid",
+                article_id,
+            )
+        return "skipped"
 
-    payload = {
-        "article_id": article_id,
-        "source_id": source_id,
-        "source_article_url": source_article_url,
-        "is_primary": is_primary,
-    }
+    source_uuid = _clean_uuid(source_id)
+    if not source_uuid:
+        if source_id:
+            logger.debug(
+                "article_sources: skipping link, source_id %r is not a uuid",
+                source_id,
+            )
+        return "skipped"
 
-    try:
-        await db_call(
-            lambda: db.table("article_sources")
-            .upsert(payload, on_conflict="article_id,source_id")
-            .execute()
-        )
-        return True
-    except Exception:
-        logger.debug(
-            "article_sources upsert on (article_id,source_id) unavailable — "
-            "apply migration 0009 to enable it"
-        )
+    if not source_article_url:
+        return "skipped"
 
-    # Fallback: read then insert. Not atomic, but the unique index added
-    # in 0009 makes a duplicate insert a no-op rather than a crash.
     try:
         existing = await db_call(
             lambda: db.table("article_sources")
             .select("id")
-            .eq("article_id", article_id)
-            .eq("source_id", source_id)
+            .eq("article_id", article_uuid)
+            .eq("source_id", source_uuid)
             .limit(1)
             .execute()
         )
         if existing.data:
-            return True
+            return "exists"
+
         await db_call(
-            lambda: db.table("article_sources").insert(payload).execute()
+            lambda: db.table("article_sources")
+            .insert(
+                {
+                    "article_id": article_uuid,
+                    "source_id": source_uuid,
+                    "source_article_url": source_article_url,
+                    "is_primary": is_primary,
+                }
+            )
+            .execute()
         )
-        return True
-    except Exception:
-        logger.exception("Failed to record article_sources relationship")
-        return False
+        return "created"
+    except Exception as exc:
+        # The article itself is already stored, so this is a degraded
+        # merge record, not a lost story. A warning, not a traceback —
+        # at 200+ articles a run, an exception here is pure noise that
+        # hides the errors that matter.
+        logger.warning(
+            "Could not record article_sources link for article %s: %s",
+            article_uuid, exc,
+        )
+        return "skipped"
 
 
 async def _bump_source_count(db, article_id: str) -> None:
@@ -424,6 +508,9 @@ async def _bump_source_count(db, article_id: str) -> None:
     sources polled concurrently would otherwise both read 1, both write
     2, and one increment would be lost.
     """
+    if not _is_uuid(article_id):
+        return
+
     try:
         await db_call(
             lambda: db.rpc(
@@ -457,6 +544,11 @@ async def store_article(
     summary_points is a JSON array of exactly four sentences lifted
     verbatim from the outlet's article — see services/summarizer.py. It
     is never generated text.
+
+    Returns the article's uuid, or None when the row was NOT written.
+    Never raises: the caller uses the return value to decide whether it
+    is safe to write the article_sources link, so an exception here
+    would turn a storage problem into an unhandled error mid-feed.
     """
     now = datetime.now(timezone.utc).isoformat()
     slug = make_slug(article.headline, source_row.get("sector"), content_hash)
@@ -495,13 +587,39 @@ async def store_article(
         "published_at": article.published_at or now,
         "ingested_at": now,
         "last_seen_at": now,
-        "source_count": 1,
+        # source_count is deliberately NOT in this payload. This is an
+        # UPSERT, so on a re-poll Postgres turns it into
+        # SET source_count = 1 — resetting "reported by 4 outlets" back
+        # to 1 every cycle. The column is `not null default 1`
+        # (migration 0007), so a fresh insert still gets 1 and an
+        # existing row keeps whatever increment_article_source_count()
+        # raised it to.
     }
 
-    response = await db_call(
-        lambda: db.table("articles").upsert(row, on_conflict="slug").execute()
-    )
-    return (response.data or [{}])[0].get("id")
+    try:
+        response = await db_call(
+            lambda: db.table("articles").upsert(row, on_conflict="slug").execute()
+        )
+    except Exception as exc:
+        # articles_content_hash_idx is UNIQUE (0001) while we upsert on
+        # `slug`, so a story whose hash already exists under a different
+        # slug cannot be written here. That is a legitimate outcome — the
+        # story is already stored — so it is reported, not raised, and the
+        # caller skips the link instead of chasing a dead article id.
+        logger.info(
+            "articles upsert failed for %r: %s",
+            article.headline[:80], exc,
+        )
+        return None
+
+    article_id = _extract_id(response)
+    if article_id:
+        return article_id
+
+    # No representation came back. The row may still be in the table, so
+    # look it up by the slug we just wrote rather than reporting a
+    # successfully stored article as rejected.
+    return await _lookup_id_by_slug(db, row["slug"])
 
 
 # =============================================================
@@ -717,14 +835,21 @@ async def run_source_sync(
 
                 if verdict.is_duplicate and verdict.existing_id:
                     result.duplicates += 1
-                    await _upsert_article_source(
+                    link = await _upsert_article_source(
                         db=db,
                         article_id=verdict.existing_id,
                         source_id=source_id,
                         source_article_url=article.source_article_url,
                         is_primary=False,
                     )
-                    await _bump_source_count(db, verdict.existing_id)
+                    if link == "skipped":
+                        result.links_skipped += 1
+                    # Only a link we had not recorded before is a new
+                    # outlet. Bumping on every poll made source_count
+                    # climb continuously for any story still inside the
+                    # 12h dedup window.
+                    if link == "created":
+                        await _bump_source_count(db, verdict.existing_id)
                     logger.info(
                         # f-string rather than %-args: the worker's
                         # structlog config renders stdlib log records as
@@ -811,15 +936,35 @@ async def run_source_sync(
                 )
 
                 if article_id:
-                    await _upsert_article_source(
+                    # The row exists, so the link is safe to write. This
+                    # is the primary outlet for a story that is already
+                    # stored, so the counter must not move: it already
+                    # counted this outlet the first time.
+                    link = await _upsert_article_source(
                         db=db,
                         article_id=article_id,
                         source_id=source_id,
                         source_article_url=article.source_article_url,
                         is_primary=True,
                     )
+                    if link == "skipped":
+                        result.links_skipped += 1
                     result.new += 1
+
+                    # Teach the deduper this article's id. Without it an
+                    # in-run duplicate resolves with existing_id=None
+                    # and falls through to being stored as a second copy
+                    # of the same story.
+                    dedup.bind_article_id(
+                        headline=headline,
+                        fingerprint=fingerprint,
+                        url=article.canonical_url or article.source_article_url,
+                        article_id=article_id,
+                    )
                 else:
+                    # No valid id means no row. Count it as rejected and
+                    # deliberately do NOT attempt the article_sources
+                    # write — there is nothing to link to.
                     result.rejected += 1
 
             except Exception as exc:

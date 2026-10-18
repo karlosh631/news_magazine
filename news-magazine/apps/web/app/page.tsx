@@ -1,8 +1,57 @@
+import type { Metadata } from "next";
+
 import { BreakingNewsTicker } from "@/components/BreakingNewsTicker";
 import { LiveArticleFeed } from "@/components/LiveArticleFeed";
 import { getBreakingNews, getLatestArticles } from "@/lib/news";
+import { SITE_LOGO, SITE_NAME, SITE_URL, jsonLd } from "@/lib/site";
 
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = {
+  alternates: { canonical: "/" },
+};
+
+/**
+ * Site-level structured data.
+ *
+ * The homepage carried no JSON-LD at all, so search engines had no
+ * statement of what this site *is* and no way to associate the search
+ * box with it. WebSite + SearchAction is what makes the site's own search
+ * eligible to be surfaced as a sitelinks searchbox.
+ */
+const structuredData = {
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "NewsMediaOrganization",
+      "@id": `${SITE_URL}/#organization`,
+      name: SITE_NAME,
+      url: SITE_URL,
+      logo: {
+        "@type": "ImageObject",
+        url: SITE_LOGO,
+        width: 192,
+        height: 192,
+      },
+    },
+    {
+      "@type": "WebSite",
+      "@id": `${SITE_URL}/#website`,
+      name: SITE_NAME,
+      url: SITE_URL,
+      publisher: { "@id": `${SITE_URL}/#organization` },
+      inLanguage: ["ne", "en"],
+      potentialAction: {
+        "@type": "SearchAction",
+        target: {
+          "@type": "EntryPoint",
+          urlTemplate: `${SITE_URL}/search?q={search_term_string}`,
+        },
+        "query-input": "required name=search_term_string",
+      },
+    },
+  ],
+};
 
 /**
  * Homepage.
@@ -21,6 +70,11 @@ export default async function HomePage() {
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-8">
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: jsonLd(structuredData) }}
+      />
+
       {breaking.length > 0 && <BreakingNewsTicker articles={breaking} />}
 
       <LiveArticleFeed

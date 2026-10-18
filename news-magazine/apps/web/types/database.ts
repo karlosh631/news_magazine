@@ -54,6 +54,17 @@ export interface ArticleRow {
   summary_points: string[] | null;
   summary_method: string | null;
 
+  /**
+   * Machine translation, written by apps/ingestion/scripts/
+   * translate_content.py (migration 0011). The originals above are
+   * never overwritten.
+   */
+  headline_translated: string | null;
+  summary_points_translated: string[] | null;
+  translation_language: string | null;
+  translated_by: string | null;
+  translated_at: string | null;
+
   featured_image_url: string | null;
   featured_image_alt: string | null;
   image_highres_url: string | null;

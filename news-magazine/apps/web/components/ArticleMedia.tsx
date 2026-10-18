@@ -46,7 +46,7 @@ export function ArticleMedia({
       )}
 
       {showAudio && audioUrl && (
-        <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+        <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-800">
           <span className="mb-2 block text-[10px] font-semibold uppercase tracking-wider text-gray-500">
             Audio
           </span>

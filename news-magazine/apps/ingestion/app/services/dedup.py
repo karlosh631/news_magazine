@@ -40,7 +40,7 @@ import hashlib
 import logging
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -374,6 +374,42 @@ class Deduplicator:
         tokens = title_tokens(headline)
         if tokens:
             self._token_index[",".join(sorted(tokens))] = stored
+
+    def bind_article_id(
+        self,
+        headline: str,
+        fingerprint: str,
+        url: str | None,
+        article_id: str,
+    ) -> None:
+        """
+        Attach the stored row's id to an entry already in the run maps.
+
+        `remember()` runs during `check()`, which is BEFORE the article is
+        written, so the id is not known yet and the stored verdict keeps
+        `existing_id = None`. Every later in-run duplicate then resolved
+        as `is_duplicate=True, existing_id=None`, and the caller — which
+        requires an id before honouring a duplicate — fell straight
+        through and stored the syndicated copy as a brand new article.
+
+        So two outlets filing the same story during one sync pass created
+        two rows. This is called immediately after store_article() to
+        close that gap.
+        """
+        if not article_id:
+            return
+
+        for key in (url, fingerprint):
+            if key and key in self._local:
+                self._local[key] = replace(self._local[key], existing_id=article_id)
+
+        tokens = title_tokens(headline)
+        if tokens:
+            token_key = ",".join(sorted(tokens))
+            if token_key in self._token_index:
+                self._token_index[token_key] = replace(
+                    self._token_index[token_key], existing_id=article_id
+                )
 
     # -- database path -----------------------------------------------------
 

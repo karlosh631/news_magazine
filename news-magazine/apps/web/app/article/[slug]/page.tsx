@@ -5,9 +5,10 @@ import type { Metadata } from "next";
 import { ShareButtons } from "@/components/ShareButtons";
 import { ArticleViewTracker } from "@/components/ArticleViewTracker";
 import { ArticleMedia } from "@/components/ArticleMedia";
-import { SummaryPoints } from "@/components/SummaryPoints";
+import { TranslatePoints } from "@/components/TranslatePoints";
 import { getArticleBySlug, getCategories, getRelatedArticles } from "@/lib/news";
 import { formatNewsDate } from "@/lib/date";
+import { SITE_LOGO, SITE_NAME, SITE_URL, clampDescription, jsonLd } from "@/lib/site";
 
 export const dynamic = "force-dynamic";
 
@@ -48,27 +49,42 @@ export async function generateMetadata({ params }: Props2): Promise<Metadata> {
   const article = await getArticleBySlug(slug);
 
   if (!article) {
-    return { title: "Article not found | Nepal News & Magazine" };
+    return { title: "Article not found" };
   }
 
   const image = article.image_highres_url ?? article.featured_image_url ?? undefined;
-  const description = article.excerpt ?? article.subtitle ?? undefined;
+  const description = clampDescription(article.excerpt ?? article.subtitle);
+  const url = `${SITE_URL}/article/${article.slug}`;
 
   return {
-    title: `${article.headline} | Nepal News & Magazine`,
-    description,
+    // No site-name suffix here. layout.tsx declares
+    // title.template = "%s | Nepal News & Magazine", so appending it
+    // again produced "Headline | Nepal News & Magazine | Nepal News &
+    // Magazine" in every indexable title on the site.
+    title: article.headline,
+    description: description || undefined,
+    alternates: { canonical: url },
     openGraph: {
       title: article.headline,
-      description,
+      description: description || undefined,
       type: "article",
+      url,
+      siteName: SITE_NAME,
+      locale: article.language === "en" ? "en_US" : "ne_NP",
       publishedTime: article.published_at ?? undefined,
-      images: image ? [{ url: image }] : undefined,
+      modifiedTime: article.updated_at ?? article.published_at ?? undefined,
+      authors: article.source_name_snapshot
+        ? [article.source_name_snapshot]
+        : undefined,
+      images: image
+        ? [{ url: image, width: 1200, height: 630, alt: article.headline }]
+        : [{ url: SITE_LOGO, width: 192, height: 192, alt: SITE_NAME }],
     },
     twitter: {
-      card: image ? "summary_large_image" : "summary",
+      card: "summary_large_image",
       title: article.headline,
-      description,
-      images: image ? [image] : undefined,
+      description: description || undefined,
+      images: image ? [image] : [SITE_LOGO],
     },
   };
 }
@@ -106,26 +122,94 @@ export default async function ArticlePage({ params }: Props) {
     article.image_highres_url ?? article.featured_image_url ?? article.gif_url ?? null;
   const embed = embeddableVideo(article.video_embed_url ?? article.video_url);
 
+  const articleUrl = `${SITE_URL}/article/${article.slug}`;
+  const description = clampDescription(article.excerpt ?? article.subtitle);
+
   const structuredData = {
     "@context": "https://schema.org",
     "@type": "NewsArticle",
     headline: article.headline,
-    description: article.excerpt ?? article.subtitle ?? undefined,
+    description: description || undefined,
     datePublished: article.published_at ?? undefined,
     dateModified: article.updated_at ?? article.published_at ?? undefined,
-    image: image ? [image] : undefined,
+    url: articleUrl,
     mainEntityOfPage: {
       "@type": "WebPage",
-      "@id": article.canonical_url ?? `/article/${article.slug}`,
+      // Absolute, and pointing at THIS site.
+      //
+      // It used to be `article.canonical_url ?? "/article/<slug>"`, and
+      // canonical_url holds the *originating outlet's* address — so a
+      // story from kathmandupost.com declared its canonical to be
+      // kathmandupost.com. That tells search engines this page is a
+      // duplicate of the original and drops it from the index. The
+      // fallback was a relative path, which is not a resolvable IRI.
+      "@id": articleUrl,
     },
-    publisher: { "@type": "Organization", name: article.source_name_snapshot ?? "Nepal News & Magazine" },
+    image: image ? [image] : [SITE_LOGO],
+    // This page is published by the site operator.
+    //
+    // publisher used to be set to source_name_snapshot, i.e. the third-
+    // party outlet the story came from. Declaring someone else's name
+    // as the publisher of a page they do not own is publisher
+    // impersonation in structured data, and it had no logo, which is
+    // what Google checks first for News eligibility.
+    publisher: {
+      "@type": "NewsMediaOrganization",
+      name: SITE_NAME,
+      url: SITE_URL,
+      logo: {
+        "@type": "ImageObject",
+        // 192px, not app/icon.svg: Google's publisher-logo guidance
+        // requires at least 112x112 and that SVG's viewBox is 64x64.
+        url: SITE_LOGO,
+        width: 192,
+        height: 192,
+      },
+    },
+    // Credit the outlet that actually filed the story.
+    author: article.source_name_snapshot
+      ? {
+          "@type": "Organization",
+          name: article.source_name_snapshot,
+          url: article.source_article_url ?? undefined,
+        }
+      : undefined,
+    isBasedOn: article.source_article_url ?? undefined,
+    inLanguage: article.language === "en" ? "en" : "ne",
+    articleSection: category?.name_en ?? undefined,
+    wordCount: article.word_count ?? undefined,
+  };
+
+  const breadcrumbData = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "Home", item: SITE_URL },
+      ...(category
+        ? [
+            {
+              "@type": "ListItem",
+              position: 2,
+              name: category.name_en,
+              item: `${SITE_URL}/category/${category.slug}`,
+            },
+          ]
+        : []),
+      { "@type": "ListItem", position: category ? 3 : 2, name: article.headline, item: articleUrl },
+    ],
   };
 
   return (
     <>
+      {/* jsonLd() escapes `<`, so a headline containing `</script>`
+          cannot close this element and inject markup. */}
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData) }}
+        dangerouslySetInnerHTML={{ __html: jsonLd(structuredData) }}
+      />
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: jsonLd(breadcrumbData) }}
       />
 
       {/* One view per page view, not per render. */}
@@ -166,13 +250,22 @@ export default async function ArticlePage({ params }: Props) {
             )}
           </div>
 
-          {/* The four points, extracted verbatim from the article. */}
+          {/* The four points, extracted verbatim from the article.
+
+              Dark variants throughout: this panel had a fixed
+              `bg-blue-50/60` with no `dark:` pair, so in dark mode a
+              pale blue card sat on a near-black page behind light
+              text — unreadable. */}
           {points.length > 0 && (
-            <section className="mt-6 rounded-lg border border-blue-100 bg-blue-50/60 p-5">
-              <h2 className="text-xs font-bold uppercase tracking-wider text-blue-700">
+            <section className="mt-6 rounded-lg border border-blue-100 bg-blue-50/60 p-5 dark:border-blue-900/60 dark:bg-blue-950/40">
+              <h2 className="text-xs font-bold uppercase tracking-wider text-blue-700 dark:text-blue-300">
                 In this story
               </h2>
-              <SummaryPoints points={points} />
+              <TranslatePoints
+                points={points}
+                language={article.language}
+                translated={article.summary_points_translated ?? null}
+              />
             </section>
           )}
 
@@ -220,7 +313,7 @@ export default async function ArticlePage({ params }: Props) {
               href={article.source_article_url}
               target="_blank"
               rel="noopener noreferrer nofollow"
-              className="mt-8 flex items-center justify-between rounded-lg border-2 border-blue-600 bg-blue-50 px-5 py-4 font-semibold text-blue-800 transition hover:bg-blue-100"
+              className="mt-8 flex items-center justify-between rounded-lg border-2 border-blue-600 bg-blue-50 px-5 py-4 font-semibold text-blue-800 transition hover:bg-blue-100 dark:border-blue-500 dark:bg-blue-950/50 dark:text-blue-200 dark:hover:bg-blue-900/50"
             >
               <span>
                 Read the full story on{" "}
@@ -242,7 +335,7 @@ export default async function ArticlePage({ params }: Props) {
                 <Link
                   key={related.id}
                   href={`/article/${related.slug}`}
-                  className="group block rounded-lg border border-gray-200 bg-white p-4 transition hover:border-gray-400"
+                  className="group block rounded-lg border border-gray-200 bg-white p-4 transition hover:border-gray-400 dark:border-gray-700 dark:bg-gray-900 dark:hover:border-gray-500"
                 >
                   <h3 className="font-semibold leading-snug text-gray-900 group-hover:text-blue-700">
                     {related.headline}

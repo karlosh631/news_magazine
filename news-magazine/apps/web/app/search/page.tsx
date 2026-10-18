@@ -1,3 +1,5 @@
+import type { Metadata } from "next";
+
 import { EmptyState } from "@/components/EmptyState";
 import { NewsCard } from "@/components/NewsCard";
 import { ResurrectionNotice } from "@/components/ResurrectionNotice";
@@ -5,6 +7,23 @@ import { searchArticles, toCardArticle } from "@/lib/news";
 import { triggerResurrection } from "@/lib/resurrection";
 
 export const dynamic = "force-dynamic";
+
+/**
+ * Search results must never be indexed.
+ *
+ * The page had no metadata at all, so it inherited the site defaults —
+ * indexable. Every distinct query string then produced a separate
+ * indexable URL of thin, duplicate-ish content, which is exactly the
+ * pattern that gets a search section deindexed. robots.txt cannot fix
+ * this on its own: "allow" in robots.txt only says a page may be
+ * crawled, the noindex has to come from a meta robots tag.
+ *
+ * follow stays true so the links inside still pass authority onward.
+ */
+export const metadata: Metadata = {
+  title: "Search",
+  robots: { index: false, follow: true },
+};
 
 const PAGE_SIZE = 12;
 

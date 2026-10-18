@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import { EmptyState } from "@/components/EmptyState";
 import { NewsCard } from "@/components/NewsCard";
 import { getCategories, getLatestArticles } from "@/lib/news";
+import { SITE_NAME, SITE_URL } from "@/lib/site";
 
 export const dynamic = "force-dynamic";
 
@@ -24,13 +25,30 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   );
 
   if (!category) {
-    return { title: "Category not found | Nepal News & Magazine" };
+    return { title: "Category not found" };
   }
 
   const name = category.name_ne ?? category.name_en;
+  const description = `Latest ${category.name_en.toLowerCase()} news from across Nepal, aggregated from more than 20 Nepali outlets and deduplicated.`;
+
   return {
-    title: `${name} News | Nepal News & Magazine`,
-    description: `Latest ${category.name_en.toLowerCase()} news from across Nepal.`,
+    // The site name comes from layout.tsx's title.template — appending
+    // it here duplicated it in every category title.
+    title: `${category.name_en} news`,
+    description,
+    alternates: { canonical: `/category/${category.slug}` },
+    openGraph: {
+      title: `${name} — latest news`,
+      description,
+      type: "website",
+      url: `${SITE_URL}/category/${category.slug}`,
+      siteName: SITE_NAME,
+    },
+    twitter: {
+      card: "summary_large_image",
+      title: `${name} — latest news`,
+      description,
+    },
   };
 }
 

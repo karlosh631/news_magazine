@@ -211,3 +211,67 @@ def test_check_with_no_database_still_dedups_within_the_run():
 
     assert isinstance(dup, DuplicateVerdict)
     assert dup.is_duplicate is True
+
+# =============================================================
+# In-run dedup has to carry the stored article's id
+# =============================================================
+
+def test_in_run_duplicate_carries_the_stored_article_id_after_binding():
+    """
+    The bug this pins: remember() runs inside check(), before the row is
+    written, so the in-run verdict kept existing_id=None. The caller in
+    run_source_sync() requires an id before honouring a duplicate, so a
+    syndicated copy polled in the same pass fell through and was stored
+    as a second article — the exact thing dedup exists to prevent.
+    """
+    headline = "Cabinet approves Rs 500 crore budget for metro rail"
+    stored_id = "11111111-1111-1111-1111-111111111111"
+
+    dedup = Deduplicator()
+
+    first = dedup.check(headline=headline, canonical_url="https://a.example/1")
+    assert first.is_duplicate is False
+
+    # The same story from a second outlet, before the id is bound.
+    unbound = dedup.check(headline=headline, canonical_url="https://b.example/9")
+    assert unbound.is_duplicate is True
+    assert unbound.existing_id is None, "expected pre-bind state"
+
+    dedup.bind_article_id(
+        headline=headline,
+        fingerprint=token_fingerprint(headline),
+        url="https://a.example/1",
+        article_id=stored_id,
+    )
+
+    bound = dedup.check(headline=headline, canonical_url="https://c.example/3")
+    assert bound.is_duplicate is True
+    assert bound.existing_id == stored_id
+
+
+def test_bind_article_id_does_not_create_entries():
+    """Binding must only update what remember() already recorded."""
+    dedup = Deduplicator()
+    dedup.bind_article_id(
+        headline="A story that was never seen this run",
+        fingerprint="deadbeef",
+        url="https://nowhere.example/1",
+        article_id="11111111-1111-1111-1111-111111111111",
+    )
+    assert dedup._local == {}
+    assert dedup._token_index == {}
+
+
+def test_bind_article_id_ignores_an_empty_id():
+    headline = "Cabinet approves Rs 500 crore budget for metro rail"
+    dedup = Deduplicator()
+    dedup.check(headline=headline, canonical_url="https://a.example/1")
+
+    dedup.bind_article_id(
+        headline=headline,
+        fingerprint=token_fingerprint(headline),
+        url="https://a.example/1",
+        article_id="",
+    )
+    verdict = dedup.check(headline=headline, canonical_url="https://d.example/4")
+    assert verdict.existing_id is None

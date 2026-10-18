@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useEffect, useRef } from "react";
 
+import { formatNewsDate } from "@/lib/date";
+
 /**
  * Search results overlay.
  *
@@ -50,15 +52,51 @@ export function SearchModal({
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
 
-  // Escape closes.
+  /**
+   * Results belong to the query that produced them.
+   *
+   * While a new query is debouncing, the previous query's hits are still
+   * on screen. Rendering them under the new query made the panel claim
+   * "12 results" for something it had not searched yet, so a stale list
+   * is treated as no list at all.
+   */
+  const settled = query.trim().length > 0;
+  const showHits = settled && !loading && !error && hits.length > 0;
+
+  // Escape closes, Tab stays inside the dialog. The panel declares
+  // aria-modal, which promises the rest of the page is unreachable — it
+  // was not: Tab walked straight off into the page behind the backdrop.
   useEffect(() => {
     if (!open) return;
+
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        event.preventDefault();
         onClose();
         inputRef?.current?.focus();
+        return;
+      }
+
+      if (event.key !== "Tab") return;
+
+      const focusable = panelRef.current?.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      );
+      if (!focusable || focusable.length === 0) return;
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!first || !last) return;
+
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
       }
     };
+
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose, inputRef]);
@@ -97,9 +135,11 @@ export function SearchModal({
               ? "Searching…"
               : error
                 ? "Search failed"
-                : hits.length === 0 && query
-                  ? `No matches for “${query}”`
-                  : `${count} ${count === 1 ? "result" : "results"}`}
+                : !settled
+                  ? "Type to search"
+                  : hits.length === 0
+                    ? `No matches for “${query.trim()}”`
+                    : `${count} ${count === 1 ? "result" : "results"}`}
           </span>
           <button
             type="button"
@@ -124,10 +164,10 @@ export function SearchModal({
             </div>
           )}
 
-          {!error && !loading && hits.length === 0 && (
+          {!error && !loading && settled && hits.length === 0 && (
             <div className="px-3 py-6 text-sm leading-6 text-gray-700 dark:text-gray-300">
               <p>
-                Nothing published in the last 48 hours matches “{query}”.
+                Nothing published in the last 48 hours matches “{query.trim()}”.
               </p>
               <p className="mt-2 text-xs text-gray-500">
                 Stories older than 48 hours are pruned. Press Enter in the
@@ -137,7 +177,7 @@ export function SearchModal({
             </div>
           )}
 
-          {!error && !loading && hits.length > 0 && (
+          {showHits && (
             <ul className="divide-y divide-gray-100 dark:divide-gray-800">
               {hits.slice(0, 10).map((hit) => (
                 <li key={hit.id}>
@@ -151,7 +191,9 @@ export function SearchModal({
                     </p>
                     <p className="mt-0.5 text-xs text-gray-500">
                       {hit.source_name_snapshot ?? ""}
-                      {hit.published_at ? ` · ${hit.published_at.slice(0, 10)}` : ""}
+                      {hit.published_at
+                        ? ` · ${formatNewsDate(hit.published_at)}`
+                        : ""}
                     </p>
                   </Link>
                 </li>
@@ -160,7 +202,7 @@ export function SearchModal({
           )}
         </div>
 
-        {!error && !loading && hits.length > 0 && (
+        {showHits && (
           <div className="border-t border-gray-200 px-5 py-3 dark:border-gray-700">
             <Link
               href={`/search?q=${encodeURIComponent(query)}`}

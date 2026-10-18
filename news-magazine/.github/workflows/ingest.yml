@@ -105,8 +105,14 @@ jobs:
             echo "DEDUP_WINDOW_HOURS=12"
             echo "FUZZY_TITLE_THRESHOLD=78"
             echo "MIN_POLL_SECONDS=60"
+            # ENABLE_GEMINI_SUMMARY has no caller in services/ingestion.py
+            # (synthesize_summary is unwired), so it is left false rather
+            # than implying a behaviour that does not exist.
             echo "ENABLE_GEMINI_SUMMARY=false"
-            echo "ENABLE_GEMINI_RANKING=false"
+            # Safe to enable: the model only returns an ordering of the
+            # four already-extracted points, at temperature 0.0, and
+            # anything not verbatim in that list is discarded.
+            echo "ENABLE_GEMINI_RANKING=true"
             echo "LOG_LEVEL=INFO"
             echo "LOG_FORMAT=console"
           } > .env

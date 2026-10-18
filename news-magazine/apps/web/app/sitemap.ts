@@ -1,11 +1,9 @@
 import type { MetadataRoute } from "next";
 
 import { createPublicSupabaseClient } from "@/lib/supabase/server";
+import { SITE_URL } from "@/lib/site";
 
 export const revalidate = 300;
-
-const SITE_URL =
-  process.env.NEXT_PUBLIC_SITE_URL ?? "https://new24hr.vercel.app";
 
 /**
  * Sitemap.
@@ -13,18 +11,16 @@ const SITE_URL =
  * Only published, non-duplicate articles are listed — a URL that 404s
  * or resolves to a merged copy is worse than no URL at all in a sitemap.
  * Slugs are stable, so this does not need rebuilding on every deploy.
+ *
+ * /search is deliberately NOT listed. It declares `robots: noindex`
+ * (app/search/page.tsx), and submitting a URL to a sitemap while asking
+ * for it not to be indexed is a contradiction crawlers log as an error.
  */
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   const now = new Date();
 
   const entries: MetadataRoute.Sitemap = [
     { url: SITE_URL, lastModified: now, changeFrequency: "hourly", priority: 1 },
-    {
-      url: `${SITE_URL}/search`,
-      lastModified: now,
-      changeFrequency: "daily",
-      priority: 0.3,
-    },
   ];
 
   try {

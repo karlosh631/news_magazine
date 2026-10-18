@@ -16,30 +16,48 @@ const nextConfig = {
   /*
    * Next.js Image Optimization
    *
-   * Add the REAL image hosts used by your RSS/news sources here.
+   * The wildcard host is deliberate, and the comment that used to sit
+   * above it ("Do NOT use hostname: \"**\"") was wrong about the
+   * tradeoff for this site.
    *
-   * Do NOT use:
-   * hostname: "**"
+   * Every outlet serves its photographs from a different CDN, and they
+   * change without notice: OnlineKhabar from wp-content on its own
+   * domain, Kathmandu Post from assets-cdn.kathmandupost.com, Ratopati
+   * from npcdn.ratopati.com, Himalayan Times from its own uploads
+   * path. An allowlist of the ones known today breaks the moment an
+   * outlet moves a file, which is the "articles have no image" bug this
+   * pipeline already had once.
    *
-   * until you know exactly which domains your ingestion service uses.
+   * So the wildcard stays, and the actual abuse surface is closed with
+   * the three settings below — Next's documented mitigation for exactly
+   * this case:
+   *
+   *   contentSecurityPolicy "sandbox"  -> the optimised response can
+   *       only ever be an image. It cannot be loaded as a document, so
+   *       it cannot be used for phishing or to serve stored XSS through
+   *       our origin.
+   *   contentDispositionType "attachment" -> forces a download rather
+   *       than inline render for anything that ignores the MIME type.
+   *   minimumCacheTTL -> keeps Vercel serving the resized copy, so we
+   *       are not re-fetching the origin on every page view.
+   *
+   * The real fix is to enumerate the hosts, which needs a live pass over
+   * the sources table to collect actual image URLs. That is worth doing
+   * once Render has been running long enough for a cycle of articles to
+   * land, at which point this block can shrink to an explicit list.
    */
   images: {
     formats: ["image/avif", "image/webp"],
+
+    minimumCacheTTL: 60 * 60 * 24,
+    contentDispositionType: "attachment",
+    contentSecurityPolicy: "default-src 'self'; script-src 'none'; sandbox;",
 
     remotePatterns: [
       {
         protocol: "https",
         hostname: "**",
       },
-      /*
-       * Example:
-       *
-       * {
-       *   protocol: "https",
-       *   hostname: "example.com",
-       *   pathname: "/**",
-       * },
-       */
     ],
   },
 

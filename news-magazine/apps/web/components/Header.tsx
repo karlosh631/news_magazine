@@ -73,6 +73,34 @@ function LogoIcon() {
   );
 }
 
+function RotateIcon() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      className="shrink-0"
+      aria-hidden="true"
+    >
+      <path
+        d="M16 3h5v5"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M21 3l-7.5 7.5a4.5 4.5 0 1 1-6.4-6.3"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function ReloadIcon({ spinning }: { spinning: boolean }) {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" className={spinning ? "animate-spin" : ""} aria-hidden="true">
@@ -105,6 +133,21 @@ export function Header({ categories }: { categories: NavCategory[] }) {
     setReloading(true);
     router.refresh();
     window.dispatchEvent(new CustomEvent("news-refresh"));
+    window.setTimeout(() => setReloading(false), 700);
+  };
+
+  /**
+   * Rotate.
+   *
+   * Does both jobs in one click: re-reads the database for anything the
+   * worker has published since the last poll, then re-composes the grid.
+   * Sending only the refresh signal left the page in the same order
+   * right after it had just re-read, which is what made this feel
+   * broken.
+   */
+  const doRotate = () => {
+    setReloading(true);
+    window.dispatchEvent(new CustomEvent("news-rotate"));
     window.setTimeout(() => setReloading(false), 700);
   };
 
@@ -226,8 +269,19 @@ export function Header({ categories }: { categories: NavCategory[] }) {
     router.push(`/search?q=${encodeURIComponent(query)}`);
   };
 
+  /*
+    The header sits at z-[62] while the search overlay is open, above its
+    backdrop (z-60) and panel (z-61). The reader types into this input,
+    so it must never sit underneath the overlay — but the overlay still
+    dims the whole viewport, which is what makes the modal read as a
+    layer over the page rather than a hole cut in it.
+  */
   return (
-    <header className="sticky top-0 z-50 border-b border-gray-200 bg-white md:bg-white/90 md:backdrop-blur">
+    <header
+      className={`sticky top-0 border-b border-gray-200 bg-white md:bg-white/90 md:backdrop-blur ${
+        searchOpen ? "z-[62]" : "z-50"
+      }`}
+    >
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 gap-4">
         {/* Clicking the logo returns home AND forces a fresh fetch, so
             it behaves as a "back to latest" control rather than a plain
@@ -293,6 +347,16 @@ export function Header({ categories }: { categories: NavCategory[] }) {
           </button>
 
           <ThemeToggle />
+
+          <button
+            type="button"
+            onClick={doRotate}
+            aria-label="Fetch new stories and shuffle the page"
+            title="Fetch new stories and shuffle"
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-gray-300 text-gray-700 transition hover:border-black hover:bg-gray-900 hover:text-white active:scale-95"
+          >
+            <RotateIcon />
+          </button>
 
           <button
             type="button"

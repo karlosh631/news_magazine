@@ -88,8 +88,24 @@ export async function getLatestArticles(options?: {
     categoryId = category.data.id;
   }
 
+  // Over-fetch, then sort, then truncate.
+  //
+  // Sorting the RPC's own rows in JavaScript is not enough on its own:
+  // SQL applies LIMIT before we ever see the result, so while the
+  // function still orders by `is_breaking` first, the 24 rows it hands
+  // back are the 24 highest by THAT ordering — the genuinely newest
+  // articles are already discarded by the database and cannot be
+  // recovered client-side.
+  //
+  // Pulling a wider window first and trimming here makes the page
+  // correct whether or not migration 0012 has been applied, and the cost
+  // is one wider index scan on a table capped at 10k rows.
+  const OVERFETCH_FACTOR = 3;
+  const OVERFETCH_MINIMUM = 40;
+  const fetchLimit = Math.max(limit * OVERFETCH_FACTOR, limit + OVERFETCH_MINIMUM);
+
   const { data, error } = await supabase.rpc("latest_articles", {
-    p_limit: limit,
+    p_limit: fetchLimit,
     p_category: categoryId,
     p_exclude_ids: excludeIds ?? null,
   });
@@ -109,7 +125,11 @@ export async function getLatestArticles(options?: {
     return languageSelect({ language: languageFilter, limit, categoryId });
   }
 
-  return { articles: (data ?? []) as LatestArticle[], error: null, configured: true };
+  return {
+    articles: newestFirst((data ?? []) as LatestArticle[]).slice(0, limit),
+    error: null,
+    configured: true,
+  };
 }
 
 /**
@@ -120,6 +140,29 @@ export async function getLatestArticles(options?: {
  * Nepali and English editions of most outlets are ingested, so this
  * returns genuinely different stories rather than a translation.
  */
+/**
+ * Newest first, sorted in the application.
+ *
+ * latest_articles() ordered by `is_breaking desc` BEFORE `published_at`,
+ * so every breaking-flagged article outranked every newer one and the
+ * homepage froze on old stories. Migration 0012 fixes the function, but
+ * the ordering the reader sees must not depend on a migration having
+ * been applied yet — this sorts whatever comes back, so the page is
+ * correct either way.
+ *
+ * source_count breaks ties, because `published_at` is only second
+ * resolution and several outlets publish the same story in the same
+ * second.
+ */
+function newestFirst(rows: LatestArticle[]): LatestArticle[] {
+  return [...rows].sort((a, b) => {
+    const left = a.published_at ? Date.parse(a.published_at) : 0;
+    const right = b.published_at ? Date.parse(b.published_at) : 0;
+    if (right !== left) return right - left;
+    return (b.source_count ?? 0) - (a.source_count ?? 0);
+  });
+}
+
 async function languageSelect({
   language,
   limit,
@@ -171,7 +214,7 @@ async function languageSelect({
     }
   }
 
-  return { articles: rows.slice(0, limit), error: null, configured: true };
+  return { articles: newestFirst(rows).slice(0, limit), error: null, configured: true };
 }
 
 /** Map a raw `articles` row to the card shape. */

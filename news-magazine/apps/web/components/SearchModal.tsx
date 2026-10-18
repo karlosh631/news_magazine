@@ -179,16 +179,19 @@ export function SearchModal({
   return (
     <>
       {/*
-        Starts below the header (h-16), not at inset-0.
+        Covers the whole viewport, as it always did.
 
-        This used to cover the whole viewport at z-60 while the header
-        sits at z-50, so the very input the reader was typing into ended
-        up underneath the overlay. The next click hit the backdrop, which
-        closed the modal and blurred the field — "the popup opens but I
-        can't type in it".
+        It used to be inset-0, and an earlier fix made it start below
+        the header so the search input would not sit underneath it. That
+        fixed typing but broke the appearance: the top bar stopped being
+        dimmed, which is very visible in light mode.
+
+        The header is lifted above this backdrop instead (Header applies
+        z-[62] while the overlay is open), so the whole screen dims AND
+        the input stays clickable.
       */}
       <div
-        className="fixed inset-x-0 bottom-0 top-16 z-[60] bg-black/40 backdrop-blur-sm"
+        className="fixed inset-0 z-[60] bg-black/40 backdrop-blur-sm"
         onClick={onClose}
         aria-hidden="true"
       />

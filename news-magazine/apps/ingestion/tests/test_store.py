@@ -421,3 +421,111 @@ def test_cancelled_sync_is_not_swallowed_by_the_per_article_handler():
 
     with pytest.raises(asyncio.CancelledError):
         asyncio.get_event_loop().run_until_complete(task)
+
+
+# =============================================================
+# Transient database failures
+# =============================================================
+
+def test_transient_connection_errors_are_retried_classified():
+    """
+    PostgREST over HTTP/2 drops connections routinely, and supabase-py
+    has no retry of its own. Without this the pipeline threw away real
+    articles ("articles upsert failed ...: Server disconnected").
+    """
+    from app.services.ingestion import _is_transient_db_error
+
+    class RemoteProtocolError(Exception):
+        pass
+
+    class APIConnectionError(Exception):
+        pass
+
+    class ReadTimeout(Exception):
+        pass
+
+    for exc in (
+        RemoteProtocolError("Server disconnected"),
+        APIConnectionError("Connection closed"),
+        ReadTimeout(""),
+        Exception("connection reset by peer"),
+        Exception("Server disconnected"),
+        Exception("Read timed out."),
+    ):
+        assert _is_transient_db_error(exc), exc
+
+
+def test_data_errors_are_not_retried():
+    """
+    A constraint violation is a statement about the data, not the
+    connection. Retrying it just delays the real error threefold and
+    multiplies the log noise.
+    """
+    from app.services.ingestion import _is_transient_db_error
+
+    for exc in (
+        Exception('duplicate key value violates unique constraint "x"'),
+        Exception('{"code":"23505","message":"duplicate key"}'),
+        Exception("invalid input syntax for type uuid"),
+        Exception("row-level security violation"),
+        Exception("schema cache miss"),
+    ):
+        assert not _is_transient_db_error(exc), exc
+
+
+def test_db_call_retries_then_succeeds():
+    """A dropped connection must not cost us the article."""
+    from app.services.ingestion import db_call
+
+    attempts = {"n": 0}
+
+    class RemoteProtocolError(Exception):
+        pass
+
+    def flaky():
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise RemoteProtocolError("Server disconnected")
+        return "ok"
+
+    assert run(db_call(flaky)) == "ok"
+    assert attempts["n"] == 3
+
+
+def test_db_call_gives_up_after_the_attempt_budget():
+    from app.services.ingestion import DB_RETRY_ATTEMPTS, db_call
+
+    class RemoteProtocolError(Exception):
+        pass
+
+    attempts = {"n": 0}
+
+    def always_fails():
+        attempts["n"] += 1
+        raise RemoteProtocolError("Server disconnected")
+
+    try:
+        run(db_call(always_fails))
+        raised = False
+    except RemoteProtocolError:
+        raised = True
+
+    assert raised, "the error must not be swallowed"
+    assert attempts["n"] == DB_RETRY_ATTEMPTS
+
+
+def test_db_call_does_not_retry_a_data_error():
+    from app.services.ingestion import db_call
+
+    attempts = {"n": 0}
+
+    def constraint_violation():
+        attempts["n"] += 1
+        raise RuntimeError('duplicate key value violates unique constraint "x"')
+
+    try:
+        run(db_call(constraint_violation))
+    except RuntimeError:
+        pass
+
+    assert attempts["n"] == 1, "a data error must not be retried"

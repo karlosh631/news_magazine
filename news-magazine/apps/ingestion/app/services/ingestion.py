@@ -102,11 +102,101 @@ logger = logging.getLogger("ingestion")
 # I/O-bound waits on a network socket, not CPU work.
 DB_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="supabase")
 
+# Attempts per database call, including the first.
+DB_RETRY_ATTEMPTS = 4
+
+# Connection-level failures. These are the exception types supabase-py /
+# httpx / httpcore raise when the socket dies mid-request, as opposed to
+# the server answering with an error.
+_TRANSIENT_DB_ERRORS = frozenset(
+    {
+        "RemoteProtocolError",
+        "ConnectError",
+        "ConnectTimeout",
+        "ReadTimeout",
+        "WriteTimeout",
+        "PoolTimeout",
+        "ReadError",
+        "WriteError",
+        "ClosedResourceError",
+        "ProxyError",
+        "LocalProtocolError",
+        "IncompleteRead",
+        "ServerDisconnected",
+        "APIConnectionError",
+    }
+)
+
+# Some of those arrive wrapped, and some surface only as text.
+_TRANSIENT_DB_ERROR_MARKERS = (
+    "server disconnected",
+    "connection reset",
+    "connection closed",
+    "connection was closed",
+    "remote protocol error",
+    "incomplete read",
+    "broken pipe",
+    "timed out",
+    "timeout",
+    "connection refused",
+    "eof occurred",
+)
+
 
 async def db_call(fn, *args, **kwargs):
-    """Run a blocking supabase-py call off the event loop."""
+    """
+    Run a blocking supabase-py call off the event loop, with a retry.
+
+    supabase-py has no retry of its own, and PostgREST over HTTP/2 drops
+    connections routinely on a busy or idle connection pool:
+
+        httpcore.RemoteProtocolError: Server disconnected
+
+    That reached the pipeline as a failed lookup and then a failed
+    upsert, so a single transient disconnect threw away a real article
+    ("articles upsert failed for '...' : Server disconnected") while
+    everything around it kept going.
+
+    Only transport-level failures are retried. A 4xx is a real answer —
+    a bad request or a constraint violation will fail identically on the
+    second attempt — and retrying it just multiplies the noise. The
+    operations here are reads and id-based upserts, both idempotent, so
+    a retry cannot duplicate anything.
+    """
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(DB_EXECUTOR, lambda: fn(*args, **kwargs))
+
+    for attempt in range(DB_RETRY_ATTEMPTS):
+        try:
+            return await loop.run_in_executor(
+                DB_EXECUTOR, lambda: fn(*args, **kwargs)
+            )
+        except Exception as exc:
+            if attempt == DB_RETRY_ATTEMPTS - 1 or not _is_transient_db_error(exc):
+                raise
+            # 0.4s, 1.2s, 3.6s — long enough for the pool to recycle the
+            # dead connection, short enough not to stall a source poll.
+            delay = 0.4 * (3 ** attempt)
+            logger.warning(
+                "Transient database error (%s); retry %s/%s in %ss.",
+                type(exc).__name__, attempt + 1, DB_RETRY_ATTEMPTS, delay,
+            )
+            await asyncio.sleep(delay)
+
+
+def _is_transient_db_error(exc: BaseException) -> bool:
+    """
+    True only for failures where the identical retry might succeed.
+
+    Deliberately narrow: a unique-violation or a not-null error is a
+    statement about the data, not about the connection, and retrying it
+    three times just delays the real error.
+    """
+    name = type(exc).__name__
+    if name in _TRANSIENT_DB_ERRORS:
+        return True
+
+    message = str(exc).lower()
+    return any(marker in message for marker in _TRANSIENT_DB_ERROR_MARKERS)
 
 
 # =============================================================
@@ -430,12 +520,22 @@ async def _upsert_article_source(
     window.
 
     Deliberately read-then-insert rather than an ON CONFLICT upsert.
-    Migration 0009 declares TWO unique indexes — (article_id, source_id)
-    and (source_id, source_article_url) — and ON CONFLICT can only name
-    one. Upserting on the first still raised a unique violation on the
-    second when an outlet re-filed the same story under a new URL. An
-    explicit existence check has no such blind spot, and it works
-    whether or not 0009 has been applied.
+    Migration 0009 declares TWO unique indexes, and both have to be
+    checked because ON CONFLICT can only ever name one:
+
+      * (article_id, source_id)      — this outlet already carried this
+                                       story; nothing to do.
+      * (source_id, source_article_url) — this outlet's own link is
+                                       already attached to a DIFFERENT
+                                       article row.
+
+    The second case is what produced
+        duplicate key value violates unique constraint
+        "article_sources_source_url_unique_idx"
+    whenever an outlet re-filed a link that a previous sync had already
+    attached elsewhere — for Setopati that fired repeatedly. The link
+    exists either way; this story simply is not the one holding it. So
+    it is reported as "exists" rather than retried or logged as noise.
 
     Only ever called with an id that already exists in `articles`. Both
     ids are shape-checked first: a link cannot be written without an
@@ -464,6 +564,7 @@ async def _upsert_article_source(
         return "skipped"
 
     try:
+        # This outlet already carried this story.
         existing = await db_call(
             lambda: db.table("article_sources")
             .select("id")
@@ -473,6 +574,19 @@ async def _upsert_article_source(
             .execute()
         )
         if existing.data:
+            return "exists"
+
+        # The same outlet link is already attached to another article.
+        # Nothing to write, and it is not an error.
+        linked_elsewhere = await db_call(
+            lambda: db.table("article_sources")
+            .select("id, article_id")
+            .eq("source_id", source_uuid)
+            .eq("source_article_url", source_article_url)
+            .limit(1)
+            .execute()
+        )
+        if linked_elsewhere.data:
             return "exists"
 
         await db_call(

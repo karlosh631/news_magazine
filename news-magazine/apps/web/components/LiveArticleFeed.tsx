@@ -182,40 +182,28 @@ export function LiveArticleFeed({
     void check(language, true);
   }, [language, check]);
 
-  // The header refresh button asks the feed to re-poll immediately.
-  useEffect(() => {
-    const onManualRefresh = () => void check(language, true);
-    window.addEventListener("news-refresh", onManualRefresh);
-    return () => window.removeEventListener("news-refresh", onManualRefresh);
-  }, [check, language]);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => void check(language), POLL_MS);
-    // Pause polling when the tab is hidden; resume and catch up on return.
-    const onVisible = () => {
-      if (document.visibilityState === "visible") void check(language);
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [check, language]);
-
   // ---- Rotation ----
   //
   // Only ever reorders. The pool of articles is fixed until a poll finds
   // something new.
-  const rotate = useCallback(() => {
+  //
+  // Declared above the event listeners below because the rotate button
+  // calls this directly, and a const is in its temporal dead zone until
+  // its declaration is evaluated.
+  const rotate = useCallback((force = false) => {
     setArticles((current) => {
       if (current.length < PINNED + 3) return current;
 
-      // Nothing new for a while: the top of the page has been static for
-      // minutes because ingestion runs on a 3-30 minute cycle per outlet.
-      const stale =
-        lastArrivalAt.current === null ||
-        Date.now() - lastArrivalAt.current > ROTATE_AFTER_MS;
-      if (!stale) return current;
+      // Automatic rotation waits until the page has genuinely gone
+      // static — ingestion runs on a 3-30 minute cycle per outlet, so
+      // reshuffling every 75 seconds regardless would just be noise.
+      // A manual click is an explicit request and is never second-guessed.
+      if (!force) {
+        const stale =
+          lastArrivalAt.current === null ||
+          Date.now() - lastArrivalAt.current > ROTATE_AFTER_MS;
+        if (!stale) return current;
+      }
 
       // The newest few are pinned. Reordering below them keeps the
       // "newest first" promise intact — a story published a minute ago
@@ -231,6 +219,42 @@ export function LiveArticleFeed({
       return [...head, ...rest.slice(rest.length - cut), ...rest.slice(0, rest.length - cut)];
     });
   }, []);
+
+  // The header refresh button asks the feed to re-poll immediately.
+  useEffect(() => {
+    const onManualRefresh = () => void check(language, true);
+    window.addEventListener("news-refresh", onManualRefresh);
+    return () => window.removeEventListener("news-refresh", onManualRefresh);
+  }, [check, language]);
+
+  // The header rotate button does both jobs in one click: fetch whatever
+  // the worker has published since the last poll, then re-compose the
+  // page. Sending only the refresh signal left the grid in the same
+  // order even though it had just re-read the database, which is what
+  // made the button look broken.
+  useEffect(() => {
+    const onRotate = async () => {
+      await check(language, true);
+      lastArrivalAt.current = Date.now() - ROTATE_AFTER_MS;
+      rotate(true);
+    };
+    window.addEventListener("news-rotate", onRotate);
+    return () => window.removeEventListener("news-rotate", onRotate);
+  }, [check, language]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => void check(language), POLL_MS);
+    // Pause polling when the tab is hidden; resume and catch up on return.
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void check(language);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [check, language]);
+
 
   useEffect(() => {
     if (rotation === "off" || reduceMotion) return;

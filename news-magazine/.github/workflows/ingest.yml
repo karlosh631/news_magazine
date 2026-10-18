@@ -21,15 +21,25 @@ name: Ingest news
 
 on:
   schedule:
-    # Every 20 minutes. Outlets poll on 3-30 minute intervals, so this
-    # is frequent enough to be fresh and rare enough to stay well under
-    # GitHub's Actions minute budget.
-    - cron: "*/20 * * * *"
+    # Every 5 minutes — GitHub's shortest supported cron interval.
+    #
+    # 30 seconds is not available here on two counts. GitHub does not
+    # schedule below 5 minutes, and a 30-second sweep would put ~50
+    # requests a minute into 25 news publishers (versus 1.2/min today),
+    # which is not scraping, it is a load test. Publishers rate-limit or
+    # block on exactly that pattern, and the ones already refusing us
+    # outright would stop responding entirely.
+    #
+    # It would also buy nothing: outlets publish every few minutes, and
+    # each source already polls on its own interval (the fastest is 3
+    # minutes). Sweeping the whole set more often just re-fetches the
+    # same feed and finds the same articles.
+    #
+    # For genuinely tighter freshness, run `python -m app.worker` as an
+    # always-on service (Render/Fly/Railway) instead — it has no
+    # scheduler floor at all. See README "Deployment".
+    - cron: "*/5 * * * *"
   workflow_dispatch:
-    inputs:
-      source_id:
-        description: "Sync a single source (optional UUID)"
-        required: false
 
 # Never run two syncs at once — they would race on the same rows and
 # waste requests on every outlet.

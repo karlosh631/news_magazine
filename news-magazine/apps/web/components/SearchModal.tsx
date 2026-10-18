@@ -159,7 +159,10 @@ export function SearchModal({
   useEffect(() => {
     if (!open) return;
     const input = inputRef?.current;
-    if (!input) return;
+    // A display:none input cannot take focus, so pulling focus to it
+    // would fight whatever the reader is actually using. This is the
+    // mobile case, where the visible field is a different element.
+    if (!input || input.offsetParent === null) return;
 
     const onFocusIn = (event: FocusEvent) => {
       const target = event.target as HTMLElement | null;

@@ -603,10 +603,21 @@ async def _upsert_article_source(
         )
         return "created"
     except Exception as exc:
-        # The article itself is already stored, so this is a degraded
-        # merge record, not a lost story. A warning, not a traceback —
-        # at 200+ articles a run, an exception here is pure noise that
-        # hides the errors that matter.
+        # A foreign-key failure here is benign and expected: the article
+        # was matched as a duplicate, then the TTL prune deleted it
+        # before the link could be written. The story is already gone,
+        # so there is nothing to link. Logging it as a warning produced
+        # a wall of noise on every source that ran while a prune was in
+        # flight.
+        if "article_sources_article_id_fkey" in str(exc) or "23503" in str(exc):
+            logger.debug(
+                "article_sources: article %s was pruned before the link was written",
+                article_uuid,
+            )
+            return "skipped"
+
+        # Anything else is a degraded merge record, not a lost story — the
+        # article itself is already stored.
         logger.warning(
             "Could not record article_sources link for article %s: %s",
             article_uuid, exc,

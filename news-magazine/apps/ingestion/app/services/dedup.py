@@ -485,10 +485,22 @@ class Deduplicator:
                 .execute()
             )
             return (response.data or [None])[0]
-        except Exception:
+        except Exception as exc:
             # A database outage must not be silently read as "unique" —
             # that is how a reconnect floods the table with duplicates.
-            logger.exception("dedup: lookup on %s.%s failed", table, column)
+            #
+            # A dropped connection is a different case: db_call has
+            # already retried it and is genuinely trying to recover, so a
+            # full traceback here is noise that buries the real failures.
+            # It still propagates — check() decides what to do about it.
+            from app.services.ingestion import _is_transient_db_error
+
+            if _is_transient_db_error(exc):
+                logger.debug(
+                    "dedup: lookup on %s.%s failed (transient)", table, column
+                )
+            else:
+                logger.exception("dedup: lookup on %s.%s failed", table, column)
             raise
 
     def _candidates(self, normalized_title: str) -> list[dict]:

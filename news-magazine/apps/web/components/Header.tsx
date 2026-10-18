@@ -73,34 +73,6 @@ function LogoIcon() {
   );
 }
 
-function RotateIcon() {
-  return (
-    <svg
-      width="18"
-      height="18"
-      viewBox="0 0 24 24"
-      fill="none"
-      className="shrink-0"
-      aria-hidden="true"
-    >
-      <path
-        d="M16 3h5v5"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M21 3l-7.5 7.5a4.5 4.5 0 1 1-6.4-6.3"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
 function ReloadIcon({ spinning }: { spinning: boolean }) {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" className={spinning ? "animate-spin" : ""} aria-hidden="true">
@@ -128,26 +100,16 @@ export function Header({ categories }: { categories: NavCategory[] }) {
    * Force a fresh server render AND tell the live feed to re-poll.
    * router.refresh() alone re-renders the Server Components but the
    * client feed keeps its own state, so the list would look unchanged.
+   *
+   * This is also the rotate control: the feed re-composes the grid on
+   * every re-poll, so a re-read is a rotation. A separate second button
+   * was added and removed — two controls that both "make the news move"
+   * is one too many.
    */
   const doRefresh = () => {
     setReloading(true);
     router.refresh();
     window.dispatchEvent(new CustomEvent("news-refresh"));
-    window.setTimeout(() => setReloading(false), 700);
-  };
-
-  /**
-   * Rotate.
-   *
-   * Does both jobs in one click: re-reads the database for anything the
-   * worker has published since the last poll, then re-composes the grid.
-   * Sending only the refresh signal left the page in the same order
-   * right after it had just re-read, which is what made this feel
-   * broken.
-   */
-  const doRotate = () => {
-    setReloading(true);
-    window.dispatchEvent(new CustomEvent("news-rotate"));
     window.setTimeout(() => setReloading(false), 700);
   };
 
@@ -270,18 +232,21 @@ export function Header({ categories }: { categories: NavCategory[] }) {
   };
 
   /*
-    The header sits at z-[62] while the search overlay is open, above its
-    backdrop (z-60) and panel (z-61). The reader types into this input,
-    so it must never sit underneath the overlay — but the overlay still
-    dims the whole viewport, which is what makes the modal read as a
-    layer over the page rather than a hole cut in it.
+    z-[62] always — above the search overlay's backdrop (z-60) and panel
+    (z-61).
+
+    The reader types into this input, so it must never sit underneath
+    the overlay. That was previously conditional on the overlay being
+    open, which left the first click racing the z-index change; making
+    it unconditional means the input is never covered at any point.
+
+    The overlay still dims the whole viewport, so the modal reads as a
+    layer over the page. The search bar staying bright above the dim is
+    the standard command-palette look and shows the reader that focus
+    is still where they left it.
   */
   return (
-    <header
-      className={`sticky top-0 border-b border-gray-200 bg-white md:bg-white/90 md:backdrop-blur ${
-        searchOpen ? "z-[62]" : "z-50"
-      }`}
-    >
+    <header className="sticky top-0 z-[62] border-b border-gray-200 bg-white md:bg-white/90 md:backdrop-blur">
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 gap-4">
         {/* Clicking the logo returns home AND forces a fresh fetch, so
             it behaves as a "back to latest" control rather than a plain
@@ -350,18 +315,8 @@ export function Header({ categories }: { categories: NavCategory[] }) {
 
           <button
             type="button"
-            onClick={doRotate}
-            aria-label="Fetch new stories and shuffle the page"
-            title="Fetch new stories and shuffle"
-            className="flex h-9 w-9 items-center justify-center rounded-full border border-gray-300 text-gray-700 transition hover:border-black hover:bg-gray-900 hover:text-white active:scale-95"
-          >
-            <RotateIcon />
-          </button>
-
-          <button
-            type="button"
             onClick={doRefresh}
-            aria-label="Reload latest news"
+            aria-label="Fetch the latest news and refresh the feed"
             className="flex h-9 w-9 items-center justify-center rounded-full border border-gray-300 text-gray-700 transition hover:border-black hover:bg-gray-900 hover:text-white active:scale-95"
           >
             <ReloadIcon spinning={reloading} />

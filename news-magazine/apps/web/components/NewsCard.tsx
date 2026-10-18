@@ -176,14 +176,6 @@ export function NewsCard({
               </span>
             </div>
           )}
-
-          <div className="absolute left-2 top-2 flex flex-wrap gap-1.5">
-            {article.source_count > 1 && (
-              <span className="rounded bg-emerald-600/90 px-1.5 py-0.5 text-[10px] font-bold text-white backdrop-blur-sm">
-                {article.source_count} outlets
-              </span>
-            )}
-          </div>
         </div>
 
         {/* ================= BODY =================
@@ -208,12 +200,16 @@ export function NewsCard({
             </div>
           )}
 
+          {/*
+            Always the outlet name. This used to swap in "N outlets"
+            whenever more than one outlet carried the story, which meant
+            the merge count appeared twice on a card — as a green pill
+            over the photograph and again here. The pill is gone and the
+            count is gone with it; the outlet credit stays because it is
+            the attribution that matters.
+          */}
           <div className="mt-4 flex items-center justify-between gap-2 border-t border-gray-100 pt-3 text-xs text-gray-400">
-            <span className="truncate">
-              {article.source_count > 1
-                ? `${article.source_count} outlets`
-                : (article.source_name_snapshot ?? "")}
-            </span>
+            <span className="truncate">{article.source_name_snapshot ?? ""}</span>
             {article.published_at && (
               <time dateTime={article.published_at} className="shrink-0">
                 {formatNewsDate(article.published_at, language)}

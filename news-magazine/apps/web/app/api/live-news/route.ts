@@ -19,10 +19,20 @@ import { getLatestArticles } from "@/lib/news";
 
 export const dynamic = "force-dynamic";
 
-// Short cache: the worker publishes continuously, and this endpoint is
-// polled by the client for auto-refresh.
-const CACHE_MS = 15_000;
-const MAX_AGE = "s-maxage=15, stale-while-revalidate=30";
+/*
+ * Never cached.
+ *
+ * This was `s-maxage=15, stale-while-revalidate=30`. The endpoint is
+ * polled every few seconds by every open tab precisely so the page
+ * reflects what the worker has just published, so any shared cache in
+ * front of it — CDN or browser — can only ever serve a staler answer
+ * than the database holds. A poll that returns cached news is a
+ * homepage frozen at whatever was newest when the entry was stored.
+ *
+ * The client also sends a unique `t` on every request, so there is no
+ * cache key worth reusing in the first place.
+ */
+const NO_STORE = "no-store, no-cache, must-revalidate, max-age=0";
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -41,12 +51,12 @@ export async function GET(request: Request) {
   if (feed.error && feed.articles.length === 0) {
     return NextResponse.json(
       { error: feed.error, articles: [] },
-      { status: feed.configured ? 503 : 200, headers: { "Cache-Control": MAX_AGE } }
+      { status: feed.configured ? 503 : 200, headers: { "Cache-Control": NO_STORE } }
     );
   }
 
   return NextResponse.json(
     { articles: feed.articles, configured: feed.configured, language: language ?? "all" },
-    { headers: { "Cache-Control": MAX_AGE } }
+    { headers: { "Cache-Control": NO_STORE } }
   );
 }

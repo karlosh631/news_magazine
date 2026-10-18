@@ -50,7 +50,7 @@ import type { LatestArticle } from "@/types/database";
  * cheap reads a minute per tab. Polling pauses while the tab is
  * hidden, and the newest stories appear the instant they are detected.
  */
-const POLL_MS = 15_000;
+const POLL_MS = 10_000;
 
 /** How long a poll cycle can return nothing before we rotate. */
 const ROTATE_AFTER_MS = 90_000;
@@ -134,7 +134,12 @@ export function LiveArticleFeed({
     async (lang: "en" | "ne" | null, reset = false) => {
       setChecking(true);
       try {
-        const params = new URLSearchParams({ limit: "30" });
+        const params = new URLSearchParams({
+          limit: "60",
+          // Defeats any intermediary cache. A cached poll is a
+          // homepage frozen at whatever was newest when it was stored.
+          t: String(Date.now()),
+        });
         if (lang) params.set("language", lang);
 
         const response = await fetch(`/api/live-news?${params}`, {
@@ -147,23 +152,49 @@ export function LiveArticleFeed({
         setLastChecked(Date.now());
 
         if (reset) {
-          setArticles(fresh);
-          ids.current = new Set(fresh.map((a) => a.id));
+          // Reset is "show me exactly what the database holds now", so
+          // the old list is discarded rather than merged. It is still
+          // re-sorted here: the ordering the page shows must not depend
+          // on the order a response happens to arrive in.
+          const sorted = [...fresh].sort((a, b) => {
+            const left = a.published_at ? Date.parse(a.published_at) : 0;
+            const right = b.published_at ? Date.parse(b.published_at) : 0;
+            if (right !== left) return right - left;
+            return (b.source_count ?? 0) - (a.source_count ?? 0);
+          });
+          setArticles(sorted);
+          ids.current = new Set(sorted.map((a) => a.id));
           lastArrivalAt.current = null;
           return;
         }
 
-        // Replace rather than prepend.
+        // Merge on timestamp, never on position.
         //
-        // Appending new arrivals left everything else in place, so a
-        // story stayed on the page long after it had fallen out of the
-        // newest-N. The list was effectively append-only for the life of
-        // the tab. Swapping in what the database holds right now means
-        // the page is exactly "the latest N", newest first, and old
-        // stories disappear on their own as they age out.
-        setArticles(fresh);
-        ids.current = new Set(fresh.map((a) => a.id));
-        lastArrivalAt.current = Date.now();
+        // Whatever order the response arrives in, the union of what we
+        // already show and what just came back is re-sorted by
+        // published_at here. So the newest article this tab has ever
+        // seen stays at the top, and a response that arrives
+        // out-of-order cannot demote it.
+        //
+        // This also makes the list converge on the real newest set:
+        // stories that fall out of the window are simply not in the
+        // union any more, so they age off the page on their own.
+        setArticles((current) => {
+          const byId = new Map<string, LatestArticle>();
+          for (const article of current) byId.set(article.id, article);
+          for (const article of fresh) byId.set(article.id, article);
+
+          const merged = [...byId.values()].sort((a, b) => {
+            const left = a.published_at ? Date.parse(a.published_at) : 0;
+            const right = b.published_at ? Date.parse(b.published_at) : 0;
+            if (right !== left) return right - left;
+            return (b.source_count ?? 0) - (a.source_count ?? 0);
+          });
+
+          ids.current = new Set(merged.map((a) => a.id));
+          lastArrivalAt.current = Date.now();
+          return merged;
+        });
       } catch {
         // Offline or the API restarting: the list stays as-is.
       } finally {

@@ -220,12 +220,22 @@ export function LiveArticleFeed({
     });
   }, []);
 
-  // The header refresh button asks the feed to re-poll immediately.
+  // The header button: re-read the database AND re-compose the grid.
+  //
+  // Both jobs, because a re-read alone leaves the page in the same order
+  // right after it has just re-read — which reads as a button that does
+  // nothing. Reset mode replaces the list with what the database holds
+  // now, so the newest is back at the top, and the rotation then
+  // reshuffles everything below the pinned newest nine.
   useEffect(() => {
-    const onManualRefresh = () => void check(language, true);
+    const onManualRefresh = async () => {
+      await check(language, true);
+      lastArrivalAt.current = Date.now() - ROTATE_AFTER_MS;
+      rotate(true);
+    };
     window.addEventListener("news-refresh", onManualRefresh);
     return () => window.removeEventListener("news-refresh", onManualRefresh);
-  }, [check, language]);
+  }, [check, language, rotate]);
 
   // The header rotate button does both jobs in one click: fetch whatever
   // the worker has published since the last poll, then re-compose the

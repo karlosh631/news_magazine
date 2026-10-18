@@ -88,48 +88,30 @@ export async function getLatestArticles(options?: {
     categoryId = category.data.id;
   }
 
-  // Over-fetch, then sort, then truncate.
+  // Straight to PostgREST, ordered by published_at in the database.
   //
-  // Sorting the RPC's own rows in JavaScript is not enough on its own:
-  // SQL applies LIMIT before we ever see the result, so while the
-  // function still orders by `is_breaking` first, the 24 rows it hands
-  // back are the 24 highest by THAT ordering — the genuinely newest
-  // articles are already discarded by the database and cannot be
-  // recovered client-side.
+  // This used to go through the latest_articles() RPC, which ordered by
+  // `is_breaking` BEFORE `published_at`. That made the feed's contents
+  // depend on how many rows you happened to ask for, because the broken
+  // sort puts every breaking-flagged story ahead of everything else
+  // regardless of age:
   //
-  // Pulling a wider window first and trimming here makes the page
-  // correct whether or not migration 0012 has been applied, and the cost
-  // is one wider index scan on a table capped at 10k rows.
-  const OVERFETCH_FACTOR = 3;
-  const OVERFETCH_MINIMUM = 40;
-  const fetchLimit = Math.max(limit * OVERFETCH_FACTOR, limit + OVERFETCH_MINIMUM);
-
-  const { data, error } = await supabase.rpc("latest_articles", {
-    p_limit: fetchLimit,
-    p_category: categoryId,
-    p_exclude_ids: excludeIds ?? null,
-  });
-
-  if (error) {
-    // The RPC needs migration 0007. Fall back to a plain select so the
-    // site still works against an un-migrated database.
-    console.error("[news] latest_articles failed, falling back:", error.message);
-    return languageFilter
-      ? languageSelect({ language: languageFilter, limit, categoryId })
-      : fallbackSelect({ limit, categoryId });
-  }
-
-  if (languageFilter) {
-    // The RPC does not return `language`, so a filtered read goes
-    // straight to PostgREST where the filter can run in the database.
-    return languageSelect({ language: languageFilter, limit, categoryId });
-  }
-
-  return {
-    articles: newestFirst((data ?? []) as LatestArticle[]).slice(0, limit),
-    error: null,
-    configured: true,
-  };
+  //   /api/live-news?limit=5   -> newest 17:26 UTC
+  //   /api/live-news?limit=24  -> newest 16:57 UTC   <- the homepage
+  //   /api/live-news?limit=50  -> newest 17:26 UTC
+  //
+  // Asking for MORE rows returned newer articles than asking for fewer.
+  // Over-fetching and re-sorting client-side only widened the gap —
+  // there are more than 72 breaking rows, so no practical over-fetch
+  // rescues it.
+  //
+  // A direct ordered query has no such ambiguity, is one round trip
+  // instead of an RPC plus a client sort, and does not depend on
+  // migration 0012 having been applied. The RPC is no longer on this
+  // path at all.
+  return languageFilter
+    ? languageSelect({ language: languageFilter, limit, categoryId, excludeIds })
+    : directSelect({ limit, categoryId, excludeIds });
 }
 
 /**
@@ -167,10 +149,12 @@ async function languageSelect({
   language,
   limit,
   categoryId,
+  excludeIds,
 }: {
   language: "ne" | "en";
   limit: number;
   categoryId: string | null;
+  excludeIds?: string[] | null;
 }): Promise<FeedResult> {
   const supabase = createPublicSupabaseClient();
 
@@ -186,6 +170,9 @@ async function languageSelect({
       .order("published_at", { ascending: false, nullsFirst: false })
       .limit(limit);
     if (categoryId) query = query.eq("primary_category_id", categoryId);
+    if (excludeIds && excludeIds.length > 0) {
+      query = query.not("id", "in", `(${excludeIds.join(",")})`);
+    }
     return query;
   };
 
@@ -243,12 +230,21 @@ function mapArticleRow(row: unknown): LatestArticle {
 }
 
 
-async function fallbackSelect({
+/**
+ * The feed query.
+ *
+ * Was `fallbackSelect`, used only when the latest_articles() RPC failed.
+ * It is now the only path — see the note in getLatestArticles for why the
+ * RPC was dropped.
+ */
+async function directSelect({
   limit,
   categoryId,
+  excludeIds,
 }: {
   limit: number;
   categoryId: string | null;
+  excludeIds?: string[] | null;
 }): Promise<FeedResult> {
   const supabase = createPublicSupabaseClient();
 
@@ -259,10 +255,18 @@ async function fallbackSelect({
     )
     .eq("status", "published")
     .is("duplicate_of", null)
-    .order("published_at", { ascending: false })
+    // nullsFirst: false is required, not cosmetic. PostgreSQL defaults
+    // `ORDER BY ... DESC` to NULLS FIRST, so any article with no
+    // published_at sorts ABOVE every dated one — an undated row takes
+    // position 1 and the newest real story is pushed down the page.
+    // latest_articles() specified `nulls last`; this must say it too.
+    .order("published_at", { ascending: false, nullsFirst: false })
     .limit(limit);
 
   if (categoryId) query = query.eq("primary_category_id", categoryId);
+  if (excludeIds && excludeIds.length > 0) {
+    query = query.not("id", "in", `(${excludeIds.join(",")})`);
+  }
 
   const { data, error } = await query;
   if (error) {
@@ -407,7 +411,7 @@ export async function getRelatedArticles(
     .is("duplicate_of", null)
     .eq("primary_category_id", categoryId)
     .neq("id", excludeId)
-    .order("published_at", { ascending: false })
+    .order("published_at", { ascending: false, nullsFirst: false })
     .limit(limit);
 
   if (error) {
@@ -469,7 +473,7 @@ export async function getBreakingNews(limit = 10): Promise<LatestArticle[]> {
     .eq("status", "published")
     .is("duplicate_of", null)
     .eq("is_breaking", true)
-    .order("published_at", { ascending: false })
+    .order("published_at", { ascending: false, nullsFirst: false })
     .limit(limit);
 
   if (error) {

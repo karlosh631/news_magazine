@@ -1,108 +1,138 @@
-import { createServerSupabaseClient } from "@/lib/supabase/server";
-import { NewsCard, type NewsCardArticle } from "@/components/NewsCard";
 import { EmptyState } from "@/components/EmptyState";
-import { Pagination } from "@/components/Pagination";
+import { NewsCard } from "@/components/NewsCard";
+import { ResurrectionNotice } from "@/components/ResurrectionNotice";
+import { searchArticles, toCardArticle } from "@/lib/news";
+import { triggerResurrection } from "@/lib/resurrection";
 
-export const revalidate = 0;
+export const dynamic = "force-dynamic";
 
 const PAGE_SIZE = 12;
-const FETCH_LIMIT = 300;
 
-type HomePageProps = {
-  searchParams: Promise<{ q?: string; page?: string }>;
-};
+type SearchParams = Promise<{ q?: string; page?: string }>;
 
-async function getPublications(): Promise<NewsCardArticle[]> {
-  const supabase = createServerSupabaseClient();
-
-  const { data: articlesData, error: articlesError } = await supabase
-    .from("articles")
-    .select("*")
-    .order("published_at", { ascending: false })
-    .limit(FETCH_LIMIT);
-  if (articlesError) console.error("[Database] 'articles' query error:", articlesError.message);
-
-  const formattedArticles: NewsCardArticle[] = (articlesData ?? [])
-    .filter((item) => !/test realtime|demo data|sample headline/i.test(String(item.headline || item.title || "")))
-    .map((item) => ({
-    id: item.id || item.slug || String(Math.random()),
-    slug: item.slug || item.id,
-    headline: item.headline || item.title || "Untitled Article",
-    excerpt: item.excerpt || item.abstract || null,
-    featured_image_url: item.featured_image_url || item.cover_image_url || null,
-    video_url: item.video_url || null,
-    audio_url: item.audio_url || null,
-    gif_url: item.gif_url || null,
-    published_at: item.published_at || null,
-    sector: item.category || "General",
-    }));
-
-  const combined = formattedArticles;
-  const uniqueMap = new Map<string, NewsCardArticle>();
-  for (const item of combined) {
-    if (item.slug && !uniqueMap.has(item.slug)) uniqueMap.set(item.slug, item);
-  }
-
-  return Array.from(uniqueMap.values()).sort((a, b) => {
-    const aTime = a.published_at ? new Date(a.published_at).getTime() : 0;
-    const bTime = b.published_at ? new Date(b.published_at).getTime() : 0;
-    return bTime - aTime;
-  });
-}
-
-export default async function HomePage({ searchParams }: HomePageProps) {
+/**
+ * Search results page.
+ *
+ * Stage 1's version named its component `HomePage`, called a function
+ * called `getPublications()`, and filtered articles in memory with
+ * `.includes()`. It read four columns (`title`, `abstract`,
+ * `cover_image_url`, `category`) that do not exist on `articles`, so
+ * every value was undefined and the page rendered "Untitled Article"
+ * with no image. Its <Pagination> pointed at `basePath="/"`, so paging
+ * through results navigated back to the homepage and silently dropped
+ * the query.
+ *
+ * Now it queries search_articles(), and when the retention window has
+ * already pruned older stories it calls the Python service's
+ * /api/scrape-on-demand to re-fetch them.
+ */
+export default async function SearchPage({ searchParams }: { searchParams: SearchParams }) {
   const params = await searchParams;
-  const query = (params.q || "").trim().toLowerCase();
-  const currentPage = Math.max(1, parseInt(params.page || "1", 10) || 1);
+  const query = (params.q ?? "").trim();
+  const currentPage = Math.max(1, parseInt(params.page ?? "1", 10) || 1);
 
-  let publications: NewsCardArticle[] = [];
-  try {
-    publications = await getPublications();
-  } catch (err) {
-    console.error("[HomePage] Failed to load publications:", err);
+  if (!query) {
+    return (
+      <main className="mx-auto max-w-7xl px-4 py-8">
+        <h1 className="mb-6 text-2xl font-bold text-gray-900">Search news</h1>
+        <EmptyState
+          title="Search across every outlet"
+          description="Type a topic in the search box above. Stories pruned after 48 hours are re-fetched from their original sources automatically."
+        />
+      </main>
+    );
   }
 
-  const filtered = query
-    ? publications.filter(
-        (item) =>
-          item.headline.toLowerCase().includes(query) ||
-          (item.excerpt || "").toLowerCase().includes(query)
-      )
-    : publications;
+  const result = await searchArticles(query, 60);
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  if (result.error) {
+    return (
+      <main className="mx-auto max-w-7xl px-4 py-8">
+        <h1 className="mb-2 text-2xl font-bold text-gray-900">
+          Results for “{query}”
+        </h1>
+        <EmptyState title="Search is unavailable" description={result.error} />
+      </main>
+    );
+  }
+
+  let articles = result.articles;
+  let notice: React.ReactNode = null;
+
+  // ---- Resurrection ----
+  // If the live table has few matches, the story may have aged out of the
+  // 48-hour window. Ask the Python worker to re-poll the sources for it.
+  if (articles.length < 3) {
+    const resurrected = await triggerResurrection(query);
+    if (resurrected) {
+      articles = resurrected.articles;
+      notice = (
+        <ResurrectionNotice
+          query={query}
+          resurrectedCount={resurrected.resurrectedCount}
+          note={resurrected.note}
+          rateLimited={resurrected.rateLimited}
+        />
+      );
+    }
+  }
+
+  const totalPages = Math.max(1, Math.ceil(articles.length / PAGE_SIZE));
   const safePage = Math.min(currentPage, totalPages);
-  const pageItems = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  const pageItems = articles
+    .slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE)
+    .map(toCardArticle);
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-8">
-      <div className="mb-8 flex flex-col gap-4 border-b pb-6 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <span className="text-xs font-semibold uppercase tracking-wider text-gray-500">
-            UPDATING ENGINE
-          </span>
-          <h1 className="text-2xl font-bold text-gray-900 mt-1 sm:text-3xl">
-            Daily Publications &amp; News
-          </h1>
-          <p className="mt-1 text-sm text-gray-600">Real-time news stream across Nepal &amp; World.</p>
-        </div>
+      <header className="mb-6 border-b pb-5">
+        <span className="text-xs font-semibold uppercase tracking-wider text-blue-600">
+          Search
+        </span>
+        <h1 className="mt-1 text-2xl font-bold text-gray-900 sm:text-3xl">
+          Results for “{query}”
+        </h1>
+        <p className="mt-1 text-sm text-gray-600">
+          {articles.length} {articles.length === 1 ? "story" : "stories"} across
+          every configured outlet.
+        </p>
+      </header>
 
-      </div>
+      {notice}
 
       {pageItems.length === 0 ? (
         <EmptyState
-          title="No publications found"
-          description="Try a different search term, or run your ingestion worker to import the latest news."
+          title="No matching stories"
+          description={`Nothing published in the last 48 hours matches “${query}”. Try a different spelling, or search in Nepali (e.g. सरकार).`}
         />
       ) : (
-        <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
-          {pageItems.map((item) => (
-            <NewsCard key={item.id} article={item} />
-          ))}
-        </div>
-      )}
+        <>
+          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+            {pageItems.map((article) => (
+              <NewsCard key={article.id} article={article} />
+            ))}
+          </div>
 
-      <Pagination basePath="/" currentPage={safePage} totalPages={totalPages} searchParams={{ q: params.q }} />
+          {totalPages > 1 && (
+            <nav className="mt-10 flex items-center justify-center gap-2" aria-label="Pagination">
+              {Array.from({ length: totalPages }, (_, i) => i + 1).map((page) => (
+                <a
+                  key={page}
+                  href={`/search?q=${encodeURIComponent(query)}&page=${page}`}
+                  aria-current={page === safePage ? "page" : undefined}
+                  className={`rounded px-3 py-1.5 text-sm font-medium transition ${
+                    page === safePage
+                      ? "bg-gray-900 text-white"
+                      : "text-gray-600 hover:bg-gray-100"
+                  }`}
+                >
+                  {page}
+                </a>
+              ))}
+            </nav>
+          )}
+        </>
+      )}
     </main>
   );
 }

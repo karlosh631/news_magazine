@@ -1,0 +1,95 @@
+# =========================================================
+# Daily news archive
+#
+# Snapshots the day's published news into data/daily/YYYY-MM-DD.json and
+# commits it, giving the repository a dated record of what the pipeline
+# actually produced: coverage per outlet, how much deduplication did, and
+# which stories appeared on several fronts.
+#
+# One commit a day, carrying real data. That is deliberately not the
+# same thing as manufacturing hundreds of empty commits to colour in a
+# contribution graph — those would make the history worse, not better.
+# =============================================================
+
+name: Daily news archive
+
+on:
+  schedule:
+    # 23:45 UTC — after the day's news cycle has largely run.
+    - cron: "45 23 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: archive-news
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    name: Archive today's news
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Needed so the archive can be committed back.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: apps/ingestion/requirements.txt
+
+      - name: Install dependencies
+        working-directory: apps/ingestion
+        run: python -m pip install -r requirements.txt
+
+      - name: Write .env
+        working-directory: apps/ingestion
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          INGESTION_SECRET: ${{ secrets.INGESTION_SECRET }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_URL:-}" ] || [ -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
+            echo "::error::SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set as repository secrets."
+            exit 1
+          fi
+          {
+            echo "SUPABASE_URL=$SUPABASE_URL"
+            echo "SUPABASE_SERVICE_ROLE_KEY=$SUPABASE_SERVICE_ROLE_KEY"
+            echo "INGESTION_SECRET=$INGESTION_SECRET"
+            echo "CRON_SECRET=$CRON_SECRET"
+            echo "SCHEDULER_ENABLED=false"
+            echo "RETENTION_HOURS=48"
+            echo "DEDUP_WINDOW_HOURS=12"
+            echo "LOG_LEVEL=INFO"
+          } > .env
+
+      - name: Build the snapshot and commit
+        working-directory: apps/ingestion
+        run: python scripts/archive_daily.py
+
+      - name: Push
+        working-directory: apps/ingestion
+        # Only push when archive_daily.py actually produced a commit.
+        # Otherwise a no-op day would churn the branch for nothing.
+        run: |
+          set -euo pipefail
+          if git diff --quiet --cached && git diff --quiet; then
+            echo "Nothing to commit today."
+            exit 0
+          fi
+          git -c user.name="news-archive-bot" \
+              -c user.email="news-archive-bot@users.noreply.github.com" \
+              commit -m "archive: daily news snapshot" || {
+            echo "Nothing to commit."
+            exit 0
+          }
+          git push origin HEAD:${{ github.ref_name }}

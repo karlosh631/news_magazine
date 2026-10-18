@@ -1,12 +1,33 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+# supabase-py pins httpx<0.28, so 0.27.x is the ceiling here. Do not
+# bump this without checking `pip install supabase` first.
 httpx==0.27.2
 feedparser==6.0.11
-pydantic==2.9.2
-pydantic-settings==2.5.2
-supabase==2.7.4
+pydantic==2.10.4
+pydantic-settings==2.7.1
+supabase==2.10.0
 apscheduler==3.10.4
-bleach==6.1.0
+bleach==6.2.0
 python-dotenv==1.0.1
-pytest==8.3.3
+
+# --- added for the autonomous ingestion pipeline ---
+# Fuzzy syndication detection (rapidfuzz was named in the spec but never
+# added; Stage 1 deduplication was exact-match only).
+rapidfuzz==3.10.1
+
+# HTML listing-page scraping for outlets that publish no RSS feed.
+beautifulsoup4==4.12.3
+lxml==5.3.0
+trafilatura==1.12.0
+
+# Unicode-aware slugs. Without it every Devanagari headline slugifies
+# to an empty string and articles overwrite each other.
+python-slugify==8.0.4
+
+# Structured logging for the daemon.
+structlog==24.4.0
+
+pytest==8.3.4
 pytest-asyncio==0.24.0
+pytest-httpx==0.30.0

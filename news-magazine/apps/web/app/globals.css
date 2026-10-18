@@ -1,3 +1,164 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* =============================================================
+   Overflow
+   =============================================================
+
+   A horizontal scrollbar appeared because the sticky header's nav row
+   held eleven category links plus a search box in a flex container
+   without wrapping, so its intrinsic width exceeded the viewport.
+   Clamping overflow on html/body stops the page scrolling sideways on
+   desktop while leaving the nav's own overflow-auto scroller working
+   on mobile.
+   ============================================================= */
+
+html,
+body {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+/* Long unbroken Devanagari or URL text must never widen the layout. */
+h1,
+h2,
+h3,
+p,
+li,
+a {
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* The header nav scrolls sideways on narrow screens instead of forcing
+   the whole document wider than the viewport. */
+.horizontal-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.horizontal-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+/* =============================================================
+   Dark mode
+   =============================================================
+
+   Driven by a `.dark` class on <html>, set before paint by
+   components/ThemeToggle.tsx so there is no light-mode flash. The
+   palette is defined as CSS variables and the existing Tailwind
+   `gray-*` utilities are remapped onto it, so components do not need
+   `dark:` variants everywhere.
+   ============================================================= */
+
+:root {
+  --surface: 255 255 255;
+  --surface-raised: 255 255 255;
+  --surface-sunken: 243 244 246;
+  --border: 229 231 235;
+  --text: 17 24 39;
+  --text-muted: 107 114 128;
+  --text-subtle: 156 163 175;
+  --link: 29 78 216;
+  --accent: 37 99 235;
+}
+
+.dark {
+  --surface: 10 12 16;
+  --surface-raised: 22 25 32;
+  --surface-sunken: 28 32 40;
+  --border: 45 50 60;
+  --text: 237 239 244;
+  --text-muted: 156 163 175;
+  --text-subtle: 113 120 134;
+  --link: 147 197 253;
+  --accent: 96 165 250;
+}
+
+@layer base {
+  html {
+    background-color: rgb(var(--surface));
+    color: rgb(var(--text));
+  }
+
+  body {
+    background-color: rgb(var(--surface));
+    color: rgb(var(--text));
+  }
+
+  /* Remap the neutral scale onto the theme variables. Only the light
+     steps are remapped; Tailwind's 700/800/900 still work as darker
+     greys and stay legible in dark mode, so components keep using the
+     same utility names. */
+  html:not(.dark) {
+    --tw-gray-50: rgb(var(--surface-sunken));
+    --tw-gray-100: rgb(var(--surface-sunken));
+    --tw-gray-200: rgb(var(--border));
+    --tw-gray-300: rgb(var(--border));
+    --tw-gray-400: rgb(var(--text-subtle));
+    --tw-gray-500: rgb(var(--text-muted));
+  }
+
+  .dark .bg-white {
+    background-color: rgb(var(--surface));
+  }
+
+  .dark .bg-gray-50,
+  .dark .bg-gray-100 {
+    background-color: rgb(var(--surface-sunken));
+  }
+
+  .dark .bg-gray-200 {
+    background-color: rgb(var(--surface-raised));
+  }
+
+  .dark .border-gray-100,
+  .dark .border-gray-200,
+  .dark .border-gray-300 {
+    border-color: rgb(var(--border));
+  }
+
+  .dark .text-gray-900,
+  .dark .text-gray-800,
+  .dark .text-gray-700 {
+    color: rgb(var(--text));
+  }
+
+  .dark .text-gray-600,
+  .dark .text-gray-500 {
+    color: rgb(var(--text-muted));
+  }
+
+  .dark .text-gray-400 {
+    color: rgb(var(--text-subtle));
+  }
+
+  .dark .text-blue-600,
+  .dark .text-blue-700,
+  .dark .text-blue-800 {
+    color: rgb(var(--link));
+  }
+
+  .dark .bg-blue-50 {
+    background-color: rgb(30 41 59 / 0.5);
+  }
+
+  .dark .border-blue-100,
+  .dark .border-blue-200 {
+    border-color: rgb(51 65 85);
+  }
+}
+
+/* Respect the OS preference until the reader makes an explicit choice. */
+@media (prefers-color-scheme: dark) {
+  html:not(.light):not(.dark) {
+    color-scheme: dark;
+  }
+}
+
+::selection {
+  background-color: rgb(var(--accent) / 0.25);
+}

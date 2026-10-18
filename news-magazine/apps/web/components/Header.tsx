@@ -3,26 +3,46 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
+import { ThemeToggle } from "@/components/ThemeToggle";
+import { SearchModal } from "@/components/SearchModal";
 
-const CATEGORIES = [
-  { label: "National", slug: "national" },
-  { label: "Politics", slug: "politics" },
-  { label: "Business", slug: "business" },
-  { label: "Technology", slug: "technology" },
-  { label: "Sports", slug: "sports" },
-  { label: "Entertainment", slug: "entertainment" },
-];
-
-const NEPALI_CATEGORIES = ["राष्ट्रिय", "राजनीति", "व्यापार", "प्रविधि", "खेलकुद", "मनोरञ्जन"];
+/**
+ * Navigation categories.
+ *
+ * Passed in from the server layout, which reads the `categories` table.
+ * Stage 1 hardcoded six slugs here while the database held eleven, so
+ * five categories were unreachable and any new category needed a code
+ * change to appear in the nav.
+ */
+export type NavCategory = {
+  slug: string;
+  name_en: string;
+  name_ne: string | null;
+};
 
 const AUTO_REFRESH_MS = 15_000;
 
-type AiSearchResult = {
+/**
+ * Shape returned by /api/search.
+ *
+ * Stage 1 typed this as an AI brief (`summary` + `key_points` +
+ * `sources`) because the endpoint fabricated one. The endpoint now runs
+ * a real database search and returns matching articles, so the dropdown
+ * renders actual headlines with real links instead of model output.
+ */
+type SearchResult = {
   query: string;
-  summary: string;
-  key_points: string[];
-  confidence: "high" | "medium" | "low";
-  sources: Array<{ headline: string; url: string | null; published_at: string | null }>;
+  count: number;
+  articles: Array<{
+    id: string;
+    slug: string;
+    headline: string;
+    excerpt: string | null;
+    summary_points: string[] | null;
+    source_name_snapshot: string | null;
+    source_article_url: string | null;
+    published_at: string | null;
+  }>;
 };
 
 function LogoIcon() {
@@ -45,22 +65,38 @@ function ReloadIcon({ spinning }: { spinning: boolean }) {
   );
 }
 
-export function Header() {
+export function Header({ categories }: { categories: NavCategory[] }) {
   const router = useRouter();
   const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [language, setLanguage] = useState<"en" | "ne">("en");
-  const [aiSearch, setAiSearch] = useState<AiSearchResult | null>(null);
+  const [aiSearch, setAiSearch] = useState<SearchResult | null>(null);
   const [aiSearchError, setAiSearchError] = useState("");
   const [aiSearchLoading, setAiSearchLoading] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
+  /**
+   * Force a fresh server render AND tell the live feed to re-poll.
+   * router.refresh() alone re-renders the Server Components but the
+   * client feed keeps its own state, so the list would look unchanged.
+   */
   const doRefresh = () => {
     setReloading(true);
     router.refresh();
+    window.dispatchEvent(new CustomEvent("news-refresh"));
     window.setTimeout(() => setReloading(false), 700);
+  };
+
+  const closeSearch = () => {
+    setSearchOpen(false);
+    searchInputRef.current?.blur();
+    setSearchQuery("");
+    setAiSearch(null);
+    setAiSearchError("");
   };
 
   const toggleLanguage = () => {
@@ -112,12 +148,12 @@ export function Header() {
           signal: controller.signal,
         });
         const payload = await response.json();
-        if (!response.ok) throw new Error(payload.error || "AI search failed.");
-        setAiSearch(payload as AiSearchResult);
+        if (!response.ok) throw new Error(payload.error || "Search failed.");
+        setAiSearch(payload as SearchResult);
       } catch (error) {
         if (!controller.signal.aborted) {
           setAiSearch(null);
-          setAiSearchError(error instanceof Error ? error.message : "AI search failed.");
+          setAiSearchError(error instanceof Error ? error.message : "Search failed.");
         }
       } finally {
         if (!controller.signal.aborted) setAiSearchLoading(false);
@@ -144,45 +180,57 @@ export function Header() {
         body: JSON.stringify({ query }),
       });
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "AI search failed.");
-      setAiSearch(payload as AiSearchResult);
+      if (!response.ok) throw new Error(payload.error || "Search failed.");
+      setAiSearch(payload as SearchResult);
     } catch (error) {
       setAiSearch(null);
-      setAiSearchError(error instanceof Error ? error.message : "AI search failed.");
+      setAiSearchError(error instanceof Error ? error.message : "Search failed.");
     } finally {
       setAiSearchLoading(false);
     }
 
     router.push(`/search?q=${encodeURIComponent(query)}`);
+    closeSearch();
     setMenuOpen(false);
   };
 
   return (
     <header className="sticky top-0 z-50 border-b border-gray-200 bg-white md:bg-white/90 md:backdrop-blur">
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 gap-4">
+        {/* Clicking the logo returns home AND forces a fresh fetch, so
+            it behaves as a "back to latest" control rather than a plain
+            link that might serve a cached render. */}
         <Link
           href="/"
-          className="flex items-center gap-2 font-bold text-gray-900 transition hover:text-blue-600 sm:text-xl shrink-0"
+          onClick={(event) => {
+            if (pathname === "/") {
+              // Already home: a plain navigation would be a no-op, so
+              // force the refresh the reader is asking for.
+              event.preventDefault();
+              doRefresh();
+            }
+          }}
+          className="flex shrink-0 items-center gap-2 font-bold text-gray-900 transition hover:text-blue-600 sm:text-xl"
         >
           <LogoIcon />
-          <span className="truncate">Nepal News &amp; Magazine</span>
+          <span className="truncate">NEWS</span>
         </Link>
 
-        <nav className="hidden items-center gap-1 md:flex">
-          {CATEGORIES.map((cat, index) => {
+        <nav className="hidden min-w-0 items-center gap-1 overflow-x-auto md:flex horizontal-scroll">
+          {categories.map((cat) => {
             const href = `/category/${cat.slug}`;
             const isActive = pathname === href;
             return (
               <Link
                 key={cat.slug}
                 href={href}
-                className={`rounded-md px-3 py-2 text-sm font-medium transition ${
+                className={`whitespace-nowrap rounded-md px-3 py-2 text-sm font-medium transition ${
                   isActive
                     ? "bg-gray-900 text-white"
                     : "text-gray-700 hover:bg-gray-100 hover:text-black"
                 }`}
               >
-                {language === "ne" ? NEPALI_CATEGORIES[index] : cat.label}
+                {language === "ne" && cat.name_ne ? cat.name_ne : cat.name_en}
               </Link>
             );
           })}
@@ -191,10 +239,14 @@ export function Header() {
         <div className="flex items-center gap-2">
           <form onSubmit={handleSearchSubmit} className="hidden sm:block">
             <input
+              ref={searchInputRef}
               type="search"
               placeholder="Search news..."
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                if (e.target.value.trim()) setSearchOpen(true);
+              }}
               className="h-9 w-40 rounded-md border border-gray-300 px-3 text-xs outline-none transition focus:w-56 focus:border-black focus:ring-1 focus:ring-black"
             />
           </form>
@@ -207,6 +259,8 @@ export function Header() {
           >
             {language === "en" ? "ने" : "EN"}
           </button>
+
+          <ThemeToggle />
 
           <button
             type="button"
@@ -242,12 +296,15 @@ export function Header() {
               type="search"
               placeholder="Search news..."
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                if (e.target.value.trim()) setSearchOpen(true);
+              }}
               className="h-9 w-full rounded-md border border-gray-300 px-3 text-sm outline-none focus:border-black focus:ring-1 focus:ring-black"
             />
           </form>
 
-          {CATEGORIES.map((cat, index) => {
+          {categories.map((cat) => {
             const href = `/category/${cat.slug}`;
             const isActive = pathname === href;
             return (
@@ -255,56 +312,30 @@ export function Header() {
                 key={cat.slug}
                 href={href}
                 onClick={() => setMenuOpen(false)}
-                className={`rounded-md px-3 py-2 text-sm font-medium transition ${
+                className={`whitespace-nowrap rounded-md px-3 py-2 text-sm font-medium transition ${
                   isActive
                     ? "bg-gray-900 text-white"
                     : "text-gray-700 hover:bg-gray-100"
                 }`}
               >
-                {language === "ne" ? NEPALI_CATEGORIES[index] : cat.label}
+                {language === "ne" && cat.name_ne ? cat.name_ne : cat.name_en}
               </Link>
             );
           })}
         </nav>
       )}
 
-      {(aiSearchLoading || aiSearch || aiSearchError) && (
-        <section className="border-t border-gray-200 bg-gray-50 px-4 py-4" aria-live="polite">
-          <div className="mx-auto max-w-7xl">
-            {aiSearchLoading && <p className="text-sm text-gray-600">Loading...</p>}
-            {aiSearchError && <p className="text-sm text-red-700">{aiSearchError}</p>}
-            {aiSearch && !aiSearchLoading && (
-              <div className="grid gap-3 md:grid-cols-[1fr_auto]">
-                <div>
-                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                    {aiSearch.confidence === "low" ? "Loading..." : "News brief"}
-                  </p>
-                  <p className="mt-1 text-sm leading-6 text-gray-800">{aiSearch.summary}</p>
-                  {aiSearch.key_points.length > 0 && (
-                    <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-gray-700">
-                      {aiSearch.key_points.map((point) => <li key={point}><Link href={`/search?q=${encodeURIComponent(point)}`} className="hover:underline">{point}</Link></li>)}
-                    </ul>
-                  )}
-                </div>
-                <div className="text-xs text-gray-500">
-                  <p className="font-semibold text-gray-700">Sources</p>
-                  {aiSearch.sources.slice(0, 3).map((source) => (
-                    <a
-                      key={`${source.headline}-${source.url}`}
-                      href={source.url || `/search?q=${encodeURIComponent(aiSearch.query)}`}
-                      target={source.url ? "_blank" : undefined}
-                      rel={source.url ? "noreferrer" : undefined}
-                      className="mt-1 block max-w-xs truncate hover:text-blue-700"
-                    >
-                      {source.headline}
-                    </a>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        </section>
-      )}
+
+      <SearchModal
+        open={searchOpen}
+        query={aiSearch?.query ?? searchQuery.trim()}
+        loading={aiSearchLoading}
+        error={aiSearchError}
+        hits={aiSearch?.articles ?? []}
+        count={aiSearch?.count ?? 0}
+        onClose={closeSearch}
+        inputRef={searchInputRef}
+      />
     </header>
   );
 }

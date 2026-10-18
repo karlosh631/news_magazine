@@ -1,0 +1,128 @@
+# =============================================================
+# Scheduled news ingestion
+#
+# Runs the Python ingestion worker on a cron so that pushing to git is
+# all that is needed to keep the deployed site fresh.
+#
+# Why this exists: the ingestion worker is a long-lived process. Vercel
+# runs serverless functions that are killed after ~10s of CPU, so it
+# cannot host the scraper. This workflow is the zero-config fallback —
+# the same code also runs as a proper always-on service on Render/Fly
+# for lower latency (see README "Deployment").
+#
+# What it does each run:
+#   - installs the ingestion dependencies
+#   - runs one full sync pass across every enabled source
+#   - prunes anything past the 48h retention window
+#   - uploads the log, and fails the run if sources are erroring
+# =============================================================
+
+name: Ingest news
+
+on:
+  schedule:
+    # Every 20 minutes. Outlets poll on 3-30 minute intervals, so this
+    # is frequent enough to be fresh and rare enough to stay well under
+    # GitHub's Actions minute budget.
+    - cron: "*/20 * * * *"
+  workflow_dispatch:
+    inputs:
+      source_id:
+        description: "Sync a single source (optional UUID)"
+        required: false
+
+# Never run two syncs at once — they would race on the same rows and
+# waste requests on every outlet.
+concurrency:
+  group: ingest-news
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Sync sources
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: apps/ingestion/requirements.txt
+
+      - name: Install ingestion dependencies
+        working-directory: apps/ingestion
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Write .env from repository secrets
+        working-directory: apps/ingestion
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          INGESTION_SECRET: ${{ secrets.INGESTION_SECRET }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DEFAULT_REQUEST_TIMEOUT_SECONDS: "20"
+        run: |
+          set -euo pipefail
+          missing=0
+          for var in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY INGESTION_SECRET CRON_SECRET; do
+            if [ -z "${!var:-}" ]; then
+              echo "::error::Missing secret: $var"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Add these under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          {
+            echo "SUPABASE_URL=$SUPABASE_URL"
+            echo "SUPABASE_SERVICE_ROLE_KEY=$SUPABASE_SERVICE_ROLE_KEY"
+            echo "INGESTION_SECRET=$INGESTION_SECRET"
+            echo "CRON_SECRET=$CRON_SECRET"
+            echo "GEMINI_API_KEY=$GEMINI_API_KEY"
+            echo "SCHEDULER_ENABLED=false"
+            echo "RETENTION_HOURS=48"
+            echo "MAX_ARTICLE_ROWS=10000"
+            echo "DEDUP_WINDOW_HOURS=12"
+            echo "FUZZY_TITLE_THRESHOLD=78"
+            echo "MIN_POLL_SECONDS=60"
+            echo "ENABLE_GEMINI_SUMMARY=false"
+            echo "ENABLE_GEMINI_RANKING=false"
+            echo "LOG_LEVEL=INFO"
+            echo "LOG_FORMAT=console"
+          } > .env
+
+      - name: Run one sync pass
+        working-directory: apps/ingestion
+        run: |
+          python -m scripts.sync_once 2>&1 | tee sync.log
+
+      - name: Upload run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ingest-log-${{ github.run_number }}
+          path: apps/ingestion/sync.log
+          retention-days: 7
+
+      - name: Fail if every source errored
+        working-directory: apps/ingestion
+        run: |
+          set -euo pipefail
+          # A run where nothing could be fetched is almost always a bad
+          # secret or an expired one, and should be loud rather than a
+          # silently green check that left the site stale.
+          if grep -q "SOURCES_OK=0" sync.log; then
+            echo "::error::No source was successfully synced. Check the secrets and the log artifact."
+            exit 1
+          fi
+          grep -E "SOURCES_OK=" sync.log || true

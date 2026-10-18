@@ -6,12 +6,23 @@ import { useEffect, useRef } from "react";
 import { formatNewsDate } from "@/lib/date";
 
 /**
- * Search results overlay.
+ * Search results dropdown.
  *
- * Results appear in a centred modal over a dimmed backdrop rather than
- * inline under the header, so they do not shove the page down while the
- * reader is still typing. Click a result to open it, "Cancel", the
- * backdrop, or Escape to dismiss.
+ * This was an overlay: a fixed backdrop plus a centred dialog, with a
+ * focus trap, a scroll lock and a focus guard that pulled focus back to
+ * the input whenever it escaped. Every one of those is a way to stop a
+ * reader typing — the reader types into the header's <input>, which
+ * lives outside the dialog, and the dialog kept fighting for focus. The
+ * symptom was always the same: type one word, the popup appears, and
+ * nothing more can be entered.
+ *
+ * A dropdown anchored to the input removes the entire failure mode.
+ * There is no backdrop to cover anything, nothing to trap, no scroll
+ * lock, and focus is simply never moved — the reader keeps typing in the
+ * same field the whole time.
+ *
+ * It is still a popup, still appears as you type, and still searches on
+ * the same debounce. Only the containment changed.
  */
 
 export type SearchHit = {
@@ -32,10 +43,9 @@ export type SearchHit = {
 /**
  * A link supplied by a fallback rather than by our own articles table.
  *
- * These are rendered visibly differently and never mixed in with ingested
- * stories. Presenting a live web result as if it came from the 20+
- * outlets we crawl is the exact Stage 1 failure this pipeline was
- * rewritten to end.
+ * Rendered visibly differently and never mixed in with ingested stories.
+ * Presenting a live web result as if it came from the outlets we crawl
+ * is the exact Stage 1 failure this pipeline was rewritten to end.
  */
 export type SearchSource = {
   headline: string;
@@ -55,7 +65,6 @@ export function SearchModal({
   grounded,
   resurrected,
   onClose,
-  inputRef,
 }: {
   open: boolean;
   query: string;
@@ -69,24 +78,15 @@ export function SearchModal({
   /** The results were re-scraped from the configured outlets. */
   resurrected?: boolean;
   onClose: () => void;
-  /**
-   * The header's search <input>.
-   *
-   * Focus is deliberately NOT moved into the panel, and a guard pulls it
-   * back if anything steals it — the reader types into the input, not
-   * into the overlay.
-   */
-  inputRef?: React.RefObject<HTMLInputElement | null>;
 }) {
-  const panelRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
 
   /**
    * Results belong to the query that produced them.
    *
    * While a new query is debouncing, the previous query's hits are still
    * on screen. Rendering them under the new query made the panel claim
-   * "12 results" for something it had not searched yet, so a stale list
-   * is treated as no list at all.
+   * "12 results" for something it had not searched yet.
    */
   const settled = query.trim().length > 0;
   const fallbackSources = (sources ?? []).filter((s) => Boolean(s.url));
@@ -94,266 +94,184 @@ export function SearchModal({
     settled && !loading && !error && hits.length === 0 && fallbackSources.length > 0;
   const showHits = settled && !loading && !error && hits.length > 0;
 
-  // Escape closes, Tab stays inside the dialog. The panel declares
-  // aria-modal, which promises the rest of the page is unreachable — it
-  // was not: Tab walked straight off into the page behind the backdrop.
+  // Escape closes. Nothing else touches focus.
   useEffect(() => {
     if (!open) return;
-
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onClose();
-        inputRef?.current?.focus();
-        return;
-      }
-
-      if (event.key !== "Tab") return;
-
-      const focusable = panelRef.current?.querySelectorAll<HTMLElement>(
-        'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
-      );
-      if (!focusable || focusable.length === 0) return;
-
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (!first || !last) return;
-
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
+      if (event.key === "Escape") onClose();
     };
-
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose, inputRef]);
+  }, [open, onClose]);
 
-  // Lock background scroll while open.
+  // Click away closes. A transparent full-screen listener rather than a
+  // visible backdrop: it cannot be mistaken for a layer, and it cannot
+  // intercept a click on the input, because the listener only acts on
+  // clicks that land OUTSIDE the dropdown and outside the header.
   useEffect(() => {
     if (!open) return;
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = previous;
-    };
-  }, [open]);
-
-  /**
-   * Focus guard.
-   *
-   * The reader types into the header's <input>, not into this panel, so
-   * focus has to STAY there. The panel is declared `aria-modal`, which
-   * in principle means focus cannot leave it — in practice the browser
-   * does not enforce that, and anything that steals focus (a click
-   * landing on the backdrop, a re-render, the browser's own focus
-   * restoration) left the reader typing into nothing.
-   *
-   * This is the command-palette pattern: while the overlay is open, any
-   * focus that lands outside both the input and the panel is pulled
-   * straight back to the input.
-   */
-  useEffect(() => {
-    if (!open) return;
-    const input = inputRef?.current;
-    // A display:none input cannot take focus, so pulling focus to it
-    // would fight whatever the reader is actually using. This is the
-    // mobile case, where the visible field is a different element.
-    if (!input || input.offsetParent === null) return;
-
-    const onFocusIn = (event: FocusEvent) => {
+    const onPointerDown = (event: MouseEvent) => {
       const target = event.target as HTMLElement | null;
-      if (!target) return;
-      if (target === input) return;
-      if (panelRef.current?.contains(target)) return;
-
-      input.focus();
+      if (rootRef.current?.contains(target)) return;
+      onClose();
     };
-
-    document.addEventListener("focusin", onFocusIn);
-    return () => document.removeEventListener("focusin", onFocusIn);
-  }, [open, inputRef]);
+    // Capture, so it runs before a click on a result can navigate.
+    document.addEventListener("mousedown", onPointerDown, true);
+    return () => document.removeEventListener("mousedown", onPointerDown, true);
+  }, [open, onClose]);
 
   if (!open) return null;
 
   return (
-    <>
-      {/*
-        Covers the whole viewport, as it always did.
+    <div
+      ref={rootRef}
+      className="absolute left-0 right-0 top-full z-[63] mt-2 max-h-[70vh] overflow-hidden rounded-xl border border-gray-200 bg-white text-left shadow-2xl dark:border-gray-700 dark:bg-gray-900"
+    >
+      <div className="flex items-center justify-between gap-3 border-b border-gray-200 px-5 py-3 dark:border-gray-700">
+        <span className="truncate text-xs font-semibold uppercase tracking-wide text-gray-500">
+          {loading
+            ? "Searching…"
+            : error
+              ? "Search failed"
+              : !settled
+                ? "Type to search"
+                : hits.length === 0 && !showSources
+                  ? `No matches for “${query.trim()}”`
+                  : `${count} ${count === 1 ? "result" : "results"}`}
+        </span>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close search"
+          className="shrink-0 rounded px-2 py-1 text-xs font-medium text-gray-500 transition hover:bg-gray-100 hover:text-gray-900 dark:hover:bg-gray-800 dark:hover:text-gray-100"
+        >
+          Cancel
+        </button>
+      </div>
 
-        It used to be inset-0, and an earlier fix made it start below
-        the header so the search input would not sit underneath it. That
-        fixed typing but broke the appearance: the top bar stopped being
-        dimmed, which is very visible in light mode.
+      <div className="min-h-[6rem] overflow-y-auto px-2 py-2" aria-live="polite">
+        {error && (
+          <p className="px-3 py-4 text-sm text-red-700 dark:text-red-400">{error}</p>
+        )}
 
-        The header is lifted above this backdrop instead (Header applies
-        z-[62] while the overlay is open), so the whole screen dims AND
-        the input stays clickable.
-      */}
-      <div
-        className="fixed inset-0 z-[60] bg-black/40 backdrop-blur-sm"
-        onClick={onClose}
-        aria-hidden="true"
-      />
-
-      <div
-        ref={panelRef}
-        tabIndex={-1}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Search results"
-        className="fixed left-1/2 top-20 z-[61] flex max-h-[72vh] w-[min(94vw,42rem)] -translate-x-1/2 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-2xl outline-none dark:border-gray-700 dark:bg-gray-900"
-      >
-        <div className="flex items-center justify-between gap-3 border-b border-gray-200 px-5 py-3 dark:border-gray-700">
-          <span className="truncate text-xs font-semibold uppercase tracking-wide text-gray-500">
-            {loading
-              ? "Searching…"
-              : error
-                ? "Search failed"
-                : !settled
-                  ? "Type to search"
-                  : hits.length === 0
-                    ? `No matches for “${query.trim()}”`
-                    : `${count} ${count === 1 ? "result" : "results"}`}
-          </span>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close search"
-            className="shrink-0 rounded px-2 py-1 text-xs font-medium text-gray-500 transition hover:bg-gray-100 hover:text-gray-900 dark:hover:bg-gray-800 dark:hover:text-gray-100"
-          >
-            Cancel
-          </button>
-        </div>
-
-        <div className="min-h-[8rem] flex-1 overflow-y-auto px-2 py-2" aria-live="polite">
-          {error && (
-            <p className="px-3 py-4 text-sm text-red-700 dark:text-red-400">{error}</p>
-          )}
-
-          {!error && loading && (
-            <div className="space-y-3 px-3 py-4">
-              {[0, 1, 2].map((i) => (
-                <div key={i} className="h-10 animate-pulse rounded bg-gray-100 dark:bg-gray-800" />
-              ))}
-            </div>
-          )}
-
-          {!error && !loading && settled && hits.length === 0 && !showSources && (
-            <div className="px-3 py-6 text-sm leading-6 text-gray-700 dark:text-gray-300">
-              <p>
-                Nothing published in the last 48 hours matches “{query.trim()}”.
-              </p>
-              <p className="mt-2 text-xs text-gray-500">
-                Stories older than 48 hours are pruned. Press Enter in the
-                search box to open the full results page, which re-scrapes
-                every configured outlet for this query.
-              </p>
-            </div>
-          )}
-
-          {showSources && (
-            <div>
-              <p className="px-3 pb-2 pt-1 text-xs leading-5 text-gray-600 dark:text-gray-400">
-                {grounded
-                  ? "Nothing in our archive matches. These are live web results — they are NOT from the outlets this site crawls."
-                  : resurrected
-                    ? "Not in the 48-hour window, but re-fetched from the outlets this site crawls."
-                    : "Found outside the 48-hour window."}
-              </p>
-              <ul className="divide-y divide-gray-100 dark:divide-gray-800">
-                {fallbackSources.slice(0, 8).map((source, index) => (
-                  <li key={`${source.url}-${index}`}>
-                    <a
-                      href={source.url ?? "#"}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="block rounded-lg px-3 py-3 transition hover:bg-gray-50 dark:hover:bg-gray-800"
-                    >
-                      <p className="font-medium leading-snug text-gray-900 dark:text-gray-100">
-                        {source.headline}
-                      </p>
-                      <p className="mt-0.5 text-xs text-gray-500">
-                        {source.source ?? "External source"}
-                        {source.published_at
-                          ? ` · ${formatNewsDate(source.published_at)}`
-                          : ""}
-                      </p>
-                    </a>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {showHits && (
-            <ul className="divide-y divide-gray-100 dark:divide-gray-800">
-              {hits.slice(0, 10).map((hit) => {
-                // Our own rows link internally; anything the fallback
-                // recovered links out to the outlet that published it.
-                const internal = Boolean(hit.slug);
-                const href = internal
-                  ? `/article/${hit.slug}`
-                  : (hit.source_article_url ?? "#");
-
-                const body = (
-                  <>
-                    <p className="font-medium leading-snug text-gray-900 dark:text-gray-100">
-                      {hit.headline}
-                    </p>
-                    <p className="mt-0.5 text-xs text-gray-500">
-                      {hit.source_name_snapshot ?? ""}
-                      {hit.published_at
-                        ? ` · ${formatNewsDate(hit.published_at)}`
-                        : ""}
-                      {!internal && " · opens the source"}
-                    </p>
-                  </>
-                );
-
-                return (
-                  <li key={hit.id}>
-                    {internal ? (
-                      <Link
-                        href={href}
-                        onClick={onClose}
-                        className="block rounded-lg px-3 py-3 transition hover:bg-gray-50 dark:hover:bg-gray-800"
-                      >
-                        {body}
-                      </Link>
-                    ) : (
-                      <a
-                        href={href}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        onClick={onClose}
-                        className="block rounded-lg px-3 py-3 transition hover:bg-gray-50 dark:hover:bg-gray-800"
-                      >
-                        {body}
-                      </a>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
-
-        {showHits && (
-          <div className="border-t border-gray-200 px-5 py-3 dark:border-gray-700">
-            <Link
-              href={`/search?q=${encodeURIComponent(query)}`}
-              onClick={onClose}
-              className="text-sm font-semibold text-blue-700 hover:underline dark:text-blue-400"
-            >
-              Open full results →
-            </Link>
+        {!error && loading && (
+          <div className="space-y-3 px-3 py-4">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="h-10 animate-pulse rounded bg-gray-100 dark:bg-gray-800" />
+            ))}
           </div>
         )}
+
+        {!error && !loading && settled && hits.length === 0 && !showSources && (
+          <div className="px-3 py-6 text-sm leading-6 text-gray-700 dark:text-gray-300">
+            <p>Nothing published in the last 48 hours matches “{query.trim()}”.</p>
+            <p className="mt-2 text-xs text-gray-500">
+              Stories older than 48 hours are pruned. Press Enter in the
+              search box to open the full results page, which re-scrapes
+              every configured outlet for this query.
+            </p>
+          </div>
+        )}
+
+        {showSources && (
+          <div>
+            <p className="px-3 pb-2 pt-1 text-xs leading-5 text-gray-600 dark:text-gray-400">
+              {grounded
+                ? "Nothing in our archive matches. These are live web results — they are NOT from the outlets this site crawls."
+                : resurrected
+                  ? "Not in the 48-hour window, but re-fetched from the outlets this site crawls."
+                  : "Found outside the 48-hour window."}
+            </p>
+            <ul className="divide-y divide-gray-100 dark:divide-gray-800">
+              {fallbackSources.slice(0, 8).map((source, index) => (
+                <li key={`${source.url}-${index}`}>
+                  <a
+                    href={source.url ?? "#"}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={onClose}
+                    className="block rounded-lg px-3 py-3 transition hover:bg-gray-50 dark:hover:bg-gray-800"
+                  >
+                    <p className="font-medium leading-snug text-gray-900 dark:text-gray-100">
+                      {source.headline}
+                    </p>
+                    <p className="mt-0.5 text-xs text-gray-500">
+                      {source.source ?? "External source"}
+                      {source.published_at
+                        ? ` · ${formatNewsDate(source.published_at)}`
+                        : ""}
+                    </p>
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {showHits && (
+          <ul className="divide-y divide-gray-100 dark:divide-gray-800">
+            {hits.slice(0, 10).map((hit) => {
+              // Our own rows link internally; anything the fallback
+              // recovered links out to the outlet that published it.
+              const internal = Boolean(hit.slug);
+              const href = internal
+                ? `/article/${hit.slug}`
+                : (hit.source_article_url ?? "#");
+
+              const body = (
+                <>
+                  <p className="font-medium leading-snug text-gray-900 dark:text-gray-100">
+                    {hit.headline}
+                  </p>
+                  <p className="mt-0.5 text-xs text-gray-500">
+                    {hit.source_name_snapshot ?? ""}
+                    {hit.published_at
+                      ? ` · ${formatNewsDate(hit.published_at)}`
+                      : ""}
+                    {!internal && " · opens the source"}
+                  </p>
+                </>
+              );
+
+              return (
+                <li key={hit.id}>
+                  {internal ? (
+                    <Link
+                      href={href}
+                      onClick={onClose}
+                      className="block rounded-lg px-3 py-3 transition hover:bg-gray-50 dark:hover:bg-gray-800"
+                    >
+                      {body}
+                    </Link>
+                  ) : (
+                    <a
+                      href={href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={onClose}
+                      className="block rounded-lg px-3 py-3 transition hover:bg-gray-50 dark:hover:bg-gray-800"
+                    >
+                      {body}
+                    </a>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
       </div>
-    </>
+
+      {showHits && (
+        <div className="border-t border-gray-200 px-5 py-3 dark:border-gray-700">
+          <Link
+            href={`/search?q=${encodeURIComponent(query)}`}
+            onClick={onClose}
+            className="text-sm font-semibold text-blue-700 hover:underline dark:text-blue-400"
+          >
+            Open full results →
+          </Link>
+        </div>
+      )}
+    </div>
   );
 }

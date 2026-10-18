@@ -484,3 +484,69 @@ async def polish_with_gemini(
         # Never let optional polish change what the reader sees.
         logger.debug("Summary polish skipped for %r", headline[:60])
         return points
+
+# =========================================================================
+# EXCERPT / POINTS OVERLAP
+# =========================================================================
+
+# A sentence this similar to one of the four points adds nothing to the
+# page: the points are already on screen directly above it.
+_OVERLAP_THRESHOLD = 0.7
+
+# Below this, what is left of the excerpt is a fragment, not a thought.
+_MIN_USEFUL_EXCERPT_CHARS = 25
+
+
+def excerpt_without_points(
+    excerpt: str | None,
+    points: list[str] | None,
+) -> str | None:
+    """
+    Drop the sentences the four points already say.
+
+    Both the excerpt and the points are extracted verbatim from the same
+    article, so the excerpt's opening sentences are usually the very
+    sentences the points were built from. Storing both means the article
+    page renders the same paragraph twice — once as a numbered point and
+    once as body text directly below the photograph.
+
+    What survives is what the article says beyond its own summary, which
+    is the part worth showing a reader who scrolled past the points.
+
+    Returns None when nothing distinct is left, so the caller stores no
+    excerpt rather than a duplicate of the points.
+    """
+    text = (excerpt or "").strip()
+    if not text:
+        return None
+    if not points:
+        return text
+
+    point_tokens = [set(_tokens(p)) for p in points]
+    point_tokens = [t for t in point_tokens if t]
+
+    # Its own splitter, deliberately NOT split_sentences().
+    #
+    # That one drops anything under MIN_SENTENCE_WORDS, which is right
+    # for choosing four substantial summary points and wrong here: this
+    # is about which sentences the points already cover, and a short
+    # sentence like "He has pleaded not guilty." is precisely the kind
+    # of detail worth keeping.
+    kept: list[str] = []
+    for sentence in re.split(r"(?<=[.!?।])\s+", text):
+        sentence_tokens = set(_tokens(sentence))
+        if not sentence_tokens:
+            kept.append(sentence)
+            continue
+
+        def ratio(other: set[str]) -> float:
+            return len(sentence_tokens & other) / len(sentence_tokens)
+
+        if any(ratio(pt) >= _OVERLAP_THRESHOLD for pt in point_tokens):
+            continue
+        kept.append(sentence)
+
+    remainder = " ".join(kept).strip()
+    if len(remainder) < _MIN_USEFUL_EXCERPT_CHARS:
+        return None
+    return remainder

@@ -246,7 +246,7 @@ export function Header({ categories }: { categories: NavCategory[] }) {
     is still where they left it.
   */
   return (
-    <header className="sticky top-0 z-[62] border-b border-gray-200 bg-white md:bg-white/90 md:backdrop-blur">
+    <header className="relative sticky top-0 z-[62] border-b border-gray-200 bg-white md:bg-white/90 md:backdrop-blur">
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 gap-4">
         {/* Clicking the logo returns home AND forces a fresh fetch, so
             it behaves as a "back to latest" control rather than a plain
@@ -388,7 +388,6 @@ export function Header({ categories }: { categories: NavCategory[] }) {
         grounded={aiSearch?.grounded}
         resurrected={aiSearch?.resurrected}
         onClose={closeSearch}
-        inputRef={searchInputRef}
       />
     </header>
   );

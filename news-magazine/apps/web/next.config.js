@@ -46,18 +46,146 @@ const nextConfig = {
    * once Render has been running long enough for a cycle of articles to
    * land, at which point this block can shrink to an explicit list.
    */
+  /*
+   * Next.js Image Optimization
+   *
+   * This was `hostname: "**"` with a sandbox CSP and
+   * contentDispositionType: "attachment" — Next's documented mitigation
+   * for an open image proxy, where anyone could use /_next/image as a
+   * free proxy for arbitrary URLs.
+   *
+   * Two problems with that arrangement here:
+   *
+   *   1. It does not work. The optimized response came back with
+   *      `Content-Disposition: attachment`, and browsers would not paint
+   *      it — cards rendered with no photograph even though every row
+   *      had a valid URL.
+   *   2. It was still an open proxy. Those headers limit what a
+   *      fetched image can be USED for; they do not stop the fetch. The
+   *      wildcard remained.
+   *
+   * So the wildcard is gone. The list below is every outlet the
+   * ingestion worker is configured to crawl (from
+   * supabase/migrations/0008_seed_nepali_sources.sql), in both apex
+   * and www form, plus the CDN hosts observed serving real article
+   * images.
+   *
+   * With the host restricted, the proxy concern is resolved at the
+   * source, and the two headers that broke rendering are not needed.
+   *
+   * TO ADD AN OUTLET: add its domain here. If its photographs are
+   * served from a separate CDN, add that host too — a missing host
+   * shows as a card with no image, and nothing else reports it.
+   */
+  /*
+   * Next.js Image Optimization
+   *
+   * This was `hostname: "**"` with a sandbox CSP and
+   * contentDispositionType: "attachment" — Next's documented mitigation
+   * for an open image proxy, where anyone could use /_next/image to
+   * fetch arbitrary URLs through this domain.
+   *
+   * Two problems with that arrangement here:
+   *
+   *   1. It did not work. The optimised response came back with
+   *      `Content-Disposition: attachment` and browsers would not paint
+   *      it — cards rendered with no photograph even though every row
+   *      had a valid URL.
+   *   2. It was still an open proxy. Those headers limit what a fetched
+   *      image may be USED for; they do not stop the fetch. The wildcard
+   *      remained.
+   *
+   * So the wildcard is gone and the allowlist is explicit. One entry per
+   * outlet the ingestion worker crawls (from
+   * supabase/migrations/0008_seed_nepali_sources.sql) plus the CDN
+   * hosts observed serving real article images. `**.host` covers the
+   * apex and every subdomain in a single entry, because Next rejects a
+   * config with more than 50 remotePatterns.
+   *
+   * With the host restricted, the proxy concern is resolved at the
+   * source and the two headers that broke rendering are unnecessary.
+   *
+   * TO ADD AN OUTLET: add its domain here. If its photographs come from
+   * a separate CDN, add that host too — a missing host shows as a card
+   * with no image, and nothing else reports it.
+   */
+  /*
+   * Next.js Image Optimization
+   *
+   * This was `hostname: "**"` with a sandbox CSP and
+   * contentDispositionType: "attachment" — Next's documented mitigation
+   * for an open image proxy, where anyone could use /_next/image to fetch
+   * arbitrary URLs through this domain.
+   *
+   * Two problems with that arrangement here:
+   *
+   *   1. It did not work. The optimised response came back with
+   *      `Content-Disposition: attachment`, and browsers would not paint
+   *      it — cards rendered with no photograph even though every row had
+   *      a valid URL.
+   *   2. It was still an open proxy. Those headers limit what a fetched
+   *      image may be USED for; they do not stop the fetch itself, so
+   *      the wildcard remained.
+   *
+   * The wildcard is gone. With the host restricted at the source, the
+   * proxy concern is resolved and the headers that broke rendering are
+   * unnecessary — removing them is no longer a weakening.
+   *
+   * Every outlet the ingestion worker crawls is listed by apex domain
+   * (from supabase/migrations/0008_seed_nepali_sources.sql). Domains
+   * observed serving article images from a SUBDOMAIN get a `**.host`
+   * entry as well, because Next's `**` matches subdomains but not the
+   * apex — a single pattern cannot cover both.
+   *
+   * Next rejects a config with more than 50 remotePatterns, which is why
+   * this cannot simply be every host under every domain.
+   *
+   * TO ADD AN OUTLET: add its apex domain. If its photographs come from
+   * a CDN subdomain rather than the apex, add `**.that-cdn-host` too.
+   * A missing host shows as a card with no image, and nothing else
+   * reports it.
+   */
   images: {
     formats: ["image/avif", "image/webp"],
 
+    // Keep Vercel serving the resized copy rather than re-fetching the
+    // origin on every page view.
     minimumCacheTTL: 60 * 60 * 24,
-    contentDispositionType: "attachment",
-    contentSecurityPolicy: "default-src 'self'; script-src 'none'; sandbox;",
 
     remotePatterns: [
-      {
-        protocol: "https",
-        hostname: "**",
-      },
+        { protocol: "https", hostname: "24news.com" },
+        { protocol: "https", hostname: "annapurbapost.com" },
+        { protocol: "https", hostname: "arthikabhojan.com" },
+        { protocol: "https", hostname: "bbc.com" },
+        { protocol: "https", hostname: "bhabishaanepal.com" },
+        { protocol: "https", hostname: "ekantipur.com" },
+        { protocol: "https", hostname: "himalkhabar.com" },
+        { protocol: "https", hostname: "kathmandupost.com" },
+        { protocol: "https", hostname: "khabarzone.com" },
+        { protocol: "https", hostname: "myreplica.com" },
+        { protocol: "https", hostname: "nagariknews.com" },
+        { protocol: "https", hostname: "nagariktimes.com" },
+        { protocol: "https", hostname: "nepalbhas.com" },
+        { protocol: "https", hostname: "nepalkantha.com" },
+        { protocol: "https", hostname: "nepalnews.com" },
+        { protocol: "https", hostname: "newahale.com" },
+        { protocol: "https", hostname: "onlinekhabar.com" },
+        { protocol: "https", hostname: "pradeshpost.com" },
+        { protocol: "https", hostname: "prasutojournal.com" },
+        { protocol: "https", hostname: "ratopati.com" },
+        { protocol: "https", hostname: "setopati.com" },
+        { protocol: "https", hostname: "sudarshannews.com" },
+        { protocol: "https", hostname: "thehimalayantimes.com" },
+        { protocol: "https", hostname: "voiceofnepal.com" },
+        { protocol: "https", hostname: "**.kathmandupost.com" },
+        { protocol: "https", hostname: "**.ratopati.com" },
+        { protocol: "https", hostname: "**.nepalnews.com" },
+        { protocol: "https", hostname: "**.onlinekhabar.com" },
+        { protocol: "https", hostname: "**.nagariknews.com" },
+        { protocol: "https", hostname: "**.thehimalayantimes.com" },
+        { protocol: "https", hostname: "**.prixacdn.net" },
+        { protocol: "https", hostname: "**.nagariknewscdn.com" },
+        { protocol: "https", hostname: "**.nepalhomes.com" },
     ],
   },
 

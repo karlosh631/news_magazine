@@ -9,6 +9,7 @@ import { ArticleTranslation } from "@/components/ArticleTranslation";
 import { getArticleBySlug, getCategories, getRelatedArticles } from "@/lib/news";
 import { formatNewsDate } from "@/lib/date";
 import { SITE_LOGO, SITE_NAME, SITE_URL, clampDescription, jsonLd } from "@/lib/site";
+import { excerptWithoutOverlap } from "@/lib/excerpt";
 
 export const dynamic = "force-dynamic";
 
@@ -118,6 +119,8 @@ export default async function ArticlePage({ params }: Props) {
   const categoryName = category ? (category.name_ne ?? category.name_en) : null;
 
   const points = (article.summary_points as string[] | null) ?? [];
+  // Only the part of the excerpt the four points do not already say.
+  const bodyText = excerptWithoutOverlap(article.excerpt, points);
   const image =
     article.image_highres_url ?? article.featured_image_url ?? article.gif_url ?? null;
   const embed = embeddableVideo(article.video_embed_url ?? article.video_url);
@@ -288,8 +291,18 @@ export default async function ArticlePage({ params }: Props) {
             hasEmbed={Boolean(embed)}
           />
 
-          {(article.excerpt || points.length === 0) && article.excerpt && (
-            <p className="mt-6 text-lg leading-8 text-gray-800">{article.excerpt}</p>
+          {/*
+            The excerpt, minus anything the four points already say.
+
+            Both are extracted from the same article, so the excerpt's
+            opening sentences are normally the very sentences the points
+            were built from — the page read as though the article were
+            stating itself twice.
+          */}
+          {bodyText && (
+            <p className="mt-6 text-lg leading-8 text-gray-800 dark:text-gray-200">
+              {bodyText}
+            </p>
           )}
 
           {points.length === 0 && !article.excerpt && (

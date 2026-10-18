@@ -84,6 +84,7 @@ from app.services.sanitizer import (
     sanitize_headline,
 )
 from app.services.summarizer import (
+    excerpt_without_points,
     polish_with_gemini,
     summarize_from_html,
 )
@@ -1048,6 +1049,16 @@ async def run_source_sync(
                 )
 
                 # ---- Store ----
+                # The excerpt and the points are both extracted from the
+                # same article, so the excerpt's opening sentences are
+                # normally the very sentences the points were built from.
+                # Stored together they render as the same paragraph twice
+                # on the article page, so the excerpt is trimmed to what
+                # the points do not already say.
+                store_excerpt = excerpt_without_points(
+                    excerpt, summary.points if summary and summary.points else None
+                )
+
                 article_id = await store_article(
                     db=db,
                     article=article,
@@ -1056,7 +1067,7 @@ async def run_source_sync(
                     source_row=source_row,
                     content_hash=content_hash,
                     title_normalized=title_normalized,
-                    excerpt=excerpt,
+                    excerpt=store_excerpt,
                     summary=summary,
                 )
 

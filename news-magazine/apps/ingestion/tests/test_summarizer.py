@@ -211,3 +211,80 @@ def test_from_html_fallback_never_invents_text():
     summary = summarize_from_html(None, headline="Budget", fallback_excerpt=excerpt)
     for point in summary.points:
         assert point.strip("…") in excerpt or excerpt[:40] in point
+
+# =============================================================
+# Excerpt / points overlap
+# =============================================================
+
+def test_excerpt_drops_sentences_the_points_already_say():
+    """
+    Both are extracted from the same article, so storing them as-is
+    renders the same paragraph twice on the article page.
+    """
+    from app.services.summarizer import excerpt_without_points
+
+    points = [
+        "More than two years after the Nepali nurse vanished in Virginia, "
+        "her husband is on trial for murder, though her body has never been found.",
+        "Here are 14 key questions about the case and the evidence.",
+    ]
+    excerpt = (
+        "More than two years after the Nepali nurse vanished in Virginia, "
+        "her husband is on trial for murder, though her body has never been "
+        "found. He has pleaded not guilty. Here are 14 key questions about "
+        "the case and the evidence."
+    )
+
+    result = excerpt_without_points(excerpt, points)
+
+    assert result == "He has pleaded not guilty."
+
+
+def test_excerpt_is_dropped_when_nothing_distinct_survives():
+    from app.services.summarizer import excerpt_without_points
+
+    points = ["Nepal imports two million packs of playing cards in two months."]
+    assert excerpt_without_points(points[0], points) is None
+
+
+def test_excerpt_is_kept_verbatim_when_there_are_no_points():
+    from app.services.summarizer import excerpt_without_points
+
+    text = "A sentence with no summary to overlap."
+    assert excerpt_without_points(text, []) == text
+    assert excerpt_without_points(text, None) == text
+
+
+def test_excerpt_overlap_works_on_devanagari():
+    from app.services.summarizer import excerpt_without_points
+
+    points = ["प्रधानमन्त्री श्री बलेन्द्र शाहले आज संसदमा भाषण दिनुभयो।"]
+    excerpt = (
+        "प्रधानमन्त्री श्री बलेन्द्र शाहले आज संसदमा भाषण दिनुभयो। "
+        "उहाँले देशको आर्थिक अवस्था बारे मन्त्रालयलाई निर्देशन दिनुभयो।"
+    )
+
+    assert excerpt_without_points(excerpt, points) == (
+        "उहाँले देशको आर्थिक अवस्था बारे मन्त्रालयलाई निर्देशन दिनुभयो।"
+    )
+
+
+def test_excerpt_splitter_keeps_short_sentences():
+    """
+    It must not reuse split_sentences(), which drops anything under
+    MIN_SENTENCE_WORDS. That filter is right for choosing four
+    substantial points and wrong for asking which sentences the points
+    already cover — "He has pleaded not guilty." is exactly the detail
+    worth keeping.
+    """
+    from app.services.summarizer import excerpt_without_points, split_sentences
+
+    excerpt = (
+        "Nepal's parliament debated the budget for four hours on Tuesday. "
+        "It passed. The prime minister had earlier warned of a shortfall."
+    )
+    assert len(split_sentences(excerpt)) < 3  # the short one is filtered out
+
+    result = excerpt_without_points(excerpt, ["It passed."])
+    assert result is not None
+    assert "It passed." not in result

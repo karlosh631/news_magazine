@@ -59,15 +59,15 @@ const ROTATE_AFTER_MS = 90_000;
 const ROTATE_MS = 75_000;
 
 /**
- * How many of the newest articles rotation must never touch.
+ * How many of the newest articles rotation must never touch, when it is
+ * switched on. Nine is three rows of the 3-column grid.
  *
- * Nine is three rows of the 3-column grid. Everything above the fold and
- * one full row below it stays strictly newest-first; the tail reshuffles
- * so the page does not sit frozen while the worker catches up.
- *
- * Rotation used to promote the oldest quarter all the way to position 1,
- * which put a two-hour-old story above one published a minute ago. That
- * is the opposite of what "latest" means to a reader.
+ * Rotation is OFF by default. The reader asked for the newest news at
+ * the top, everywhere, and for old stories to be replaced by new ones —
+ * a reshuffle works against both. It stays available as an opt-in, and
+ * even then it only touches the tail: promoting the oldest quarter all
+ * the way to position 1 would put a two-hour-old story above one
+ * published a minute ago, which is the opposite of what "latest" means.
  */
 const PINNED = 9;
 
@@ -76,7 +76,7 @@ type Rotate = "off" | "on";
 export function LiveArticleFeed({
   initialArticles,
   emptyState,
-  rotation = "on",
+  rotation = "off",
 }: {
   initialArticles: LatestArticle[];
   emptyState?: { title: string; description: string };
@@ -153,15 +153,17 @@ export function LiveArticleFeed({
           return;
         }
 
-        // Only genuinely new ids, and only ones we do not already show.
-        setArticles((current) => {
-          const unseen = fresh.filter((a) => !ids.current.has(a.id));
-          if (unseen.length === 0) return current;
-
-          for (const article of unseen) ids.current.add(article.id);
-          lastArrivalAt.current = Date.now();
-          return [...unseen, ...current];
-        });
+        // Replace rather than prepend.
+        //
+        // Appending new arrivals left everything else in place, so a
+        // story stayed on the page long after it had fallen out of the
+        // newest-N. The list was effectively append-only for the life of
+        // the tab. Swapping in what the database holds right now means
+        // the page is exactly "the latest N", newest first, and old
+        // stories disappear on their own as they age out.
+        setArticles(fresh);
+        ids.current = new Set(fresh.map((a) => a.id));
+        lastArrivalAt.current = Date.now();
       } catch {
         // Offline or the API restarting: the list stays as-is.
       } finally {

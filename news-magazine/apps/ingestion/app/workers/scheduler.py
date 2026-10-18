@@ -52,6 +52,11 @@ logger = logging.getLogger("scheduler")
 
 MAX_BACKOFF_SECONDS = 6 * 60 * 60  # cap at 6 hours
 REFRESH_INTERVAL_SECONDS = 300  # pick up source-table edits every 5 min
+
+# A sync that has been 'running' longer than this was cancelled, not slow.
+# Generous enough to clear the slowest legitimate run (27 outlets, each
+# with its own fetch timeout and media enrichment).
+ORPHANED_SYNC_LOG_SECONDS = 3600
 MIN_POLL_SECONDS = 60  # never poll a source faster than once a minute
 
 _consecutive_failures: dict[str, int] = {}
@@ -98,6 +103,23 @@ async def _sync_one(source_id: str) -> None:
 
     try:
         result = await run_source_sync(source_row)
+    except asyncio.CancelledError:
+        # Cancellation is not a failure of the source — it is the task
+        # being torn down (a deploy, a shutdown, an explicit cancel).
+        # asyncio.CancelledError is a BaseException in Python 3.8+, so
+        # the `except Exception` below never sees it; it used to escape
+        # straight into APScheduler as an unhandled job exception, which
+        # meant backoff never engaged and the sync log stayed 'running'
+        # forever.
+        #
+        # Re-raise rather than swallow: a swallowed cancellation breaks
+        # structured concurrency, because the caller still believes the
+        # task is alive.
+        logger.warning(
+            "Scheduler: sync of %s was cancelled mid-run.",
+            source_row.get("name"),
+        )
+        raise
     except Exception:
         # run_source_sync is written not to raise, but a bug in it must
         # not kill the scheduler task and silently stop this source.
@@ -283,11 +305,44 @@ async def _periodic_refresh() -> None:
     while True:
         await asyncio.sleep(REFRESH_INTERVAL_SECONDS)
         try:
+            await _close_orphaned_sync_logs()
             await refresh_jobs()
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Scheduler: periodic job refresh failed")
+
+
+async def _close_orphaned_sync_logs() -> int:
+    """
+    Mark sync-log rows abandoned by a cancelled run as failed.
+
+    A run that is cancelled mid-flight never reaches _finish_sync_log,
+    so its row keeps status 'running' for ever. The admin surface counts
+    failures from those rows, so one deploy was enough to make the
+    health of the pipeline permanently unreadable.
+
+    Only rows older than the longest plausible run are touched, so a sync
+    that is genuinely still in progress is never closed out from under
+    itself.
+    """
+    from app.services.ingestion import db_call
+
+    db = get_db()
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=ORPHANED_SYNC_LOG_SECONDS)
+
+    try:
+        response = await db_call(
+            lambda: db.table("source_sync_logs")
+            .update({"status": "failed", "finished_at": cutoff.isoformat()})
+            .eq("status", "running")
+            .lt("started_at", cutoff.isoformat())
+            .execute()
+        )
+        return len(response.data or [])
+    except Exception:
+        logger.debug("Could not close orphaned sync log rows")
+        return 0
 
 
 # =============================================================

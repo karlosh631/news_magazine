@@ -967,6 +967,15 @@ async def run_source_sync(
                     # write — there is nothing to link to.
                     result.rejected += 1
 
+            except asyncio.CancelledError:
+                # A BaseException, so the handler below never catches it.
+                # Swallowing it here would make a cancelled sync look
+                # like a run that simply processed fewer articles, and
+                # the caller would carry on believing the task is alive.
+                # _close_orphaned_sync_logs() in the scheduler cleans up
+                # the log row this run will not get to finish.
+                raise
+
             except Exception as exc:
                 # One bad article must never stop the rest of the feed.
                 result.rejected += 1

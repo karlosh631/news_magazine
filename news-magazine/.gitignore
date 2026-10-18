@@ -1,6 +1,8 @@
 node_modules/
 .next/
-.next-verify/
+# Verification builds use NEXT_DIST_DIR so they cannot clobber the .next a
+# running dev server is using. Ignore every one of them.
+.next-*/
 .env
 .env.local
 apps/ingestion/.venv/

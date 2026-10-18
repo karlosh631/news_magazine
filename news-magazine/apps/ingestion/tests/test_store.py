@@ -17,6 +17,7 @@ never written, and the multi-outlet merge record stayed incomplete.
 from __future__ import annotations
 
 import asyncio
+import pytest
 from types import SimpleNamespace
 
 from app.services.ingestion import (
@@ -380,3 +381,43 @@ def test_caller_touches_nothing_when_no_id_came_back():
     before = len(db.calls)
     assert run(_upsert_article_source(db, article_id, OTHER_UUID, "https://e.com/a")) == "skipped"
     assert len(db.calls) == before
+
+# =============================================================
+# Cancellation
+# =============================================================
+
+def test_cancelled_sync_is_not_swallowed_by_the_per_article_handler():
+    """
+    asyncio.CancelledError is a BaseException, so `except Exception`
+    never sees it. If the per-article handler caught it, a cancelled run
+    would look like one that simply processed fewer articles, and the
+    scheduler would carry on believing the task was alive.
+    """
+    assert not issubclass(asyncio.CancelledError, Exception)
+
+    # The handler must re-raise rather than absorb.
+    class Article:
+        headline = "Some headline"
+        language = "ne"
+        source_article_url = "https://example.com/a"
+        canonical_url = "https://example.com/a"
+        published_at = None
+        raw_metadata = {}
+
+    db = FakeDB([[{"id": GOOD_UUID}]])
+    task = asyncio.ensure_future(
+        store_article(
+            db=db,
+            article=Article(),
+            media={},
+            category_id=None,
+            source_row={"id": OTHER_UUID, "name": "Example", "sector": "national"},
+            content_hash="deadbeef",
+            title_normalized="headline",
+            excerpt=None,
+        )
+    )
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.get_event_loop().run_until_complete(task)

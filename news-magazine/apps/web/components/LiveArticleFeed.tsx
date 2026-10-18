@@ -61,10 +61,15 @@ const ROTATE_MS = 75_000;
 /**
  * How many of the newest articles rotation must never touch.
  *
- * Three is the first row of the 3-column grid, so what the reader sees
- * first stays strictly newest-first; everything below re-composes.
+ * Nine is three rows of the 3-column grid. Everything above the fold and
+ * one full row below it stays strictly newest-first; the tail reshuffles
+ * so the page does not sit frozen while the worker catches up.
+ *
+ * Rotation used to promote the oldest quarter all the way to position 1,
+ * which put a two-hour-old story above one published a minute ago. That
+ * is the opposite of what "latest" means to a reader.
  */
-const PINNED = 3;
+const PINNED = 9;
 
 type Rotate = "off" | "on";
 

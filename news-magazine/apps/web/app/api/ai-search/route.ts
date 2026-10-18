@@ -260,9 +260,17 @@ export async function POST(request: Request) {
       });
     }
 
+    // Both fallbacks declined. Say which reason, because "nothing
+    // matches" reads as "this story does not exist" when the real cause
+    // may just be that no API key is configured.
+    const noKey =
+      !process.env.GEMINI_API_KEY && !process.env.Gemini_API_Key;
+
     return noBrief(
       query,
-      `No published articles match "${query}". Stories older than 48 hours are pruned.`
+      noKey
+        ? `No published articles match "${query}", and live web fallback is disabled because GEMINI_API_KEY is not set. Set it on Vercel to have Gemini search the web when a query finds nothing.`
+        : `No published articles match "${query}" in the last 48 hours, and the live web search found nothing either.`
     );
   }
 

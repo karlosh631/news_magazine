@@ -5,7 +5,7 @@ import type { Metadata } from "next";
 import { ShareButtons } from "@/components/ShareButtons";
 import { ArticleViewTracker } from "@/components/ArticleViewTracker";
 import { ArticleMedia } from "@/components/ArticleMedia";
-import { TranslatePoints } from "@/components/TranslatePoints";
+import { ArticleTranslation } from "@/components/ArticleTranslation";
 import { getArticleBySlug, getCategories, getRelatedArticles } from "@/lib/news";
 import { formatNewsDate } from "@/lib/date";
 import { SITE_LOGO, SITE_NAME, SITE_URL, clampDescription, jsonLd } from "@/lib/site";
@@ -228,9 +228,13 @@ export default async function ArticlePage({ params }: Props) {
             </div>
           )}
 
-          <h1 className="font-headline text-3xl font-bold leading-tight text-gray-900 md:text-4xl">
-            {article.headline}
-          </h1>
+          <ArticleTranslation
+            headline={article.headline}
+            points={points}
+            language={article.language}
+            translatedHeadline={article.headline_translated ?? null}
+            translatedPoints={article.summary_points_translated ?? null}
+          />
 
           <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2 border-b pb-5 text-sm text-gray-500">
             {article.source_name_snapshot && (
@@ -250,24 +254,12 @@ export default async function ArticlePage({ params }: Props) {
             )}
           </div>
 
-          {/* The four points, extracted verbatim from the article.
-
-              Dark variants throughout: this panel had a fixed
-              `bg-blue-50/60` with no `dark:` pair, so in dark mode a
-              pale blue card sat on a near-black page behind light
-              text — unreadable. */}
-          {points.length > 0 && (
-            <section className="mt-6 rounded-lg border border-blue-100 bg-blue-50/60 p-5 dark:border-blue-900/60 dark:bg-blue-950/40">
-              <h2 className="text-xs font-bold uppercase tracking-wider text-blue-700 dark:text-blue-300">
-                In this story
-              </h2>
-              <TranslatePoints
-                points={points}
-                language={article.language}
-                translated={article.summary_points_translated ?? null}
-              />
-            </section>
-          )}
+          {/* The headline and the four-point panel are rendered together by
+              ArticleTranslation, which follows the header's language
+              toggle. There is no separate translate button in this
+              panel — it only ever translated four sentences while the
+              headline, the largest text on the page, stayed in the
+              original language. */}
 
           {embed && (
             <div className="mt-6 aspect-video w-full overflow-hidden rounded-xl bg-black">

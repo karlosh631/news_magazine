@@ -23,13 +23,23 @@ export type NavCategory = {
 const AUTO_REFRESH_MS = 15_000;
 
 /**
- * Shape returned by /api/search.
+ * Shape returned by /api/ai-search.
  *
- * Stage 1 typed this as an AI brief (`summary` + `key_points` +
- * `sources`) because the endpoint fabricated one. The endpoint now runs
- * a real database search and returns matching articles, so the dropdown
- * renders actual headlines with real links instead of model output.
+ * The header used to call /api/search, which is the database query on its
+ * own — so the endpoint that can actually recover a story (re-scrape the
+ * outlets, then Google-search grounding) was never reached, and a
+ * query with no match simply said "nothing published".
+ *
+ * /api/ai-search runs the same real search first and only falls through
+ * when it finds nothing, so results are still grounded in real rows.
  */
+type SearchSource = {
+  headline: string;
+  url: string | null;
+  source: string | null;
+  published_at: string | null;
+};
+
 type SearchResult = {
   query: string;
   count: number;
@@ -43,6 +53,13 @@ type SearchResult = {
     source_article_url: string | null;
     published_at: string | null;
   }>;
+  /** Present when the database had nothing and a fallback supplied links. */
+  sources?: SearchSource[];
+  /** Results came from a live web search, not from our ingested outlets. */
+  grounded?: boolean;
+  /** Results were re-scraped from the configured outlets. */
+  resurrected?: boolean;
+  summary?: string;
 };
 
 function LogoIcon() {
@@ -93,7 +110,9 @@ export function Header({ categories }: { categories: NavCategory[] }) {
 
   const closeSearch = () => {
     setSearchOpen(false);
-    searchInputRef.current?.blur();
+    // Deliberately no blur(). Blurring the field while the overlay was
+    // open is what made typing stop working — the reader's caret and
+    // focus were both dropped the moment they dismissed or re-clicked.
     setSearchQuery("");
     setAiSearch(null);
     setAiSearchError("");
@@ -169,7 +188,7 @@ export function Header({ categories }: { categories: NavCategory[] }) {
       setAiSearchLoading(true);
       setAiSearchError("");
       try {
-        const response = await fetch("/api/search", {
+        const response = await fetch("/api/ai-search", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ query }),
@@ -345,7 +364,10 @@ export function Header({ categories }: { categories: NavCategory[] }) {
         loading={aiSearchLoading}
         error={aiSearchError}
         hits={aiSearch?.articles ?? []}
-        count={aiSearch?.count ?? 0}
+        count={aiSearch?.count ?? aiSearch?.articles?.length ?? 0}
+        sources={aiSearch?.sources}
+        grounded={aiSearch?.grounded}
+        resurrected={aiSearch?.resurrected}
         onClose={closeSearch}
         inputRef={searchInputRef}
       />

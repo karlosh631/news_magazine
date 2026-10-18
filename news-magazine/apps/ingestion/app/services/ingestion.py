@@ -726,9 +726,12 @@ async def run_source_sync(
                     )
                     await _bump_source_count(db, verdict.existing_id)
                     logger.info(
-                        "Duplicate (%s, %.0f%%): %r <- %r",
-                        verdict.reason, verdict.confidence,
-                        headline, verdict.matched_title,
+                        # f-string rather than %-args: the worker's
+                        # structlog config renders stdlib log records as
+                        # Message:/Arguments: without interpolating them,
+                        # so the actual headline never reached the log.
+                        f"Duplicate ({verdict.reason}, {verdict.confidence:.0f}%): "
+                        f"{headline!r} <- {verdict.matched_title!r}",
                     )
                     continue
 

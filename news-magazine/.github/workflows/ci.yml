@@ -32,7 +32,8 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npx tsc --noEmit
-      - run: npm run build
+      # Isolated dist dir so this can never collide with a local dev server.
+      - run: npm run build:verify
 
   ingestion:
     name: Ingestion

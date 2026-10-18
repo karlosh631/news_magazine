@@ -106,6 +106,10 @@ cd apps/web
 cp .env.example .env.local               # fill in Supabase keys
 npm install
 npm run dev                              # http://localhost:3000
+
+# NOTE: `npm run build` overwrites the same .next directory the dev
+# server uses. Stop `npm run dev` first, or the site goes blank until
+# you restart it. CI has no dev server, so it is unaffected.
 ```
 
 ---

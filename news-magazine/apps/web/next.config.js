@@ -1,5 +1,9 @@
 /** @type {import('next').NextConfig} */
+// NEXT_DIST_DIR lets a verification build write to its own directory so it
+// cannot clobber the .next a running dev server is using. Without it,
+// running `npm run build` while `npm run dev` is up blanks the site.
 const nextConfig = {
+  distDir: process.env.NEXT_DIST_DIR || ".next",
   reactStrictMode: true,
 
   /*

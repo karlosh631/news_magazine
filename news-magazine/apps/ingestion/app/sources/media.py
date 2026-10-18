@@ -50,6 +50,87 @@ logger = logging.getLogger("media")
 # bulletin is still a real story worth summarising.
 MIN_ARTICLE_TEXT_CHARS = 120
 
+# In-body images outrank og:image by this much. A 1200x675 declared
+# og:image scores ~2737, so the bonus has to clear that comfortably.
+#
+# The Ministry of Foreign Affairs feed sets og:image to its own channel
+# logo, so every story from them rendered the same "IICT Samachar"
+# picture. An image found inside the article body is the photograph the
+# story is actually about, so it is preferred even when the declared
+# og:image is larger.
+CONTENT_IMAGE_BONUS = 5000
+
+# Container classes/ids whose <img> tags belong to the article body.
+_ARTICLE_REGION_RE = re.compile(
+    r"<(?P<tag>article|div|section)\b[^>]*(?:class|id)\s*=\s*[\"'][^\"']*"
+    r"(?:article|story|post-content|entry-content|news-content|content-body|"
+    r"detail|main[-_]?content|body[-_]?content)"
+    r"[^\"']*[\"'][^>]*>(?P<body>.*?)</(?P=tag)>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _article_region(html: str) -> str:
+    """
+    Narrow the page to the article body for image harvesting.
+
+    Falls back to the whole document when no article container is
+    marked up, because a wrong-region image beats no image.
+    """
+    match = _ARTICLE_REGION_RE.search(html)
+    if match and len(match.group("body")) > 400:
+        return match.group("body")
+    return html
+
+
+# Containers whose <img> tags are site furniture — banners, ads, share
+# rails, related-story strips — not the story's photograph.
+_CHROME_CONTAINER_RE = re.compile(
+    r"<(?:div|section|aside|nav|header|footer|ul)\b[^>]*(?:class|id)\s*=\s*[\"'][^\"']*"
+    r"(?:banner|advert|ad-|-ad|ads|share|social|related|recommend|promo|"
+    r"sidebar|widget|newsletter|subscribe|popup|modal|comment|breaking|"
+    r"trending|popular|most-read|footer|header|nav|menu|logo|brand)"
+    r"[^\"']*[\"'][^>]*>",
+    re.IGNORECASE,
+)
+
+
+def _chrome_spans(html: str) -> list[tuple[int, int]]:
+    """
+    Character ranges occupied by page-chrome containers.
+
+    Returned as offsets rather than deleted from the markup. An earlier
+    version removed them with a regex and, because real-world HTML is
+    not balanced, that deleted all 1,049 characters of Kathmandu Post's
+    article. Offsets cannot corrupt the document.
+    """
+    spans: list[tuple[int, int]] = []
+
+    for match in _CHROME_CONTAINER_RE.finditer(html):
+        start = match.end()
+        # Walk forward to this container's matching close tag, tracking
+        # nesting depth so a nested div does not end it early.
+        tag = match.group(0)[1:].split()[0].rstrip(">").lower()
+        depth = 1
+        position = start
+        pattern = re.compile(
+            rf"<{tag}\b[^>]*>|</{tag}\s*>", re.IGNORECASE
+        )
+        while depth > 0 and position < len(html):
+            inner = pattern.search(html, position)
+            if not inner:
+                break
+            depth += -1 if inner.group(0).startswith("</") else 1
+            position = inner.end()
+        spans.append((start, position))
+
+    return spans
+
+
+def _inside_any(span: tuple[int, int], spans: list[tuple[int, int]]) -> bool:
+    start, end = span
+    return any(low <= start < high for low, high in spans)
+
 # ---------------------------------------------------------------------------
 # Patterns
 # ---------------------------------------------------------------------------
@@ -66,7 +147,9 @@ FB_RE = re.compile(r"facebook\.com/[^/]+/videos/[^/]+/(\d+)", re.IGNORECASE)
 # otherwise useless as article artwork.
 _JUNK_IMAGE_RE = re.compile(
     r"(?:^|[/_.-])(?:pixel|spacer|blank|transparent|1x1|avatar|logo|"
-    r"icon|sprite|favicon|placeholder|loader|default[-_]?image)[/_.-]",
+    r"icon|sprite|favicon|placeholder|loader|lazy[-_.]?|lazyload|"
+    r"default[-_]?image|no[-_]?image|dummy|mock|grey|gray|loading|"
+    r"preload|skeleton|shimmer|lightbox|thumb[-_]?small)[/_.-]",
     re.IGNORECASE,
 )
 
@@ -161,6 +244,13 @@ def _clean_url(value: str | None, base_url: str) -> str | None:
     if parsed.scheme not in {"http", "https"}:
         return None
 
+    # Client-rendered sites ship their template source. An <img> inside
+    # one has src="{{data.tags[i].trending_image}}" — not a URL at all,
+    # and rendering it as an image src produced a broken tile. Reject
+    # anything carrying a template marker.
+    if any(token in value for token in ("{{", "}}", "${", "<%", "%>", "[[", "]]")):
+        return None
+
     host = (parsed.hostname or "").lower()
     if not host or host in _RESERVED_HOSTS:
         return None
@@ -198,6 +288,16 @@ def _score_image(url: str, declared_width: int | None, declared_height: int | No
     # Prefer modern formats at equal size.
     if url.lower().split("?")[0].endswith((".webp", ".avif")):
         score += 40
+
+    # Penalise on-the-fly thumbnail proxies. Kathmandu Post links its
+    # body images through assets-api.../thumb.php?src=<real file>, which
+    # scores well on the src= size token but serves a downscaled render.
+    # The direct CDN URL is always the better pick when we have it.
+    if any(
+        marker in url.lower()
+        for marker in ("thumb.php", "thumbnail.php", "/resize/", "image-resize", "/cache/")
+    ):
+        score -= 4000
 
     return score
 
@@ -452,17 +552,29 @@ async def extract_from_article(
         if link_image:
             image_candidates.append((_score_image(link_image, None, None), link_image, "link:image_src"))
 
+        # In-body images, gathered from the article container only.
+        #
+        # These are weighted ABOVE og:image. Several Nepali outlets —
+        # the Ministry of Foreign Affairs feed being the clearest case —
+        # set og:image to the channel's own logo, so every story from
+        # them renders the same picture. The photograph inside the body is
+        # the story's actual image, so it wins.
+        body_html = html
+        chrome = _chrome_spans(html)
         for match in re.finditer(
-            r'<img\b[^>]*\bsrc(?:set)?\s*=\s*["\']([^"\']+)["\'][^>]*>', html, re.IGNORECASE
+            r'<img\b[^>]*\bsrc(?:set)?\s*=\s*["\']([^"\']+)["\'][^>]*>', body_html, re.IGNORECASE
         ):
+            # Skip anything sitting inside a banner / ad / share / related
+            # container. Those are the images that repeat across every
+            # story on the site.
+            if _inside_any((match.start(), match.end()), chrome):
+                continue
             src = _clean_url(match.group(1), final_url)
             if not src or _looks_like_junk_image(src):
                 continue
-            # Skip anything inside a header/nav/footer/aside block.
-            prefix = html[: match.start()].rsplit("<", 1)[-1]
-            if re.match(r"(header|nav|footer|aside|form)\b", prefix, re.IGNORECASE):
-                continue
-            image_candidates.append((_score_image(src, None, None), src, "img"))
+            image_candidates.append(
+                (_score_image(src, None, None) + CONTENT_IMAGE_BONUS, src, "body")
+            )
 
         if image_candidates:
             scored = sorted(image_candidates, key=lambda item: item[0], reverse=True)

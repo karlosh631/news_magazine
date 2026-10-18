@@ -295,6 +295,10 @@ forever without you touching it.
 
 #### Option B — a real background service (lower latency)
 
+This is the option to pick for the tightest freshness. The worker has no
+scheduler floor — it polls every source on its own interval and re-reads
+the sources table every 5 minutes.
+
 | Piece | Where | Command |
 |---|---|---|
 | `apps/web` | Vercel, root directory `apps/web` | — |

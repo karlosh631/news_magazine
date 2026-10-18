@@ -64,7 +64,7 @@ logger = logging.getLogger("dedup")
 # which are already stricter about word membership.
 # ---------------------------------------------------------------------------
 
-FUZZY_TITLE_THRESHOLD = 82
+FUZZY_TITLE_THRESHOLD = 78
 TOKEN_FINGERPRINT_THRESHOLD = 78
 DEDUP_WINDOW_HOURS = 12
 

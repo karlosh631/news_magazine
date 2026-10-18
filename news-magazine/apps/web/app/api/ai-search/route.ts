@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { searchArticles } from "@/lib/news";
+import { triggerResurrection } from "@/lib/resurrection";
 
 /**
  * AI news brief.
@@ -39,6 +40,91 @@ const geminiResponseSchema = z.object({
 
 const GEMINI_ENDPOINT =
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent";
+
+/**
+ * Google-search grounding.
+ *
+ * The database only holds the last 48 hours, so a search for anything
+ * older returns nothing. Rather than leave the reader with a dead end,
+ * fall back to Gemini with the `googleSearch` grounding tool, which
+ * retrieves real web results and returns them WITH the source URLs it
+ * actually retrieved.
+ *
+ * This is the only safe way to extend search past the retention window
+ * from inside Vercel: the answers are grounded in retrieved pages, each
+ * result carries the URL it came from, and the model is explicitly
+ * forbidden from stating anything that is not in those pages. That is
+ * categorically different from Stage 1, which asked Gemini to invent
+ * headlines and rendered them as news.
+ */
+async function groundedSearch(query: string): Promise<{
+  answer: string | null;
+  sources: Array<{ title: string; url: string }>;
+} | null> {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.Gemini_API_Key;
+  if (!apiKey) return null;
+
+  const prompt = [
+    `Search the web for recent Nepali and international news about: ${query}`,
+    "",
+    "Report only what the retrieved pages actually say.",
+    "For each distinct story, give a one-sentence factual summary and the source URL.",
+    "Do not invent facts, dates, or outlets. If the retrieved pages do not",
+    "cover the topic, say so plainly.",
+    "",
+    'Return JSON only: {"answer": string, "stories": [{"headline": string, "url": string, "summary": string}]}',
+  ].join("\n");
+
+  try {
+    const response = await fetch(`${GEMINI_ENDPOINT}?key=${encodeURIComponent(apiKey)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        tools: [{ google_search: {} }],
+        generationConfig: { temperature: 0.1, responseMimeType: "application/json" },
+      }),
+      signal: AbortSignal.timeout(20_000),
+      cache: "no-store",
+    });
+
+    if (!response.ok) return null;
+
+    const payload = await response.json();
+    const text = extractText(payload);
+    const parsed = JSON.parse(
+      text.replace(/```json|```/g, "").trim()
+    ) as {
+      answer?: string;
+      stories?: Array<{ headline?: string; url?: string; summary?: string }>;
+    };
+
+    // Grounding metadata lists what was actually retrieved. Prefer it
+    // for the source list so a URL cannot be hallucinated into the
+    // citations block.
+    const grounding: Array<{ title?: string; uri?: string }> =
+      payload?.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
+
+    const grounded = grounding
+      .filter((chunk) => chunk.uri)
+      .map((chunk) => ({ title: chunk.title ?? chunk.uri!, url: chunk.uri! }));
+
+    const stories: Array<{ title: string; url: string }> = (parsed.stories ?? [])
+      .filter((s) => s && typeof s.url === "string" && /^https?:\/\//.test(s.url))
+      .map((s) => ({
+        title: String(s.headline ?? "").trim(),
+        url: s.url as string,
+      }))
+      .filter((s) => s.title.length > 0);
+
+    return {
+      answer: typeof parsed.answer === "string" ? cleanNewsText(parsed.answer) : null,
+      sources: grounded.length >= stories.length && grounded.length > 0 ? grounded : stories,
+    };
+  } catch {
+    return null;
+  }
+}
 
 // Per-process rate limit so this endpoint cannot be used to drain the
 // Gemini quota.
@@ -134,11 +220,49 @@ export async function POST(request: Request) {
     published_at: row.published_at,
   }));
 
-  // ---- 2. No matches means no brief ----
+  // ---- 2. No matches: try to recover the story ----
   if (articles.length === 0) {
+    // (a) The Python service may re-scrape the configured outlets for a
+    //     pruned story. Best fidelity: real article, real URL.
+    const resurrected = await triggerResurrection(query, 5);
+    if (resurrected && resurrected.articles.length > 0) {
+      return NextResponse.json({
+        query,
+        summary: `${resurrected.articles.length} matching article(s) re-fetched from source.`,
+        key_points: [],
+        confidence: "medium" as const,
+        articles: resurrected.articles,
+        sources: resurrected.articles.map((a) => ({
+          headline: a.headline,
+          url: a.source_article_url,
+          source: a.source_name_snapshot,
+          published_at: a.published_at,
+        })),
+        resurrected: true,
+      });
+    }
+
+    // (b) Fall back to Google-search grounding, which works entirely
+    //     inside Vercel and needs no Python service deployed.
+    const grounded = await groundedSearch(query);
+    if (grounded && grounded.sources.length > 0) {
+      return NextResponse.json({
+        query,
+        summary:
+          grounded.answer ??
+          `Nothing published here in the last 48 hours. These are live web results.`,
+        key_points: [],
+        confidence: "low" as const,
+        articles: [],
+        sources: grounded.sources,
+        grounded: true,
+        note: "Not from our archive — these are live web results with their original sources.",
+      });
+    }
+
     return noBrief(
       query,
-      `No published articles match "${query}". Stories older than 48 hours are pruned — try the Search page, which re-scrapes the sources to bring an old story back.`
+      `No published articles match "${query}". Stories older than 48 hours are pruned.`
     );
   }
 

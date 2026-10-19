@@ -40,12 +40,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
+from app.config import get_settings
 from app.database import get_db
 from app.services.ingestion import run_source_sync
 
@@ -384,6 +386,7 @@ async def _periodic_refresh() -> None:
         try:
             await _close_orphaned_sync_logs()
             await refresh_jobs()
+            _register_reels_job()
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -420,6 +423,221 @@ async def _close_orphaned_sync_logs() -> int:
     except Exception:
         logger.debug("Could not close orphaned sync log rows")
         return 0
+
+
+# =============================================================
+# REELS
+#
+# A pipeline of its own: short-form video from licensed providers
+# rather than articles from newsrooms. It shares this scheduler and
+# nothing else. A video provider being down, rate limited or simply
+# unconfigured must never be able to affect a single outlet poll, so
+# the reels job runs one pass over every provider and reports each
+# provider separately.
+# =============================================================
+
+REELS_JOB_ID = "ingest-reels"
+
+# (source_key, the Settings field holding its comma-separated keys).
+# A None field means the provider needs no key at all, which is what
+# keeps /category/reels alive on a fresh deploy with nothing set.
+#
+# Wikimedia is listed unconditionally and is never filtered out below:
+# a deployment with zero keys configured still serves a real page
+# rather than an empty one.
+REEL_PROVIDERS: tuple[tuple[str, str | None], ...] = (
+    ("wikimedia", None),
+    ("pexels", "pexels_api_keys"),
+    ("pixabay", "pixabay_api_keys"),
+)
+
+# Wikimedia's API policy asks every client to identify itself, and
+# anonymous traffic is what gets access withdrawn. Set this to something
+# that reaches a human before going live — it is a contact address, not
+# a version string.
+REELS_USER_AGENT = os.environ.get(
+    "REELS_USER_AGENT",
+    "NepalNewsMagazineReels/1.0 (+https://new24hr.vercel.app)",
+)
+
+
+def _reels_summary(health: Any) -> str:
+    """
+    One log line for one provider, from its SourceHealth.
+
+    'Returned nothing' and 'was never asked' must never read alike: a
+    provider that answered with zero reels and a provider we had no
+    key for are different problems with different fixes, and the log
+    is the only place that distinction survives.
+    """
+    if health.error:
+        return f"{health.source_key} FAILED: {health.error}"
+
+    line = (
+        f"{health.source_key} ok: {health.stored} stored of {health.fetched} "
+        f"fetched, {health.skipped} skipped, {health.keys_used} key(s) used"
+    )
+    if health.notes:
+        line = f"{line} ({'; '.join(health.notes)})"
+    return line
+
+
+async def _sync_reels() -> None:
+    """
+    One reels pass: every provider once, reported one by one.
+
+    Providers run sequentially rather than concurrently. Each is one
+    small metered request sequence, they do not overlap for any useful
+    amount of time, and serialising keeps the rate-limit story simple:
+    a provider that cools a key down cannot be racing the next one.
+
+    The whole body is wrapped because this job lives inside a scheduler
+    that also runs the outlets. An exception escaping here is an
+    unhandled APScheduler job error, and one bad video provider must
+    not be able to take the news pipeline down with it.
+    """
+    # Imported here rather than at module scope, for the same reason
+    # `db_call` is: the reels package is optional, and importing it at
+    # module load would make an optional feature a hard start-up
+    # dependency for the whole scheduler.
+    from app.services.reels.keys import build_pool
+    from app.services.reels.providers import build_source
+    from app.services.reels.store import ingest_reels
+
+    settings = get_settings()
+
+    try:
+        limit = max(int(settings.reels_per_source or 0), 1)
+        terms = [
+            t.strip()
+            for t in (settings.reels_search_terms or "").replace("\n", ",").split(",")
+            if t.strip()
+        ]
+
+        # Pools are built — and cleared — once per pass, before any
+        # provider runs. Resetting here is what lets a quota that
+        # returns early be picked up without a redeploy, and what stops
+        # one mistyped key from sitting in cooldown for the life of the
+        # process after it has been corrected.
+        pools: list[tuple[str, Any]] = []
+        for source_key, keys_field in REEL_PROVIDERS:
+            raw = getattr(settings, keys_field) if keys_field else None
+            pool = build_pool(source_key, raw)
+
+            if keys_field and pool.is_empty:
+                # Not a failure. Nothing is misconfigured — we simply
+                # have no credential for this provider, and the others
+                # are still running.
+                logger.info(
+                    "Reels: %s SKIPPED, no API key configured.", source_key
+                )
+                continue
+
+            pool.reset_cooldowns()
+            pools.append((source_key, pool))
+
+        # One client for the whole pass. A provider per client would mean
+        # a new connection pool per source for no benefit — the requests
+        # are serial anyway, and httpx closes the pool when this exits.
+        import httpx
+
+        async with httpx.AsyncClient(
+            timeout=settings.reels_http_timeout,
+            follow_redirects=True,
+            headers={"User-Agent": REELS_USER_AGENT},
+        ) as client:
+            for source_key, pool in pools:
+                try:
+                    # build_source raises KeyError for an unknown key and
+                    # returns a ReelSource otherwise — it never returns
+                    # None. The adapters take a single search hint rather
+                    # than a list, so the first configured term wins and
+                    # the rest are a documented no-op; a provider that
+                    # wants breadth spreads its own query internally.
+                    source = build_source(
+                        source_key,
+                        pool=pool,
+                        client=client,
+                        hint=terms[0] if terms else "",
+                    )
+
+                    # ingest_reels is written around a whole pass, so one
+                    # source at a time still goes in as a one-entry map
+                    # and comes back as a one-entry list. That keeps the
+                    # concurrency, isolation and health-reporting logic in
+                    # exactly one place instead of twice.
+                    results = await ingest_reels(
+                        get_db(),
+                        sources={source_key: source},
+                        per_source=limit,
+                    )
+                    health = results[0]
+                except asyncio.CancelledError:
+                    # Teardown, not a provider failure. See _sync_one: a
+                    # swallowed cancellation breaks structured concurrency.
+                    raise
+                except Exception:
+                    # One provider's adapter blowing up must not end the
+                    # pass; the remaining providers are unaffected by it.
+                    logger.exception("Reels: %s raised during this pass.", source_key)
+                    continue
+
+                if health.error:
+                    logger.warning("Reels: %s", _reels_summary(health))
+                else:
+                    logger.info("Reels: %s", _reels_summary(health))
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Reels: pass aborted; the scheduler keeps running.")
+
+
+def _register_reels_job() -> None:
+    """
+    Make the reels job exist, or not exist, according to the setting.
+
+    Called at startup and again on every registry refresh, so enabling
+    or disabling the category does not need a redeploy to take effect.
+    Disabling explicitly REMOVES the job rather than simply declining
+    to add it: a process that was started with reels on must not keep
+    polling a provider the operator has since turned off.
+    """
+    settings = get_settings()
+    scheduler = get_scheduler()
+
+    existing = None
+    try:
+        existing = scheduler.get_job(REELS_JOB_ID)
+    except Exception:
+        logger.debug("Could not read the reels job; assuming it is absent")
+
+    if not settings.enable_reels:
+        if existing:
+            try:
+                existing.remove()
+                logger.info("Scheduler: reels job removed (enable_reels is off).")
+            except Exception:
+                logger.exception("Could not remove the reels job")
+        return
+
+    interval = max(int(settings.reels_poll_seconds or 0), MIN_POLL_SECONDS)
+
+    try:
+        scheduler.add_job(
+            _sync_reels,
+            trigger=IntervalTrigger(seconds=interval),
+            id=REELS_JOB_ID,
+            replace_existing=True,   # pick up a changed interval
+            max_instances=1,        # never two video passes at once
+            coalesce=True,          # collapse missed runs into one
+            misfire_grace_time=120,
+            next_run_time=datetime.now(timezone.utc)
+            + timedelta(seconds=_stagger(REELS_JOB_ID)),
+        )
+    except Exception:
+        # The outlets are already scheduled; failing to add an optional
+        # job is a warning, not a reason to refuse to start.
+        logger.exception("Scheduler: could not schedule the reels job")
 
 
 # =============================================================
@@ -472,6 +690,10 @@ async def start() -> bool:
         id="refresh-jobs",
         replace_existing=True,
     )
+
+    # Optional and keyed separately from the outlets: a project that
+    # never enables reels must not gain a job because of it.
+    _register_reels_job()
 
     return scheduled > 0
 

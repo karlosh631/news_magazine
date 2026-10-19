@@ -34,7 +34,14 @@ OTHER_UUID = "1a2b3c4d-5e6f-7081-8293-a4b5c6d7e8f9"
 
 
 def run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    # asyncio.run(), not get_event_loop().run_until_complete().
+    #
+    # get_event_loop() is deprecated and raises "There is no current
+    # event loop" once another test has called asyncio.run() and closed
+    # the loop it created. That made this helper order-dependent: these
+    # tests passed alone and failed in the full suite purely because of
+    # which file ran first.
+    return asyncio.run(coro)
 
 
 # =============================================================
@@ -405,22 +412,30 @@ def test_cancelled_sync_is_not_swallowed_by_the_per_article_handler():
         raw_metadata = {}
 
     db = FakeDB([[{"id": GOOD_UUID}]])
-    task = asyncio.ensure_future(
-        store_article(
-            db=db,
-            article=Article(),
-            media={},
-            category_id=None,
-            source_row={"id": OTHER_UUID, "name": "Example", "sector": "national"},
-            content_hash="deadbeef",
-            title_normalized="headline",
-            excerpt=None,
+    # Its own loop, rather than the shared one. This test has to build the
+    # task, cancel it, and only then run it — so it cannot use asyncio.run,
+    # which owns and closes its loop for the duration of one coroutine.
+    loop = asyncio.new_event_loop()
+    try:
+        task = asyncio.ensure_future(
+            store_article(
+                db=db,
+                article=Article(),
+                media={},
+                category_id=None,
+                source_row={"id": OTHER_UUID, "name": "Example", "sector": "national"},
+                content_hash="deadbeef",
+                title_normalized="headline",
+                excerpt=None,
+            ),
+            loop=loop,
         )
-    )
-    task.cancel()
+        task.cancel()
 
-    with pytest.raises(asyncio.CancelledError):
-        asyncio.get_event_loop().run_until_complete(task)
+        with pytest.raises(asyncio.CancelledError):
+            loop.run_until_complete(task)
+    finally:
+        loop.close()
 
 
 # =============================================================

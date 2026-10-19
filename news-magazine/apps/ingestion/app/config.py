@@ -104,6 +104,29 @@ class Settings(BaseSettings):
     enable_gemini_ranking: bool = False
 
     # ---------------------------------------------------------
+    # Reels (optional)
+    #
+    # Short-form video for the /category/reels page. Only METADATA is
+    # stored; playback streams from the provider CDN.
+    #
+    # Every provider here licenses its content for redistribution —
+    # that is the only reason any of this is here. Wikimedia Commons
+    # needs no key at all, so the category works unconfigured; Pexels
+    # and Pixabay add coverage when keys are present.
+    #
+    # Multiple keys are comma-separated. The pool rotates across them
+    # and skips any that are rate limited, so one exhausted key does
+    # not take the category down.
+    # ---------------------------------------------------------
+    enable_reels: bool = False
+    reels_per_source: int = 30
+    reels_poll_seconds: int = 900
+    pexels_api_keys: str | None = None      # comma-separated
+    pixabay_api_keys: str | None = None     # comma-separated
+    reels_search_terms: str | None = None   # comma-separated hints
+    reels_http_timeout: float = 20.0
+
+    # ---------------------------------------------------------
     # Logging
     # ---------------------------------------------------------
     log_level: str = "INFO"

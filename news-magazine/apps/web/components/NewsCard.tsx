@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState, type MouseEvent } from "react";
+import { useEffect, useState, type MouseEvent } from "react";
 
 import { formatNewsDate, type SiteLanguage } from "@/lib/date";
 
@@ -103,9 +103,11 @@ function withoutSizeSuffix(url: string): string {
 export function NewsCard({
   article,
   language = "en",
+  onImageUnavailable,
 }: {
   article: NewsCardArticle;
   language?: SiteLanguage;
+  onImageUnavailable?: (articleId: string) => void;
 }) {
   const candidates = pickImages(article);
   const [imageIndex, setImageIndex] = useState(0);
@@ -126,6 +128,24 @@ export function NewsCard({
       setImageFailed(true);
     }
   };
+
+  // Every rendition 404'd and this story has no video to stand in for it.
+  //
+  // The card copes on its own — it renders an honest "No image available"
+  // panel — but on a feed that has already pulled a deep window of newer
+  // articles, that panel is a worse answer than simply showing the next
+  // story instead. Telling the parent lets it swap this one out; a feed
+  // with nothing left to swap back to simply keeps the honest panel.
+  //
+  // Only fires for a genuinely imageless story. A dead single rendition
+  // falls through to the next candidate and never reaches here.
+  const hasMedia = Boolean(embed || file);
+  const noArtwork = !hasMedia && (imageFailed || candidates.length === 0);
+
+  useEffect(() => {
+    if (!onImageUnavailable || !noArtwork) return;
+    onImageUnavailable(article.id);
+  }, [noArtwork, onImageUnavailable, article.id]);
 
   return (
     <div className="group relative flex flex-col overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm transition-all duration-200 hover:-translate-y-1 hover:border-gray-300 hover:shadow-lg">

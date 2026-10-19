@@ -3,7 +3,9 @@ import { notFound } from "next/navigation";
 
 import { EmptyState } from "@/components/EmptyState";
 import { NewsCard } from "@/components/NewsCard";
+import { ReelsFeed } from "@/components/ReelsFeed";
 import { getCategories, getLatestArticles } from "@/lib/news";
+import { getReels } from "@/lib/reels";
 import { SITE_NAME, SITE_URL } from "@/lib/site";
 
 export const dynamic = "force-dynamic";
@@ -78,6 +80,57 @@ export default async function CategoryPage({ params }: Props) {
   );
 
   if (!category) notFound();
+
+  /*
+   * Reels are a category in the nav, the footer and the sitemap like any
+   * other — migration 0014 inserts the row — but they are not articles.
+   * Articles are never filed under it, so the normal query below would
+   * return an empty feed and this page would claim, on every visit, that
+   * there were no stories in Reels. The one category whose body is not
+   * a grid gets its own body.
+   *
+   * This is the ONLY branch that reads differently. Everything after it
+   * is untouched, and no other slug can reach it.
+   */
+  if (slug === "reels") {
+    const reels = await getReels();
+
+    if (reels.reels.length === 0) {
+      return (
+        <main className="min-h-screen">
+          <section className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+            <EmptyState
+              title={
+                reels.configured
+                  ? "No reels yet"
+                  : "Cannot reach the database"
+              }
+              description={
+                // The migration has not been applied. That is not a
+                // failure and must not read like one, so it says what to
+                // do instead of apologising for a missing feature.
+                reels.note ??
+                reels.error ??
+                (reels.configured
+                  ? "Vertical video is ingested separately from written news, on its own schedule. Nothing has been published yet — this page fills itself as soon as the first batch lands."
+                  : "Configure Supabase to see reels here.")
+              }
+            />
+          </section>
+        </main>
+      );
+    }
+
+    // The news that drifts either side of the feed. Fetched only once
+    // there are reels to put it beside.
+    const side = await getLatestArticles();
+
+    return (
+      <main className="min-h-screen">
+        <ReelsFeed reels={reels.reels} sideArticles={side.articles} />
+      </main>
+    );
+  }
 
   const feed = await getLatestArticles({ limit: 24, categorySlug: slug! });
 

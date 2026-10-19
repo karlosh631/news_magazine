@@ -94,6 +94,31 @@ export function LiveArticleFeed({
   const [paused, setPaused] = useState(false);
   const [reduceMotion, setReduceMotion] = useState(false);
 
+  // Stories whose every image rendition 404'd.
+  //
+  // The brief was: never show a card with no picture, show a different
+  // story instead. NewsCard already degrades honestly on its own, but an
+  // imageless tile on a feed holding dozens of illustrated ones is the
+  // worse answer. Dropping the id here lets the next article slide up
+  // into the gap.
+  //
+  // The feed polls a much deeper window than it displays (60 fetched, 24
+  // shown), so backfill is already in memory — nothing extra is fetched,
+  // and the removed story is simply replaced by the next one down.
+  //
+  // Capped: if the deep window were ever exhausted too, the feed must
+  // fall back to showing honest placeholders rather than an empty page.
+  const [imageless, setImageless] = useState<Set<string>>(() => new Set());
+
+  const markImageless = useCallback((articleId: string) => {
+    setImageless((prev) => {
+      if (prev.has(articleId)) return prev;
+      const next = new Set(prev);
+      next.add(articleId);
+      return next;
+    });
+  }, []);
+
   const ids = useRef(new Set(initialArticles.map((a) => a.id)));
   const lastArrivalAt = useRef<number | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
@@ -319,7 +344,16 @@ export function LiveArticleFeed({
     setPaused(on);
   }, []);
 
-  const visible = useMemo(() => articles, [articles]);
+  const visible = useMemo(() => {
+    if (imageless.size === 0) return articles;
+
+    const kept = articles.filter((article) => !imageless.has(article.id));
+
+    // Never let a page of placeholders become an empty page. If dropping
+    // the imageless stories would empty the feed, show them anyway — the
+    // card's own "No image available" state is the honest last resort.
+    return kept.length > 0 ? kept : articles;
+  }, [articles, imageless]);
 
   if (visible.length === 0) {
     return (
@@ -345,6 +379,7 @@ export function LiveArticleFeed({
             key={article.id}
             article={article}
             language={language ?? "en"}
+            onImageUnavailable={markImageless}
           />
         ))}
       </div>

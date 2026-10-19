@@ -44,14 +44,41 @@ function formatDuration(seconds: number | null): string | null {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-export function ReelCard({ reel, active = false }: { reel: Reel; active?: boolean }) {
+export function ReelCard({
+  reel,
+  active = false,
+  muted: mutedProp,
+  onMutedChange,
+}: {
+  reel: Reel;
+  active?: boolean;
+  /**
+   * Sound state, owned by the feed.
+   *
+   * It used to live here, which meant every reel in the feed started
+   * muted again: a reader who tapped the speaker once then swiped to
+   * the next clip found it silent, and had to tap again on every single
+   * reel for the rest of the session. Sound is a property of the
+   * session, not of one clip.
+   *
+   * Uncontrolled when omitted, so the component still works alone.
+   */
+  muted?: boolean;
+  onMutedChange?: (muted: boolean) => void;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   // A reel starts muted because every current autoplay policy requires it
   // and because a phone that starts making noise in a scroll feed is
   // hostile. Sound is opt-in, one tap away.
-  const [muted, setMuted] = useState(true);
+  const [localMuted, setLocalMuted] = useState(true);
+  const isControlled = mutedProp !== undefined;
+  const muted = isControlled ? mutedProp : localMuted;
+  const setMuted = (next: boolean) => {
+    if (!isControlled) setLocalMuted(next);
+    onMutedChange?.(next);
+  };
   const [failed, setFailed] = useState(false);
   const [blocked, setBlocked] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -114,6 +141,21 @@ export function ReelCard({ reel, active = false }: { reel: Reel; active?: boolea
       if (next && video.paused) play();
     }
   };
+
+  /*
+    Keep the element in step with the shared state.
+
+    `muted` on <video> is a DOM property React does not reliably re-apply
+    on re-render, which is why toggleSound sets it imperatively. That left
+    one gap: a reel that MOUNTS after the reader unmuted would only see
+    the prop, and any later change to the shared state would not reach an
+    already-mounted element. Syncing it here covers both — and it is what
+    makes sound persist across the whole feed rather than per clip.
+  */
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video && video.muted !== muted) video.muted = muted;
+  }, [muted]);
 
   const toggleFullscreen = () => {
     const container = containerRef.current;

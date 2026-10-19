@@ -53,6 +53,29 @@ const DRIFT_PX_PER_SEC = 10;
  * scroller AND on every item, or snap points land in the wrong place and
  * one reel shows a slice of the next.
  */
+/**
+ * Which of the two feed layouts is actually on screen.
+ *
+ * `lg` is the same breakpoint Tailwind hides one copy at, so this and the
+ * `lg:hidden` / `hidden lg:block` classes can never disagree.
+ *
+ * Starts as "mobile" so the server render and the first client render
+ * agree — the alternative is a hydration mismatch.
+ */
+function useLayoutVariant(): "mobile" | "desktop" {
+  const [variant, setVariant] = useState<"mobile" | "desktop">("mobile");
+
+  useEffect(() => {
+    const query = window.matchMedia("(min-width: 1024px)");
+    const apply = () => setVariant(query.matches ? "desktop" : "mobile");
+    apply();
+    query.addEventListener("change", apply);
+    return () => query.removeEventListener("change", apply);
+  }, []);
+
+  return variant;
+}
+
 const FEED_SCROLL =
   "h-[100dvh] lg:h-[calc(100dvh-2rem)] w-full snap-y snap-mandatory overflow-y-scroll overscroll-contain scroll-smooth bg-gray-950";
 const FEED_ITEM =
@@ -263,6 +286,14 @@ export function ReelsFeed({
   const [driftPaused, setDriftPaused] = useState(false);
   const [reduceMotion, setReduceMotion] = useState(false);
 
+  /*
+    Sound is a session-level choice, so the state lives here rather than
+    inside each ReelCard. Tapping the speaker once now carries through
+    every reel the reader swipes to afterwards, instead of resetting on
+    each one.
+  */
+  const [muted, setMuted] = useState(true);
+
   /**
    * Every rendered reel item — both copies of it.
    *
@@ -399,6 +430,22 @@ export function ReelsFeed({
     };
   }, [sideArticles]);
 
+  /*
+    Both layouts are rendered at once and hidden with Tailwind, because
+    the mobile feed is a snap scroller and the desktop one is inset into a
+    three-column grid — they are genuinely different markup, not the same
+    markup at two sizes.
+
+    That means every reel exists TWICE in the DOM, and both copies carry
+    the same `reel.id`. Comparing `activeId === reel.id` therefore marks
+    BOTH copies active, and both call play(). A display:none video cannot
+    be seen but can still emit sound, so with sound enabled the reader
+    heard every reel twice.
+
+    Only the layout actually on screen is allowed to become active.
+  */
+  const layoutVisible = useLayoutVariant();
+
   const renderFeed = (key: "mobile" | "desktop") => (
     <div
       key={key}
@@ -414,7 +461,12 @@ export function ReelsFeed({
           ref={attach.get(reel.id)}
           className={FEED_ITEM}
         >
-          <ReelCard reel={reel} active={activeId === reel.id} />
+          <ReelCard
+            reel={reel}
+            active={activeId === reel.id && layoutVisible === key}
+            muted={muted}
+            onMutedChange={setMuted}
+          />
         </div>
       ))}
     </div>

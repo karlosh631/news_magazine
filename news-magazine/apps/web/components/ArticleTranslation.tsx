@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import {
   type Lang,
+  TranslationQuotaError,
   cachedTranslate,
   otherLanguage,
 } from "@/lib/translate";
@@ -114,13 +115,26 @@ export function ArticleTranslation({
 
         await Promise.all(jobs);
       } catch (err) {
-        if (!cancelled) {
-          setError(
-            err instanceof Error && err.message
-              ? `Translation unavailable (${err.message}). Showing the original.`
-              : "Translation unavailable. Showing the original."
-          );
+        if (cancelled) return;
+
+        /*
+          A spent daily allowance is silent.
+
+          The reader asked for Nepali and is getting Nepali — every
+          outlet publishes in one language or the other, so the original
+          text is a correct answer, not a degraded one. Announcing a
+          provider's quota to every reader says nothing they can act on
+          and reads as a fault in the site.
+
+          Anything else is still reported, because a genuine failure is
+          worth knowing about.
+        */
+        if (err instanceof TranslationQuotaError) {
+          setError("");
+          return;
         }
+
+        setError("Showing the original text.");
       }
     })();
 

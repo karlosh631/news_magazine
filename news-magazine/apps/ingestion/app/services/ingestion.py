@@ -87,16 +87,25 @@ from app.services.sanitizer import (
     sanitize_headline,
     sanitize_plain_text,
 )
-
-# A full article body. Bounded so one pathological page — a printer
-# stylesheet scraped as prose, a scraped comment thread — cannot write a
-# megabyte per article across 27 outlets.
-MAX_BODY_LENGTH = 20_000
+from app.sources.body import (
+    MAX_BODY_LENGTH,
+    attach_full_body,
+)
 
 # Block-level tags, treated as paragraph boundaries while flattening a
 # publisher's body to plain text.
+#
+# A BLANK LINE is a boundary too. The stored body is plain text, not
+# the publisher's markup — full-text republication is a licensing
+# decision and carrying untrusted HTML to a reader is a security one,
+# and they are separable — and "\n\n" is the only paragraph structure
+# plain text can still carry. Without this alternative the docstring
+# claim below that "paragraph breaks survive as plain text" was false:
+# a plain-text body arrived as one block and every paragraph of the
+# article welded into a single wall.
 _BLOCK_BREAK = re.compile(
-    r"</?(?:p|div|section|article|br|h[1-6]|li|ul|ol|blockquote|figure)\b[^>]*>",
+    r"</?(?:p|div|section|article|br|h[1-6]|li|ul|ol|blockquote|figure)\b[^>]*>"
+    r"|\n\s*\n",
     re.IGNORECASE,
 )
 from app.services.summarizer import (
@@ -858,9 +867,11 @@ def _build_body(article: Any, excerpt: str | None) -> str | None:
     is nothing to render here that plain paragraphs do not render, and
     stripping the markup removes the entire XSS surface.
 
-    The flag is checked HERE as well as in the extractor. That is
-    deliberate: this function must not publish a body on the strength of
-    an adapter having got the check right.
+    The flag is checked by the extractor AND by the producer
+    (`attach_full_body` in app/sources/body.py), because this function
+    runs after both and cannot re-check a field it was handed. That is
+    deliberate: publishing must not rest on the strength of an adapter
+    having got the check right.
     """
     full_body = getattr(article, "full_body_html", None)
 
@@ -1311,6 +1322,26 @@ async def run_source_sync(
                 # Use the richer description when the feed gave us none.
                 if not excerpt and extracted is not None:
                     excerpt = sanitize_excerpt(extracted.description) or None
+
+                # ---- Licensed full body, if this outlet permits one ----
+                # The page was already fetched above for media whenever
+                # `extracted` is not None, and `attach_full_body` reuses
+                # it: no second request, no second parse. The extra
+                # request that covers stories whose page was NOT being
+                # fetched is behind its own opt-in (fetch_full_text)
+                # because it is one request per story into 27
+                # publishers. It stores PLAIN TEXT only, bounded, and
+                # only when sources.republish_permission says so —
+                # checked before any request and again before storage.
+                await attach_full_body(
+                    article,
+                    source_row,
+                    settings,
+                    extracted=extracted,
+                    client=media_http,
+                    robots=adapter.robots,
+                    rate_limiter=adapter.rate_limiter,
+                )
 
                 # ---- Four-point extractive summary ----
                 # Every point is a verbatim sentence from the article the

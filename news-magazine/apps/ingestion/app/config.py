@@ -114,6 +114,35 @@ class Settings(BaseSettings):
     max_image_candidates_per_article: int = 3
 
     # ---------------------------------------------------------
+    # Full-text body storage (opt-in, licence-gated)
+    #
+    # `sources.republish_permission` is the operator's per-outlet
+    # decision that a publisher's body may be republished. The
+    # extractor enforced it from the start, but nothing ever
+    # POPULATED `full_body_html` — both adapters set it to None at
+    # normalize() time, which is before any page has been fetched — so
+    # the flag guarded a value nobody produced and "read more"
+    # expanded the excerpt. See app/sources/body.py.
+    #
+    # ENRICH_BODY is free. It reuses the page media enrichment already
+    # fetches for og:image / video / audio, and takes the plain text
+    # trafilatura already pulled off it. ZERO extra requests.
+    #
+    # FETCH_FULL_TEXT is the knob that costs. It pays one page request
+    # per article for stories whose page was not being fetched anyway
+    # — the feed already carried an image, so media enrichment had no
+    # reason to open the page. Across 27 publishers that is one
+    # request per story per poll, which is a crawl rather than a poll
+    # and is how an operator's IP gets blocked. It is a separate flag
+    # so nobody turns body storage on by accident and acquires it.
+    #
+    # Both do nothing at all without republish_permission on the source
+    # row: the licence is checked before any request is made.
+    # ---------------------------------------------------------
+    enrich_body: bool = False
+    fetch_full_text: bool = False
+
+    # ---------------------------------------------------------
     # Gemini (optional)
     #
     # NOT needed for the four-point summaries: those are extracted

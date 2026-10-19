@@ -906,6 +906,12 @@ class GenericRssAdapter(SourceAdapter):
 
                     thumbnail_url=thumbnail,
 
+                    # Not set here on purpose. normalize() runs before
+                    # any page has been fetched, so there is nothing to
+                    # set it from. It is populated later, per article,
+                    # from the page media enrichment already fetches —
+                    # see app/sources/body.py, which is also where
+                    # republish_permission is enforced a second time.
                     full_body_html=None,
 
                     language=self.source.get(

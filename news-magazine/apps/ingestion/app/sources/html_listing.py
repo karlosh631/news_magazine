@@ -436,6 +436,13 @@ class HtmlListingAdapter(SourceAdapter):
                     author_name=None,
                     excerpt=None,
                     thumbnail_url=entry.get("image"),
+                    # Not set here on purpose. normalize() runs before
+                    # any page has been fetched, so there is nothing to
+                    # set it from. `needs_article_fetch` below makes the
+                    # pipeline open this page anyway, and
+                    # app/sources/body.py takes the text off it — which
+                    # is also where republish_permission is enforced a
+                    # second time.
                     full_body_html=None,
                     language=default_language,
                     raw_metadata={

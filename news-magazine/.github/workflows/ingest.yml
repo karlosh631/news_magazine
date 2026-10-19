@@ -51,6 +51,51 @@ permissions:
   contents: read
 
 jobs:
+  # =============================================================
+  # Keep the Render worker awake.
+  #
+  # Render's free instance suspends itself after a period with no
+  # inbound traffic, and a suspended worker stops fetching news
+  # entirely. GitHub Actions is the thing that never sleeps, so it
+  # pings the service every 5 minutes.
+  #
+  # IMPORTANT — this only helps ONCE the service is a Background
+  # Worker. `python -m app.worker` binds no port, so as a Web Service
+  # Render's health check cannot find a port, sends SIGTERM and
+  # restarts it every ~15 minutes regardless of how much traffic it
+  # receives. No amount of pinging fixes that; only the service type
+  # does. Settings -> Service Type -> Background Worker.
+  #
+  # Deliberately `continue-on-error`: this is a courtesy ping, and a
+  # sleeping worker must never be able to block the sync job below.
+  # =============================================================
+  keep-warm:
+    name: Keep worker awake
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+
+    steps:
+      - name: Ping the ingestion API
+        env:
+          INGESTION_URL: ${{ secrets.INGESTION_URL }}
+        run: |
+          set -uo pipefail
+          if [ -z "${INGESTION_URL:-}" ]; then
+            echo "INGESTION_URL is not set; skipping keep-warm."
+            echo "Set it to your Render URL to keep the free instance awake."
+            exit 0
+          fi
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+            "${INGESTION_URL%/}/api/health" || echo 000)
+          if [ "$code" = "200" ]; then
+            echo "Worker is awake (200)."
+          else
+            echo "Worker did not answer (${code}). If it is configured as a"
+            echo "Web Service it is being restarted every few minutes for"
+            echo "having no port; switch it to Background Worker."
+          fi
+
   sync:
     name: Sync sources
     runs-on: ubuntu-latest

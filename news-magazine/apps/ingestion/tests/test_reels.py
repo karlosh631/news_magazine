@@ -1377,3 +1377,30 @@ def test_an_item_that_is_not_a_reel_is_dropped_not_counted_as_stored():
 
 def test_an_empty_configuration_is_not_a_failure():
     assert run(ingest_reels(FakeDB(), sources={})) == []
+
+# =============================================================
+# Playability
+#
+# A Reels card that cannot play is worse than no card: the feed shows
+# "Replay unavailable" and the reader sees a broken feature. Wikimedia
+# still hosts plenty of Ogg Video, which is a valid video file that no
+# current browser decodes.
+# =============================================================
+
+def test_ogg_video_theora_is_treated_as_unplayable():
+    from app.services.reels.providers import _is_browser_playable_video
+
+    assert not _is_browser_playable_video("https://x/Foo.ogv", {"mime": "video/ogg"})
+    assert not _is_browser_playable_video("https://x/Foo.ogv")
+    assert not _is_browser_playable_video("https://x/audio.ogg")
+    assert not _is_browser_playable_video("https://x/Foo.mov", {"mime": "video/quicktime"})
+
+
+def test_mp4_and_webm_are_playable():
+    from app.services.reels.providers import _is_browser_playable_video
+
+    assert _is_browser_playable_video("https://x/Foo.mp4", {"mime": "video/mp4"})
+    assert _is_browser_playable_video("https://x/Foo.webm", {"mime": "video/webm"})
+    # No mime from the provider: the extension decides.
+    assert _is_browser_playable_video("https://x/Foo.mp4?ts=1")
+    assert _is_browser_playable_video("https://x/Foo.webm")

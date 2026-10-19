@@ -82,6 +82,32 @@ class ProviderError(RuntimeError):
 # SHARED PARSING
 # ---------------------------------------------------------------------------
 
+def _is_browser_playable_video(url: str, info: dict | None = None) -> bool:
+    """
+    True when a browser will actually be able to play this file.
+
+    Only mp4 (H.264) and webm (VP8/VP9) are treated as playable. Ogg
+    Video / Theora (`.ogv`) is the obvious trap: Wikimedia still hosts
+    plenty of it, the file is a perfectly valid video, and no current
+    browser will decode it. Storing one produces a Reels card that says
+    "Replay unavailable" forever, so the mime is checked when the
+    provider told us and the extension is used when it did not.
+    """
+    mime = ""
+    if isinstance(info, dict):
+        mime = str(info.get("mime") or info.get("type") or "").lower()
+
+    if mime:
+        return mime == "video/mp4" or mime.startswith("video/webm")
+
+    lowered = url.lower().split("?")[0]
+    # `.ogv` and `.ogg` are checked first: `.ogg` is audio and `.ogv` is
+    # Theora video, and neither belongs in a video card.
+    if lowered.endswith((".ogv", ".ogg", ".theora")):
+        return False
+    return lowered.endswith((".mp4", ".m4v", ".webm"))
+
+
 def _absolute(value: Any) -> str | None:
     """
     Normalize a URL to absolute http(s).
@@ -811,14 +837,19 @@ class WikimediaSource(_BaseSource):
             width = _int_or_none(derivative.get("width")) or 0
 
             if mime == "video/mp4":
-                # Rank 0: browser-safe.
+                # Rank 0: plays everywhere, including iOS.
                 rank = 0
             elif mime.startswith("video/webm"):
-                # Rank 1: plays in Chromium and Firefox.
+                # Rank 1: plays in Chromium and Firefox. Safari refuses
+                # it, which is why mp4 outranks it.
                 rank = 1
-            elif mime.startswith("video/"):
-                rank = 2
             else:
+                # Everything else is refused rather than ranked last.
+                # Commons still hosts .ogv, and Ogg Video (Theora) plays
+                # in no current browser — accepting it produced cards
+                # that rendered "Replay unavailable" and a dead Reels
+                # tab. A clip nobody can watch is worse than no clip:
+                # the next candidate is a real video.
                 continue
 
             candidates.append((rank, height, width, url))
@@ -829,11 +860,13 @@ class WikimediaSource(_BaseSource):
             candidates.sort(key=lambda item: (item[0], -item[1], -item[2], item[3]))
             return candidates[0][3]
 
-        # No transcodes at all (an .ogv that predates transcoding, say).
-        # The original is still hotlinkable and still webm/ogv.
+        # No usable transcode. The original master is a last resort, but
+        # only when it is a format a browser will actually play.
         for block in (videoinfo, imageinfo):
             url = _absolute((block or {}).get("url"))
-            if url and self._is_allowed_host(url):
+            if not url or not self._is_allowed_host(url):
+                continue
+            if _is_browser_playable_video(url, block):
                 return url
 
         return None

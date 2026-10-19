@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EmptyState } from "@/components/EmptyState";
 import { NewsCard } from "@/components/NewsCard";
 import { dropDuplicateStories } from "@/lib/feed-dedup";
+import { dropRepeatedImages } from "@/lib/feed-images";
 import type { LatestArticle } from "@/types/database";
 
 /**
@@ -360,7 +361,21 @@ export function LiveArticleFeed({
     // Same function, same thresholds, same order of preference — so this
     // keeps whichever copy the newest poll would have kept, and the two
     // passes cannot disagree about what is a duplicate.
-    const deduped = dropDuplicateStories(articles);
+    //
+    // The picture pass runs here for the same reason, and it is the only
+    // place it is genuinely needed: two rows wearing the same photograph
+    // can end up side by side in this union WITHOUT ever having shared a
+    // single response. One of them arrived in an early poll and has since
+    // fallen out of the newest-60 window the server sends; the other
+    // arrived just now wearing the same agency press shot. Every
+    // response on its own passed the server's check — it only had one of
+    // the pair — and the union is what puts them next to each other.
+    //
+    // The union is also why this needs no extra backfill logic: the deep
+    // window is already sitting in `articles`, so dropping a card slides
+    // the next story up into the gap. Same shape as the `imageless` pass
+    // below, which exists for the same reason.
+    const deduped = dropRepeatedImages(dropDuplicateStories(articles));
 
     if (imageless.size === 0) return deduped;
 

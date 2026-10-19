@@ -351,6 +351,13 @@ on every push.
   publish on a 3–30 minute cadence, so a 1-second poll would be ~2,900
   requests an hour per open tab to surface the same few stories a few
   seconds sooner.
-- **Article bodies are never stored.** `republish_permission` is false
-  for every seeded outlet; we publish a headline, an image, an
-  attribution link and an extractive summary, and link out for the rest.
+- **Article bodies are stored only where a publisher licenses it.**
+  `republish_permission` is false for every seeded outlet, so out of the
+  box we publish a headline, an image, an attribution link and an
+  extractive summary, and link out for the rest. The licence gate
+  existed from the start but nothing ever *populated* the field it
+  guarded, so flipping it changed nothing; `app/sources/body.py` is the
+  producer, it is off by default (`ENRICH_BODY`), and it stores plain
+  text only — never a publisher's markup. `FETCH_FULL_TEXT` is a
+  separate opt-in because it costs a page request per article, which
+  across 27 publishers is a crawl rather than a poll.

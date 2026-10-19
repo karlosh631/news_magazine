@@ -13,6 +13,7 @@
 import "server-only";
 
 import { dropDuplicateStories } from "@/lib/feed-dedup";
+import { dropRepeatedImages } from "@/lib/feed-images";
 import { createPublicSupabaseClient } from "@/lib/supabase/server";
 import type { LatestArticle, SearchResult } from "@/types/database";
 
@@ -28,6 +29,13 @@ export const PAGE_SIZE = 24;
  * stories to fill it. This is a read-side over-fetch only: the ordering
  * is still the database's, and nothing is promoted — the extra rows are
  * only used to backfill slots the duplicates vacated.
+ *
+ * Two passes can now vacate a slot before the slice, not one: the story
+ * pass (dropDuplicateStories) and the picture pass (dropRepeatedImages,
+ * for the case where two different stories arrive wearing the same
+ * photograph — see lib/feed-images.ts). Neither reorders, so a survivor
+ * always keeps its own position and the only thing the headroom has to
+ * cover is the row count.
  */
 const DEDUP_HEADROOM = 2;
 
@@ -67,6 +75,12 @@ export interface FeedResult {
  * drops the copies it missed, which it misses because it is an
  * application-level read-then-insert check running per source sync with
  * no uniqueness constraint behind it. See lib/feed-dedup.ts.
+ *
+ * A third pass runs after them, `dropRepeatedImages`, for the failure
+ * neither of the others can see: two entirely different stories rendered
+ * under one photograph, because outlets reuse pictures. See
+ * lib/feed-images.ts — including what that pass deliberately does not
+ * catch.
  */
 export async function getLatestArticles(options?: {
   limit?: number;
@@ -129,6 +143,10 @@ export async function getLatestArticles(options?: {
   // instead of an RPC plus a client sort, and does not depend on
   // migration 0012 having been applied. The RPC is no longer on this
   // path at all.
+  //
+  // The picture pass runs inside both selects, before the slice, so a
+  // dropped card's slot is backfilled from further down this same
+  // ordering rather than left as a hole.
   return languageFilter
     ? languageSelect({ language: languageFilter, limit, categoryId, excludeIds })
     : directSelect({ limit, categoryId, excludeIds });
@@ -243,9 +261,15 @@ async function languageSelect({
   // top-up above brings in genuinely different stories rather than
   // translations. The pass stays because it costs nothing and the
   // top-up widens the pool every time a language is thin.
+  //
+  // The picture pass is in the same position for the same reason, and
+  // runs BEFORE preferIllustrated: what it leaves behind is what
+  // preferIllustrated is asked to find pictures for, and it will not
+  // reorder either, so the two cannot disagree about which story holds
+  // which slot.
   return {
     articles: preferIllustrated(
-      dropDuplicateStories(newestFirst(rows)),
+      dropRepeatedImages(dropDuplicateStories(newestFirst(rows))),
       limit
     ),
     error: null,
@@ -381,8 +405,17 @@ async function directSelect({
   // story that two sources stored in the same tick is two rows with
   // duplicate_of = null on both. This is the second line of defence, and
   // the only one that runs at read time.
+  //
+  // The third is the picture pass. It is not redundant with the second:
+  // that one compares headlines, and its misses are not near-misses but
+  // entirely different stories — an Upper Karnali funding story and a
+  // Dashain apple-price story, filed by different outlets, with nothing
+  // in common but the photograph both of them scraped. Running it after
+  // the story pass means the story pass has already chosen which copy of
+  // a story survives, so the picture it contributes is the one the reader
+  // would actually see.
   return {
-    articles: dropDuplicateStories(mapped).slice(0, limit),
+    articles: dropRepeatedImages(dropDuplicateStories(mapped)).slice(0, limit),
     error: null,
     configured: true,
   };
@@ -530,8 +563,15 @@ export async function getRelatedArticles(
 
   // The rail under an article is where a near-duplicate of the article
   // itself is most visible: the reader has just finished one version of
-  // a story and the next card is that story again.
-  return dropDuplicateStories(related).slice(0, limit);
+  // a story and the next card is that story again. Same for the picture:
+  // a four-card rail with one photograph repeated in it looks broken in
+  // a way the full grid does not, because there is nothing else on the
+  // page for the eye to compare it against.
+  //
+  // The rail shows four and fetches eight, so a repeat costs a card and
+  // the reader still gets four distinct stories whenever the category
+  // has them.
+  return dropRepeatedImages(dropDuplicateStories(related)).slice(0, limit);
 }
 
 export async function getCategories() {
@@ -598,5 +638,11 @@ export async function getBreakingNews(limit = 10): Promise<LatestArticle[]> {
   // The ticker is the worst place for a repeat: ten slots, no pictures,
   // read at a glance while the page is still loading. Same pass as the
   // feed, same reason.
+  //
+  // The picture pass is deliberately NOT here, and the omission is not an
+  // oversight. BreakingNewsTicker renders a headline and nothing else —
+  // there is no <img> on the page to repeat — so dropping a story for
+  // wearing a photo the reader will never see would remove breaking news
+  // in exchange for nothing at all.
   return dropDuplicateStories(breaking).slice(0, limit);
 }

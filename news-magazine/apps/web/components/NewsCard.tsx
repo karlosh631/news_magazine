@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState, type MouseEvent } from "react";
 
 import { formatNewsDate, type SiteLanguage } from "@/lib/date";
+import { withoutSizeSuffix } from "@/lib/image-url";
 
 export type NewsCardArticle = {
   id: string;
@@ -84,6 +85,13 @@ function pickImages(article: NewsCardArticle): string[] {
 
   // Add the size-stripped form of each, so a dead "-1200x675" rendition
   // can fall back to the original file at its own path.
+  //
+  // `withoutSizeSuffix` lives in lib/image-url.ts, not here, because the
+  // read path imports it too: lib/feed-images.ts has to decide whether
+  // two cards show the same photograph, and it can only do that with the
+  // exact rules this fallback uses. Two copies of the regex would drift,
+  // and a drift there means the feed compares something other than what
+  // the card renders.
   for (const url of [...candidates]) {
     const stripped = withoutSizeSuffix(url);
     if (stripped !== url && !candidates.includes(stripped)) {
@@ -107,14 +115,6 @@ function pickImages(article: NewsCardArticle): string[] {
 function toHttps(url: string | null | undefined): string | null {
   if (!url) return null;
   return url.trim().replace(/^http:\/\//i, "https://");
-}
-
-/** Strip a width suffix so a dead "-1200x675" rendition falls back to its source. */
-function withoutSizeSuffix(url: string): string {
-  return url
-    .replace(/[-_]\d{2,4}x\d{2,4}(?=\.(?:jpg|jpeg|png|webp))/i, "")
-    .replace(/[-_](?:w|width|resize)[-_]?\d{2,4}(?=[x_.]|\.(?:jpg|jpeg|png|webp))/i, "")
-    .replace(/[?&]w=\d{2,4}\b/i, "");
 }
 
 export function NewsCard({

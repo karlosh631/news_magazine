@@ -145,7 +145,15 @@ async def health():
             .eq("allowed", True)
             .execute()
         )
-        sources_ok = result.count or 0
+        # `count` is None whenever PostgREST does not return the
+        # content-range header for a count request. `or 0` then reported
+        # zero active sources while 25 were scheduled — and this is the
+        # endpoint Render's health check and every monitor reads, so a
+        # false zero here reads as "the worker is doing nothing".
+        #
+        # The rows are fetched either way, so len() is the reliable
+        # answer and the count header is only a shortcut to it.
+        sources_ok = result.count if result.count is not None else len(result.data or [])
     except Exception:
         pass
 

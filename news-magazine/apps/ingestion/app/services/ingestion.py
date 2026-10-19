@@ -62,6 +62,7 @@ import hashlib
 import logging
 import os
 import re
+import socket
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -198,6 +199,48 @@ def _is_transient_db_error(exc: BaseException) -> bool:
 
     message = str(exc).lower()
     return any(marker in message for marker in _TRANSIENT_DB_ERROR_MARKERS)
+
+
+# Markers that mean "this hostname does not exist" rather than "the site
+# is busy". Retrying those forever is pointless: the DNS answer will not
+# change on the next attempt.
+_DNS_ERROR_MARKERS = (
+    "name or service not known",
+    "nodename nor servname",
+    "temporary failure in name resolution",
+    "no address associated with hostname",
+    "getaddrinfo failed",
+    "name resolution",
+    "could not resolve host",
+)
+
+
+def is_dns_failure(exc: BaseException) -> bool:
+    """
+    True when the failure was resolving a hostname, not fetching from one.
+
+    This matters because the same source can be resolvable from Render
+    and not from a developer's machine, or the reverse. A DNS failure is
+    a statement about THIS host, so it is counted separately and used to
+    disable a source only after repeated failures here — never globally.
+
+    Distinguishing it from an HTTP failure also keeps the logs honest: a
+    site that is down returns 503 and recovers; a hostname that does not
+    exist does not.
+    """
+    if isinstance(exc, socket.gaierror):
+        return True
+
+    message = str(exc).lower()
+    if any(marker in message for marker in _DNS_ERROR_MARKERS):
+        return True
+
+    # httpx wraps socket errors; the DNS cause survives in the chain.
+    cause = getattr(exc, "__cause__", None)
+    if cause is not None and cause is not exc:
+        return is_dns_failure(cause)
+
+    return False
 
 
 # =============================================================
@@ -924,6 +967,17 @@ async def run_source_sync(
     except PermissionError as exc:
         return await fail("not_permitted", str(exc))
     except Exception as exc:
+        # A hostname that does not resolve is a different problem from a
+        # site that is down, and only one of them fixes itself. The type
+        # is recorded so the scheduler can count them separately and
+        # disable a source that this host will never be able to reach.
+        if is_dns_failure(exc):
+            logger.warning(
+                "Source %s could not be resolved from this host: %s",
+                source_row.get("name"), exc,
+            )
+            return await fail("dns_failure", str(exc))
+
         logger.exception("Fetch/parse failed for source %s", source_id)
         return await fail("fetch_or_parse_error", str(exc))
 

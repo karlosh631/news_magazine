@@ -266,6 +266,43 @@ def _looks_like_junk_image(url: str) -> bool:
     return bool(_JUNK_IMAGE_RE.search(url))
 
 
+# Proxies and resizers. These are disqualifying, not merely penalised.
+#
+# Kathmandu Post serves body images through
+# assets-api.../thumb.php?src=<real file>, which scores well on the src=
+# size token while serving a downscaled render. A -4000 penalty was not
+# enough: the proxy still won, and because the proxy URL is derived from
+# a handful of shared endpoints, the SAME picture ended up on eight
+# unrelated cards.
+#
+# A resizer can only ever return a downscaled version of something else,
+# so a resizer is never the best answer to "which image represents this
+# article". Excluded outright rather than ranked down.
+#
+# The list is deliberately narrow. A blanket `/cache/` exclusion used to
+# sit here as a mere penalty; promoting it to disqualifying would also
+# throw away perfectly good CDN paths (Cloudflare's `/cdn-cgi/cache/`
+# among them) and manufacture the blank cards this is meant to prevent.
+# Only endpoints that unambiguously resize something are listed.
+_RESIZER_MARKERS = (
+    "thumb.php",
+    "thumbnail.php",
+    "/thumb/",
+    "resize.php",
+    "/resize/",
+    "image-resize",
+    "/image/resize/",
+    "cdn-cgi/image",
+    "wsrv.nl",
+    "images.weserv.nl",
+)
+
+
+def _is_resizer(url: str) -> bool:
+    lowered = url.lower()
+    return any(marker in lowered for marker in _RESIZER_MARKERS)
+
+
 def _score_image(url: str, declared_width: int | None, declared_height: int | None) -> int:
     """
     Higher is better. Combines any declared dimensions with the size
@@ -289,15 +326,11 @@ def _score_image(url: str, declared_width: int | None, declared_height: int | No
     if url.lower().split("?")[0].endswith((".webp", ".avif")):
         score += 40
 
-    # Penalise on-the-fly thumbnail proxies. Kathmandu Post links its
-    # body images through assets-api.../thumb.php?src=<real file>, which
-    # scores well on the src= size token but serves a downscaled render.
-    # The direct CDN URL is always the better pick when we have it.
-    if any(
-        marker in url.lower()
-        for marker in ("thumb.php", "thumbnail.php", "/resize/", "image-resize", "/cache/")
-    ):
-        score -= 4000
+    # On-the-fly thumbnail proxies. See _is_resizer: these are
+    # disqualifying. Scored to -1 so any real candidate outranks them,
+    # but not negative enough to make one win on a tie.
+    if _is_resizer(url):
+        score -= 100_000
 
     return score
 
@@ -668,8 +701,17 @@ def best_image(feed_url: str | None, page: ExtractedMedia) -> str | None:
     A page-level og:image beats a feed thumbnail even when the thumbnail
     looks larger, because the og:image is the one the outlet chose for
     sharing. The feed URL is kept only as the fallback.
+
+    A resizer URL is never returned. If it is all either source offers,
+    the article is stored with no image rather than with a downscaled
+    proxy — the card already has an honest "no image available" state,
+    and a thumbnail proxy is how eight unrelated stories ended up
+    showing the same picture.
     """
-    return page.image_url or feed_url
+    for candidate in (page.image_url, feed_url):
+        if candidate and not _is_resizer(candidate):
+            return candidate
+    return None
 
 
 def upgrade_to_highres(url: str | None) -> str | None:

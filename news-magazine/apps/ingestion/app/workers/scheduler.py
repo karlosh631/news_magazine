@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -57,6 +58,53 @@ REFRESH_INTERVAL_SECONDS = 300  # pick up source-table edits every 5 min
 # Generous enough to clear the slowest legitimate run (27 outlets, each
 # with its own fetch timeout and media enrichment).
 ORPHANED_SYNC_LOG_SECONDS = 3600
+
+# Consecutive DNS failures before a source is disabled on THIS host.
+# High enough that a transient resolver blip does not lose an outlet,
+# low enough that a dead hostname stops costing a job every cycle.
+DNS_FAILURE_DISABLE_THRESHOLD = 5
+
+# source_id -> consecutive DNS failures on this host.
+_consecutive_dns_failures: dict[str, int] = {}
+
+
+def _saw_dns_failure(result: Any) -> bool:
+    """True when a run failed specifically because a hostname did not resolve."""
+    for detail in getattr(result, "error_details", []) or []:
+        if detail.get("type") == "dns_failure":
+            return True
+    return False
+
+
+async def _disable_source(db, source_id: str, source_row: dict) -> bool:
+    """
+    Switch a source off without deleting it.
+
+    `enabled=false` leaves the row, its adapter config and its history
+    intact, so re-enabling is a single UPDATE in the admin surface — and
+    a source that is only unreachable from this one host can be turned
+    back on the moment DNS changes.
+    """
+    # Imported here rather than at module scope: app.services.ingestion
+    # imports this module for run_source_sync, so a module-level import
+    # would be circular. Without it `db_call` is an unbound name and the
+    # NameError lands in the except below — which means the breaker
+    # silently disables nothing, forever.
+    from app.services.ingestion import db_call
+
+    try:
+        await db_call(
+            lambda: db.table("sources")
+            .update({"enabled": False})
+            .eq("id", source_id)
+            .execute()
+        )
+        return True
+    except Exception:
+        logger.exception("Could not disable unresolvable source %s", source_id)
+        return False
+
+
 MIN_POLL_SECONDS = 60  # never poll a source faster than once a minute
 
 _consecutive_failures: dict[str, int] = {}
@@ -127,6 +175,34 @@ async def _sync_one(source_id: str) -> None:
         result = None
 
     if result is None or (result.errors > 0 and result.new == 0):
+        # DNS failures are counted apart from ordinary ones. A source
+        # whose hostname does not resolve from THIS host will keep
+        # failing forever, and retrying it every backoff cycle for the
+        # life of the process tells us nothing new.
+        #
+        # It is deliberately not disabled on the first failure: the same
+        # outlet resolves fine from Render while failing on a laptop, and
+        # vice versa. Only after several consecutive failures here is
+        # it switched off, and the row stays in the table so re-enabling
+        # is a single UPDATE.
+        dns_failures = _consecutive_dns_failures.get(source_id, 0) + (
+            1 if _saw_dns_failure(result) else 0
+        )
+        _consecutive_dns_failures[source_id] = dns_failures
+
+        if dns_failures >= DNS_FAILURE_DISABLE_THRESHOLD:
+            if await _disable_source(db, source_id, source_row):
+                logger.warning(
+                    "Source %s disabled after %s consecutive DNS failures. "
+                    "Its hostname does not resolve from this host — re-enable "
+                    "it if that is not expected.",
+                    source_row.get("name"), dns_failures,
+                )
+            _consecutive_dns_failures.pop(source_id, None)
+            _consecutive_failures.pop(source_id, None)
+            _remove_jobs(source_id)
+            return
+
         failures = _consecutive_failures.get(source_id, 0) + 1
         _consecutive_failures[source_id] = failures
 
@@ -140,6 +216,7 @@ async def _sync_one(source_id: str) -> None:
         _apply_backoff(source_id, delay)
     else:
         _consecutive_failures.pop(source_id, None)
+        _consecutive_dns_failures.pop(source_id, None)
 
 
 def _apply_backoff(source_id: str, delay_seconds: int) -> None:

@@ -201,7 +201,38 @@ async function languageSelect({
     }
   }
 
-  return { articles: newestFirst(rows).slice(0, limit), error: null, configured: true };
+  return {
+    articles: preferIllustrated(newestFirst(rows), limit),
+    error: null,
+    configured: true,
+  };
+}
+
+/**
+ * Let an illustrated story take the slot of an imageless one.
+ *
+ * The brief was that a card should never render blank or broken and that
+ * a story with no photograph of its own should give way to one that has.
+ * Satisfying both by REORDERING would be a worse lie than the blank card:
+ * "newest first" is the whole promise of this page, and outranking a
+ * two-hour-old story with a six-hour-old one to win a thumbnail is not
+ * a trade the reader would accept.
+ *
+ * So the order is untouched. This only filters, and only while there is
+ * genuine slack — if fewer than `limit` recent articles have any image
+ * at all, they all stay, because emptying the feed would be worse than
+ * a placeholder. No story is ever discarded for want of a picture; an
+ * illustrated story simply outranks an imageless one of the same age.
+ */
+function preferIllustrated(rows: LatestArticle[], limit: number): LatestArticle[] {
+  if (rows.length <= limit) return rows;
+
+  const illustrated = rows.filter((row) =>
+    Boolean(row.image_highres_url || row.featured_image_url)
+  );
+  if (illustrated.length < limit) return rows.slice(0, limit);
+
+  return illustrated.slice(0, limit);
 }
 
 /** Map a raw `articles` row to the card shape. */

@@ -31,19 +31,42 @@ Behaviour:
 Never exits on a per-source error. Only a repeated failure to reach the
 database at all will restart the loop with backoff, and even then it
 keeps retrying rather than giving up.
+
+Why it also serves HTTP
+------------------------
+Render's Background Workers start at $7/month. On the free tier the
+service has to be a Web Service, and a Web Service that binds no port
+fails Render's health check and is SIGTERMed roughly every 15 minutes:
+
+    worker.signal   signal=SIGTERM
+    worker.stopped
+    ==> Timed Out
+
+So when `PORT` is present, this also runs the real FastAPI app on that
+port. Not a dummy "OK" responder — the actual application, so
+`/api/health` genuinely probes the database and `/api/scrape-on-demand`,
+`/api/search` and `/api/prune` become reachable, which is what the web
+app's search-resurrection path calls.
+
+`mark_worker_mode()` is called first so the app's own lifespan does not
+start a SECOND scheduler. One process, one schedule, one port.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import sys
+import threading
 
 import structlog
 
 from app.config import get_settings
 from app.workers import scheduler as scheduler_module
+
+log = logging.getLogger("worker")
 
 # ---------------------------------------------------------
 # Structured logging
@@ -172,6 +195,10 @@ async def main() -> int:
     if not await _boot(scheduler_module):
         return 1
 
+    # Serve HTTP only once ingestion is confirmed running, so a port
+    # problem can never delay or block the scheduler's first poll.
+    start_http_server()
+
     log.info("worker.running", hint="Ctrl+C to stop.")
 
     try:
@@ -183,6 +210,74 @@ async def main() -> int:
         log.info("worker.stopped")
 
     return 0
+
+
+# ---------------------------------------------------------
+# HTTP
+#
+# Render's free tier has no Background Worker, so the service must
+# present a port or be killed. Serving the real application — rather
+# than a stub that answers 200 to everything — means the health check
+# is honest and the endpoints the web app already calls become usable.
+# ---------------------------------------------------------
+
+
+def start_http_server() -> threading.Thread | None:
+    """
+    Serve app.main:app on $PORT in a background thread.
+
+    No-ops when PORT is unset, which is every local run — a developer
+    running `python -m app.worker` should not suddenly have a web
+    server on their machine.
+
+    Returns the thread, or None if the port was unusable. A failure to
+    bind is never fatal: on a host that does not require a port (a real
+    Background Worker, a VM, Docker with its own orchestrator) ingestion
+    must keep running regardless.
+    """
+    port = os.environ.get("PORT")
+    if not port:
+        return None
+
+    try:
+        port_number = int(port)
+    except ValueError:
+        log.warning("PORT=%r is not a number; not serving HTTP.", port)
+        return None
+
+    def serve() -> None:
+        import uvicorn
+
+        from app import main as main_module
+
+        # Must be set before uvicorn starts the app: main.py's lifespan
+        # checks it and skips starting its own scheduler. Without this
+        # the process would run TWO schedulers over the same 27
+        # outlets, which is the exact bug this module was split out to
+        # prevent.
+        main_module.mark_worker_mode()
+
+        try:
+            uvicorn.run(
+                main_module.app,
+                host="0.0.0.0",
+                port=port_number,
+                log_level="warning",
+                # uvicorn.Server.run() builds its own loop, so it must
+                # not be given this process's running one.
+                loop="asyncio",
+            )
+        except Exception:
+            # Losing the health endpoint is bad; losing ingestion is
+            # worse. Never let the HTTP side take the worker down.
+            log.exception(
+                "HTTP server on port %s stopped; ingestion continues", port_number
+            )
+
+    thread = threading.Thread(target=serve, name="http", daemon=True)
+    thread.start()
+    log.info("worker.http", port=port_number)
+    return thread
 
 
 if __name__ == "__main__":

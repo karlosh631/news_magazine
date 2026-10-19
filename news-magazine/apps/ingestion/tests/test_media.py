@@ -16,11 +16,14 @@ from __future__ import annotations
 
 from app.sources.media import (
     CONTENT_IMAGE_BONUS,
+    ExtractedMedia,
     _clean_url,
     _chrome_spans,
     _inside_any,
+    _is_resizer,
     _looks_like_junk_image,
     _score_image,
+    best_image,
     upgrade_to_highres,
 )
 
@@ -206,3 +209,68 @@ def test_upgrade_to_highres_leaves_plain_urls_alone():
 
 def test_upgrade_to_highres_handles_none():
     assert upgrade_to_highres(None) is None
+
+# =============================================================
+# Thumbnail proxies
+#
+# Kathmandu Post serves body images through
+# assets-api.../thumb.php?src=<real file>. A -4000 score penalty was not
+# enough to beat it, the proxy won, and because it is derived from a
+# handful of shared endpoints the SAME picture landed on eight unrelated
+# cards. A resizer can only ever return a downscaled version of
+# something else, so it is now disqualifying rather than ranked down.
+# =============================================================
+
+def test_thumbnail_proxy_is_disqualified():
+    assert _is_resizer(
+        "https://assets-api.kathmandupost.com/thumb.php?src=https://x/a.jpg"
+    )
+    assert _is_resizer("https://cdn.example.com/image-resize/800/a.jpg")
+    assert _is_resizer("https://news.example.com/cdn-cgi/image/width=800/a.jpg")
+    assert _is_resizer("https://wsrv.nl/?url=example.com/a.jpg")
+
+
+def test_a_real_image_is_not_mistaken_for_a_resizer():
+    """
+    The list has to stay narrow. A blanket `/cache/` exclusion was tried
+    and rejected: real CDN paths contain it (Cloudflare's
+    /cdn-cgi/cache/ among them), and discarding those would manufacture
+    exactly the blank cards this change exists to prevent.
+    """
+    assert not _is_resizer("https://cdn.example.com/cdn-cgi/cache/images/a.jpg")
+    assert not _is_resizer("https://example.com/media/cache/abc/photo.jpg")
+    assert not _is_resizer(
+        "https://ictsamacharcdn.prixacdn.net/media/albums/photo.jpg"
+    )
+    assert not _is_resizer("https://cdn.example.com/wp-content/uploads/a.jpg")
+
+
+def test_a_resizer_scores_below_every_real_candidate():
+    proxy = "https://assets-api.kathmandupost.com/thumb.php?src=https://x/a.jpg"
+    real = "https://cdn.example.com/wp-content/uploads/a.jpg"
+    assert _score_image(proxy, 1200, 800) < _score_image(real, 400, 300)
+
+
+def test_best_image_falls_through_a_proxy_to_the_real_feed_image():
+    """The page's proxy loses; the feed's direct CDN URL wins."""
+    page = ExtractedMedia(image_url="https://assets-api.kathmandupost.com/thumb.php?src=x")
+    assert best_image("https://assets-cdn.kathmandupost.com/real.jpg", page) == (
+        "https://assets-cdn.kathmandupost.com/real.jpg"
+    )
+
+
+def test_best_image_returns_none_when_only_a_proxy_exists():
+    """
+    No image beats a downscaled stand-in. The card has an honest
+    "no image available" state, and the feed falls back to another
+    illustrated article rather than repeating this one.
+    """
+    page = ExtractedMedia(image_url="https://assets-api.kathmandupost.com/thumb.php?src=x")
+    assert best_image("https://other.test/thumbnail.php?src=y", page) is None
+
+
+def test_best_image_prefers_the_page_image_when_both_are_real():
+    page = ExtractedMedia(image_url="https://cdn.example.com/og.jpg")
+    assert best_image("https://cdn.example.com/feed.jpg", page) == (
+        "https://cdn.example.com/og.jpg"
+    )

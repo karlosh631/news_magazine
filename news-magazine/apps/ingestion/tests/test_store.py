@@ -529,3 +529,122 @@ def test_db_call_does_not_retry_a_data_error():
         pass
 
     assert attempts["n"] == 1, "a data error must not be retried"
+
+
+# =============================================================
+# DNS failures are distinguished from HTTP failures
+# =============================================================
+
+def test_dns_failures_are_recognised():
+    """
+    Seven outlets do not resolve from every network. A site that is down
+    returns 503 and recovers; a hostname that does not exist does not,
+    so retrying it forever tells us nothing new.
+    """
+    import socket
+
+    import httpx
+
+    from app.services.ingestion import is_dns_failure
+
+    for exc in (
+        socket.gaierror(-2, "Name or service not known"),
+        httpx.ConnectError("[Errno -2] Name or service not known"),
+        Exception("Temporary failure in name resolution"),
+        Exception("Could not resolve host: example.invalid"),
+    ):
+        assert is_dns_failure(exc), exc
+
+
+def test_http_failures_are_not_mistaken_for_dns():
+    """A busy or broken site must not be disabled as unreachable."""
+    import httpx
+
+    from app.services.ingestion import is_dns_failure
+
+    for exc in (
+        httpx.ConnectError("Connection refused"),
+        httpx.ReadTimeout("timed out"),
+        Exception("503 Server Error"),
+        Exception("404 Not Found"),
+        Exception("parser exploded"),
+    ):
+        assert not is_dns_failure(exc), exc
+
+
+def test_dns_failure_survives_being_wrapped():
+    """httpx nests the socket error one level down; the cause is checked."""
+    import socket
+
+    from app.services.ingestion import is_dns_failure
+
+    class Wrapped(Exception):
+        def __init__(self, cause):
+            super().__init__("wrapped")
+            self.__cause__ = cause
+
+    assert is_dns_failure(Wrapped(socket.gaierror(-2, "nope")))
+
+
+def test_saw_dns_failure_reads_the_run_result():
+    from dataclasses import dataclass
+
+    from app.workers.scheduler import _saw_dns_failure
+
+    @dataclass
+    class FakeResult:
+        error_details: list
+
+    assert _saw_dns_failure(FakeResult([{"type": "dns_failure"}]))
+    assert not _saw_dns_failure(FakeResult([{"type": "fetch_or_parse_error"}]))
+    assert not _saw_dns_failure(FakeResult([]))
+    assert not _saw_dns_failure(object())
+
+
+def test_disable_source_really_issues_the_update():
+    """
+    The breaker is only useful if it actually writes. This exists because
+    it didn't: `_disable_source` called `db_call` without importing it, so
+    every invocation raised NameError, was swallowed by its own except,
+    and returned False — the circuit breaker silently disabled nothing
+    while logging loudly that it had tried.
+    """
+    import asyncio
+
+    from app.workers.scheduler import _disable_source
+
+    calls: list = []
+
+    class FakeQuery:
+        def update(self, payload):
+            calls.append(payload)
+            return self
+
+        def eq(self, column, value):
+            calls.append((column, value))
+            return self
+
+        def execute(self):
+            return type("R", (), {"data": []})()
+
+    class FakeDB:
+        def table(self, name):
+            calls.append(("table", name))
+            return FakeQuery()
+
+    assert asyncio.run(_disable_source(FakeDB(), "source-1", {"name": "Khabar"})) is True
+    assert ("table", "sources") in calls
+    assert {"enabled": False} in calls
+
+
+def test_disable_source_reports_failure_without_raising():
+    """A database outage must not take the scheduler down with it."""
+    import asyncio
+
+    from app.workers.scheduler import _disable_source
+
+    class ExplodingDB:
+        def table(self, name):
+            raise RuntimeError("supabase down")
+
+    assert asyncio.run(_disable_source(ExplodingDB(), "source-1", {})) is False

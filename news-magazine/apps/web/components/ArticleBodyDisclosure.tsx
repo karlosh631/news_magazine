@@ -109,6 +109,13 @@ export function ArticleBodyDisclosure({
   */
   const collapsible = text.trim().length > 0;
 
+  // Blank-line separated blocks. A single-paragraph excerpt yields one
+  // block and renders exactly as it always did.
+  const paragraphs = text
+    .split(/\n\s*\n/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+
   /*
     Sized at text-base/leading-8 rather than the text-lg the body used
     to be.
@@ -144,13 +151,32 @@ export function ArticleBodyDisclosure({
         would fade a dark page to the wrong colour.
       */}
       <div className="relative">
-        <p
+        {/*
+          A full article is paragraphs, not one run-on block. The clamp
+          is applied to the FIRST paragraph only once the reader has
+          expanded nothing — collapsing the whole thing to three lines
+          total is what made the control look like it was revealing
+          nothing.
+
+          `whitespace-pre-line` on each paragraph preserves the blank
+          lines the body was stored with.
+        */}
+        <div
           id={bodyId}
           lang={language ?? undefined}
-          className={`${bodyClass} ${expanded ? "" : "line-clamp-3"}`}
+          className={`space-y-4 ${expanded ? "" : "max-h-[7.5rem] overflow-hidden"}`}
         >
-          {text}
-        </p>
+          {paragraphs.map((paragraph, index) => (
+            <p
+              key={index}
+              className={`${bodyClass} whitespace-pre-line ${
+                !expanded && index === 0 ? "line-clamp-3" : ""
+              }`}
+            >
+              {paragraph}
+            </p>
+          ))}
+        </div>
 
         {!expanded && (
           <div

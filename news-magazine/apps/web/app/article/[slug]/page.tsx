@@ -121,7 +121,35 @@ export default async function ArticlePage({ params }: Props) {
 
   const points = (article.summary_points as string[] | null) ?? [];
   // Only the part of the excerpt the four points do not already say.
-  const bodyText = excerptWithoutOverlap(article.excerpt, points);
+  /*
+    Prefer the stored body, fall back to the excerpt.
+
+    `body_html` holds the outlet's full article when that source's
+    republish_permission is set, and a single-paragraph excerpt when it
+    is not. Telling them apart by paragraph count is enough: an excerpt
+    is always exactly one <p>, so anything longer is real body text.
+
+    The disclosure collapses either one, so the page reads the same
+    whether or not a licence was granted.
+  */
+  const storedBody = article.body_html ?? "";
+  const storedParagraphs = storedBody.match(/<p\b[^>]*>[\s\S]*?<\/p>/gi) ?? [];
+  const bodyText =
+    storedParagraphs.length > 1
+      ? storedParagraphs
+          .map((p: string) =>
+            p
+              .replace(/<[^>]+>/g, "")
+              .replace(/&amp;/g, "&")
+              .replace(/&lt;/g, "<")
+              .replace(/&gt;/g, ">")
+              .replace(/&quot;/g, '"')
+              .replace(/&#39;/g, "'")
+              .trim()
+          )
+          .filter(Boolean)
+          .join("\n\n")
+      : excerptWithoutOverlap(article.excerpt, points);
   const image =
     article.image_highres_url ?? article.featured_image_url ?? article.gif_url ?? null;
   const embed = embeddableVideo(article.video_embed_url ?? article.video_url);

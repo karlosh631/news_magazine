@@ -863,3 +863,59 @@ def test_a_slug_collision_is_not_mistaken_for_a_hash_collision():
         'duplicate key value violates unique constraint "articles_slug_key"'
     )
     assert not _is_content_hash_conflict(slug_conflict)
+
+
+def test_full_body_is_stored_as_paragraphs_not_html():
+    """
+    sources.republish_permission gates whether an outlet's body may be
+    republished. The extractor enforced it; nothing downstream ever read
+    full_body_html, so body_html was unconditionally the excerpt and the
+    page's "read more" expanded three sentences and stopped.
+
+    Stored as PLAIN TEXT, never the publisher's markup: full-text
+    republication is a licensing decision, carrying untrusted HTML to a
+    reader is a security one, and they are separable.
+    """
+    from app.services.ingestion import _build_body
+
+    class FullArticle:
+        full_body_html = (
+            '<div class="story"><p>First para with '
+            "<script>alert(1)</script> markup.</p>"
+            "<p>Second para here.</p><p>Third one.</p></div>"
+            "<script>evil()</script>"
+        )
+
+    body = _build_body(FullArticle(), "The excerpt.")
+
+    assert body is not None
+    # Three paragraphs, not one run-on block.
+    assert body.count("<p>") == 3, body
+    # No markup survived.
+    assert "<script" not in body
+    assert "alert(1)" not in body
+    assert "evil()" not in body
+    assert "First para with markup." in body
+
+
+def test_body_falls_back_to_the_excerpt_when_there_is_no_full_text():
+    from app.services.ingestion import _build_body
+
+    class ExcerptOnly:
+        full_body_html = None
+
+    assert _build_body(ExcerptOnly(), "Short excerpt.") == "<p>Short excerpt.</p>"
+    assert _build_body(ExcerptOnly(), None) is None
+
+
+def test_a_body_that_sanitises_to_nothing_falls_back_to_the_excerpt():
+    """
+    A page whose body is entirely markup must not blank the article. The
+    excerpt is strictly better than an empty body.
+    """
+    from app.services.ingestion import _build_body
+
+    class ScriptOnly:
+        full_body_html = "<script>evil()</script><style>x{}</style>"
+
+    assert _build_body(ScriptOnly(), "The excerpt.") == "<p>The excerpt.</p>"

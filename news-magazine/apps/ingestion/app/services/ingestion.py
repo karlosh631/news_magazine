@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import html
 import logging
 import os
 import re
@@ -80,9 +81,23 @@ from app.services.dedup import (
     token_fingerprint,
 )
 from app.services.sanitizer import (
+    MAX_HEADLINE_LENGTH,
     build_safe_paragraph,
     sanitize_excerpt,
     sanitize_headline,
+    sanitize_plain_text,
+)
+
+# A full article body. Bounded so one pathological page — a printer
+# stylesheet scraped as prose, a scraped comment thread — cannot write a
+# megabyte per article across 27 outlets.
+MAX_BODY_LENGTH = 20_000
+
+# Block-level tags, treated as paragraph boundaries while flattening a
+# publisher's body to plain text.
+_BLOCK_BREAK = re.compile(
+    r"</?(?:p|div|section|article|br|h[1-6]|li|ul|ol|blockquote|figure)\b[^>]*>",
+    re.IGNORECASE,
 )
 from app.services.summarizer import (
     excerpt_without_points,
@@ -826,6 +841,62 @@ async def _bump_source_count(db, article_id: str) -> None:
         logger.debug("source_count bump failed for %s (migration 0009 not applied?)", article_id)
 
 
+def _build_body(article: Any, excerpt: str | None) -> str | None:
+    """
+    The article's readable body: full text when licensed, excerpt otherwise.
+
+    `sources.republish_permission` is the operator's per-outlet decision to
+    republish an outlet's body verbatim. The extractor already enforces it
+    at base.py — full_body_html is nulled unless the flag is set, "in case
+    an adapter bug leaks full content". Nothing downstream ever READ it,
+    so the flag did nothing and body_html was unconditionally the excerpt:
+    the article page's "read more" expanded three sentences and stopped.
+
+    Stored as PLAIN TEXT, not the publisher's HTML. Full-text
+    republication is a licensing decision; carrying untrusted markup
+    through to a reader is a security one, and they are separable. There
+    is nothing to render here that plain paragraphs do not render, and
+    stripping the markup removes the entire XSS surface.
+
+    The flag is checked HERE as well as in the extractor. That is
+    deliberate: this function must not publish a body on the strength of
+    an adapter having got the check right.
+    """
+    full_body = getattr(article, "full_body_html", None)
+
+    if not full_body:
+        return build_safe_paragraph(excerpt) if excerpt else None
+
+    text = sanitize_plain_text(full_body, MAX_BODY_LENGTH)
+    if not text:
+        # The body sanitised down to nothing. Falling back to the excerpt
+        # is strictly better than storing an empty article.
+        return build_safe_paragraph(excerpt) if excerpt else None
+
+    # Paragraph breaks survive as plain text, so the reader gets real
+    # paragraphs rather than one wall.
+    #
+    # The split happens on the RAW markup, before stripping: _strip_html
+    # discards a </p> without leaving a newline behind, so sanitising
+    # first welded every paragraph of the article into one run-on. Block
+    # tags become paragraph breaks first, then each block is sanitised
+    # and escaped on its own — never trusted.
+    blocks = _BLOCK_BREAK.split(full_body)
+    paragraphs: list[str] = []
+    budget = MAX_BODY_LENGTH
+
+    for block in blocks:
+        if budget <= 0:
+            break
+        clean = sanitize_plain_text(block, budget).strip()
+        if not clean:
+            continue
+        budget -= len(clean)
+        paragraphs.append(html.escape(clean))
+
+    return "".join(f"<p>{block}</p>" for block in paragraphs) or None
+
+
 async def store_article(
     db,
     article: Any,
@@ -863,7 +934,7 @@ async def store_article(
         "headline": article.headline,
         "language": article.language or source_row.get("default_language", "ne"),
         "status": "published",
-        "body_html": build_safe_paragraph(excerpt) if excerpt else None,
+        "body_html": _build_body(article, excerpt),
         "excerpt": excerpt,
         "summary_points": (
             summary.points[:4] if summary and summary.points else None

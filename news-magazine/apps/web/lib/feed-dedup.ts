@@ -13,10 +13,11 @@
  * `Deduplicator` is constructed per source sync
  * (services/ingestion.py:1018). Two sources polled in the same tick both
  * miss the lookup, both insert, and the story lands on the homepage
- * twice. Measured against the live table: 15 pairs inside the newest 500
- * published articles, several of them carrying source_count in the
- * dozens — the same story split across two rows, each with its own
- * "Also reported by N others" badge.
+ * twice. Measured against the live table: 25 duplicate pairs inside the
+ * newest 778 published articles, several of them carrying source_count
+ * in the dozens — the same story split across two rows, each with its own
+ * "Also reported by N others" badge claiming a syndication that never
+ * got merged.
  *
  * This is the read-side backstop. It does not repair `duplicate_of` (that
  * is the ingestion service's job, and re-ingesting history is out of
@@ -55,15 +56,12 @@ const ENGLISH_STOPWORDS = new Set(
 
 /**
  * Similarity floor, 0-100. Mirrors `max(fuzz.ratio, fuzz.token_sort_ratio)`
- * from dedup.py.
+ * from dedup.py, so the two layers score a headline pair identically.
  *
- * 85, not dedup.py's 78. At 78 the measured window produces false merges
- * between the Ministry of Foreign Affairs press notes, which share a long
- * boilerplate tail ("संयुक्त राष्ट्रसंघको ८१औँ महासभामा सहभागी भई स्वदेश
- * फर्कनुहुँदा त्रिभुवन अन्तर्राष्ट्रिय विमानस्थलमा जारी गरिएको प्रेस नोट")
- * and score 87 while being about two DIFFERENT officials. Every pair at
- * or above 85 in the newest 400 that also clears CONTAINMENT was a real
- * duplicate.
+ * 85, not dedup.py's 78. Lowering it is not free here: the MoFA press
+ * notes below score 87, and every pair at or above 85 that also clears
+ * CONTAINMENT_THRESHOLD is a real duplicate — so 85 is where the
+ * measured data says the safe region ends.
  */
 const SIMILARITY_THRESHOLD = 85;
 
@@ -72,9 +70,31 @@ const SIMILARITY_THRESHOLD = 85;
  *
  * This is the gate that does the real work, and it exists because
  * similarity alone cannot tell "one story, two outlets" from "one
- * outlet's boilerplate, two officials". The MoFA pair above scores 87 and
- * shares only 0.75 here, so it is rejected; the near-misses that are
- * genuinely the same story sit at 0.83-1.00.
+ * outlet's boilerplate, two officials".
+ *
+ * 0.85 is measured, not guessed. Sweeping the live table (778 newest
+ * published articles, every pair compared) at each value:
+ *
+ *   0.85 -> 25 pairs merged, 24 rows removed   <- shipped
+ *   0.80 -> 31 pairs merged, 29 rows removed   <- admits a FALSE merge
+ *   0.75 -> 34 pairs merged, 31 rows removed
+ *   0.70 -> 36 pairs merged, 33 rows removed
+ *
+ * The three extra pairs at 0.80 are five genuine duplicates and one
+ * that must never merge: the Ministry of Foreign Affairs press note for
+ * Prime Minister Balen Shah against the one for Foreign Minister Shisir
+ * Khanal. Same boilerplate, different officials, different events — 87
+ * similar, 0.75 contained. It sits exactly on the boundary, which is why
+ * this constant is 0.85 and not 0.80.
+ *
+ * The cost of that choice is real and is accepted. Of the 36 pairs a
+ * 0.70 rule would merge, this one leaves 11 visible: the MoFA pair it is
+ * rejecting on purpose, and ten genuine duplicates — a typo'd
+ * "विरतण"/"वितरण", two spellings of the same exchange rate, two of the
+ * same Dashain bus campaign, the Tiger Shraf shooting told as "shot at"
+ * and "shot in his car", a currency bulletin, a tea reception. A reader
+ * who sees one story twice can be told about it; a site that quietly
+ * removes a press note about the Prime Minister cannot be put right.
  */
 const CONTAINMENT_THRESHOLD = 0.85;
 

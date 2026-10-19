@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { EmptyState } from "@/components/EmptyState";
 import { NewsCard } from "@/components/NewsCard";
+import { dropDuplicateStories } from "@/lib/feed-dedup";
 import type { LatestArticle } from "@/types/database";
 
 /**
@@ -345,14 +346,30 @@ export function LiveArticleFeed({
   }, []);
 
   const visible = useMemo(() => {
-    if (imageless.size === 0) return articles;
+    // Deduplicate again on the way to the screen, not just on the way
+    // out of the database.
+    //
+    // /api/live-news already deduplicates every response, so a poll can
+    // never hand back two copies of one story at once. But this list is
+    // the running UNION of every poll this tab has made, and which copy
+    // of a story wins is not fixed: source_count keeps climbing as more
+    // outlets republish, so the copy the server picked ten minutes ago
+    // can lose to the copy it picks now. Both are then sitting in the
+    // union and both are rendered.
+    //
+    // Same function, same thresholds, same order of preference — so this
+    // keeps whichever copy the newest poll would have kept, and the two
+    // passes cannot disagree about what is a duplicate.
+    const deduped = dropDuplicateStories(articles);
 
-    const kept = articles.filter((article) => !imageless.has(article.id));
+    if (imageless.size === 0) return deduped;
+
+    const kept = deduped.filter((article) => !imageless.has(article.id));
 
     // Never let a page of placeholders become an empty page. If dropping
     // the imageless stories would empty the feed, show them anyway — the
     // card's own "No image available" state is the honest last resort.
-    return kept.length > 0 ? kept : articles;
+    return kept.length > 0 ? kept : deduped;
   }, [articles, imageless]);
 
   if (visible.length === 0) {

@@ -437,6 +437,10 @@ async def _close_orphaned_sync_logs() -> int:
 
 REELS_JOB_ID = "ingest-reels"
 
+# Which configured search term the current reels pass is using. Advances
+# one step per pass so a single term cannot monopolise the feed.
+_reels_pass = 0
+
 # (source_key, the Settings field holding its comma-separated keys).
 # A None field means the provider needs no key at all, which is what
 # keeps /category/reels alive on a fresh deploy with nothing set.
@@ -511,6 +515,21 @@ async def _sync_reels() -> None:
             if t.strip()
         ]
 
+        # Rotate the hint per pass rather than always sending the first
+        # one. A single fixed term means every poll after the first
+        # re-requests the same query and finds nothing new, so the feed
+        # stalls on whatever that one term happened to surface. Walking
+        # the list spreads the passes across topics and lets the feed
+        # grow.
+        hint = ""
+        if terms:
+            # `global` is required, not decorative: the += below makes
+            # this name local to the function for the whole of it, so the
+            # read above would raise UnboundLocalError without it.
+            global _reels_pass
+            hint = terms[_reels_pass % len(terms)]
+            _reels_pass += 1
+
         # Pools are built — and cleared — once per pass, before any
         # provider runs. Resetting here is what lets a quota that
         # returns early be picked up without a redeploy, and what stops
@@ -555,7 +574,7 @@ async def _sync_reels() -> None:
                         source_key,
                         pool=pool,
                         client=client,
-                        hint=terms[0] if terms else "",
+                        hint=hint,
                     )
 
                     # ingest_reels is written around a whole pass, so one

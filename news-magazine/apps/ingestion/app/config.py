@@ -147,7 +147,17 @@ class Settings(BaseSettings):
     reels_poll_seconds: int = 900
     pexels_api_keys: str | None = None      # comma-separated
     pixabay_api_keys: str | None = None     # comma-separated
-    reels_search_terms: str | None = None   # comma-separated hints
+    # Comma-separated hints, rotated one per pass.
+    #
+    # The default is deliberately NOT empty. With no hint, the keyless
+    # Wikimedia adapter asks Commons for its newest video uploads and
+    # sorts by upload time, which fills a Nepal news site's Reels tab
+    # with unrelated scientific timelapses — a first pass here stored 30
+    # NASA SDO clips. Terms keep the category on subject by default; add
+    # your own comma-separated to widen it.
+    reels_search_terms: str | None = (
+        "nepal,kathmandu,himalaya,everest,terai,pokhara,bhaktapur"
+    )
     reels_http_timeout: float = 20.0
     # Wikimedia's API policy asks every client to identify itself and
     # says anonymous traffic is what gets access withdrawn. This is a

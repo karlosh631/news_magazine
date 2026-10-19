@@ -18,8 +18,13 @@ export function createClient() {
     process.env.SUPABASE_ANON_KEY ||
     "missing-anon-key";
 
-  return createBrowserClient<Database>(
-    supabaseUrl,
-    supabaseAnonKey
-  );
+  return createBrowserClient<Database>(supabaseUrl, supabaseAnonKey, {
+    // Next 14 caches fetch GETs by default, keyed by URL. On the client
+    // that is the fetch cache inside a single session, which is enough
+    // to serve a reader a stale feed. Same reason as the server client.
+    global: {
+      fetch: (input: RequestInfo | URL, init?: RequestInit) =>
+        fetch(input, { ...init, cache: "no-store" }),
+    },
+  });
 }

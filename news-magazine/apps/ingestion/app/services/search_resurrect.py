@@ -47,7 +47,13 @@ from app.services.dedup import (
     title_tokens,
 )
 from app.services.sanitizer import sanitize_excerpt, sanitize_headline
-from app.sources.media import extract_from_article, media_client
+from app.sources.media import (
+    ImageValidator,
+    candidate_images,
+    extract_from_article,
+    media_client,
+    resolve_live_image,
+)
 
 logger = logging.getLogger("resurrect")
 
@@ -341,12 +347,17 @@ class OnDemandSearcher:
         Returns how many were actually written; articles already in the
         database are counted as not-resurrected.
         """
+        from app.config import get_settings
+
+        settings = get_settings()
+
         if not articles:
             return 0
 
         written = 0
 
         async with media_client() as client:
+            validator = ImageValidator(client)
             for article in articles:
                 try:
                     verdict = self.dedup.check(
@@ -360,7 +371,6 @@ class OnDemandSearcher:
                         # it alone and let the search surface it.
                         continue
 
-                    media = article.thumbnail_url and None or None
                     if enrich_media and article.source_article_url:
                         extracted = await extract_from_article(
                             article.source_article_url,
@@ -370,7 +380,26 @@ class OnDemandSearcher:
                     else:
                         extracted = None
 
-                    row = self._build_row(article, extracted, query)
+                    # Resurrection is a second writer of featured_image_url
+                    # and used to store whatever URL the page offered,
+                    # unproven. Same rule as the poll: an image that has
+                    # not been shown to load is not an image. Cheap here
+                    # — this runs at most a handful of times an hour.
+                    live_image = None
+                    if settings.validate_images:
+                        candidates = candidate_images(
+                            getattr(article, "thumbnail_url", None), extracted
+                        )
+                        live_image = await resolve_live_image(candidates, validator)
+                        if candidates and not live_image:
+                            logger.info(
+                                "resurrect: no loadable image for %r; storing it bare",
+                                getattr(article, "headline", "?")[:80],
+                            )
+
+                    row = self._build_row(
+                        article, extracted, query, live_image=live_image
+                    )
                     result = self.db.table("articles").upsert(
                         row, on_conflict="slug"
                     ).execute()
@@ -386,8 +415,20 @@ class OnDemandSearcher:
 
         return written
 
-    def _build_row(self, article: Any, extracted: Any, query: str) -> dict:
-        """Assemble the articles row for a resurrected story."""
+    def _build_row(
+        self,
+        article: Any,
+        extracted: Any,
+        query: str,
+        live_image: str | None = None,
+    ) -> dict:
+        """
+        Assemble the articles row for a resurrected story.
+
+        `live_image` is the URL already proven to return an image. When
+        validation ran and found nothing, it is None and the story is
+        stored with no artwork at all rather than with a dead URL.
+        """
         from datetime import datetime, timezone
 
         raw_metadata = getattr(article, "raw_metadata", None) or {}
@@ -399,6 +440,13 @@ class OnDemandSearcher:
             image = extracted.image_highres_url or extracted.image_url
         if not image:
             image = getattr(article, "thumbnail_url", None)
+
+        # Validation overrides the guess. Both image columns take the
+        # same proven URL: the card prefers image_highres_url, so the
+        # two disagreeing is how a dead highres beat a live featured
+        # image on the article page itself.
+        if live_image is not None:
+            image = live_image
 
         if extracted is not None:
             excerpt = excerpt or (
@@ -419,9 +467,7 @@ class OnDemandSearcher:
             "body_html": None,
             "excerpt": excerpt,
             "featured_image_url": image,
-            "image_highres_url": (
-                extracted.image_highres_url if extracted is not None else None
-            ),
+            "image_highres_url": image,
             "video_url": extracted.video_embed_url if extracted is not None else None,
             "video_embed_url": extracted.video_embed_url if extracted is not None else None,
             "audio_url": extracted.audio_url if extracted is not None else None,

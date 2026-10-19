@@ -317,7 +317,7 @@ def build(status=200, content_type="image/jpeg", body=JPEG_BYTES, headers=None):
     A factory rather than a Response object because httpx consumes the
     body, so one instance cannot be served to two requests.
     """
-    def make() -> httpx.Response:
+    def make(request: httpx.Request | None = None) -> httpx.Response:
         merged = {"content-type": content_type}
         merged.update(headers or {})
         return httpx.Response(status, headers=merged, content=body)

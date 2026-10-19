@@ -12,10 +12,24 @@
 
 import "server-only";
 
+import { dropDuplicateStories } from "@/lib/feed-dedup";
 import { createPublicSupabaseClient } from "@/lib/supabase/server";
 import type { LatestArticle, SearchResult } from "@/types/database";
 
 export const PAGE_SIZE = 24;
+
+/**
+ * How much extra to ask the database for, so that removing duplicates
+ * does not also shorten the page.
+ *
+ * A 24-row feed that contained two copies of one story would show 22
+ * cards. Fetching twice as many and cutting back to 24 afterwards means
+ * the grid is full AND duplicate-free whenever there are enough distinct
+ * stories to fill it. This is a read-side over-fetch only: the ordering
+ * is still the database's, and nothing is promoted — the extra rows are
+ * only used to backfill slots the duplicates vacated.
+ */
+const DEDUP_HEADROOM = 2;
 
 /**
  * True when Supabase is not configured.
@@ -47,6 +61,12 @@ export interface FeedResult {
  * Uses the latest_articles() RPC rather than a raw select so the
  * `duplicate_of is null` filter and the is_breaking ordering live in one
  * place in SQL instead of being re-derived in every component.
+ *
+ * Two layers of deduplication, because one is not enough. The SQL filter
+ * drops the copies the ingestion worker linked; `dropDuplicateStories`
+ * drops the copies it missed, which it misses because it is an
+ * application-level read-then-insert check running per source sync with
+ * no uniqueness constraint behind it. See lib/feed-dedup.ts.
  */
 export async function getLatestArticles(options?: {
   limit?: number;
@@ -180,7 +200,10 @@ async function languageSelect({
       .is("duplicate_of", null)
       .eq("language", lang)
       .order("published_at", { ascending: false, nullsFirst: false })
-      .limit(limit);
+      // Over-fetched for the same reason as directSelect: duplicates are
+      // removed after the query, and the slots they vacate are refilled
+      // from further down the ordering rather than left empty.
+      .limit(limit * DEDUP_HEADROOM);
     if (categoryId) query = query.eq("primary_category_id", categoryId);
     if (excludeIds && excludeIds.length > 0) {
       query = query.not("id", "in", `(${excludeIds.join(",")})`);
@@ -210,8 +233,21 @@ async function languageSelect({
     }
   }
 
+  // The language toggle widens the window rather than widening the story:
+  // both queries filter `duplicate_of is null`, and both still miss the
+  // copies the worker never linked. Deduplicate AFTER the two languages
+  // are merged, so a story that exists in both editions collapses once.
+  //
+  // Measured, nothing collapses this way: across the newest 300 articles
+  // there is not one ne/en pair with even 0.6 token overlap, so the
+  // top-up above brings in genuinely different stories rather than
+  // translations. The pass stays because it costs nothing and the
+  // top-up widens the pool every time a language is thin.
   return {
-    articles: preferIllustrated(newestFirst(rows), limit),
+    articles: preferIllustrated(
+      dropDuplicateStories(newestFirst(rows)),
+      limit
+    ),
     error: null,
     configured: true,
   };
@@ -301,7 +337,9 @@ async function directSelect({
     // position 1 and the newest real story is pushed down the page.
     // latest_articles() specified `nulls last`; this must say it too.
     .order("published_at", { ascending: false, nullsFirst: false })
-    .limit(limit);
+    // Over-fetched so that dropping duplicates can backfill with the next
+    // story down instead of leaving a hole. See DEDUP_HEADROOM.
+    .limit(limit * DEDUP_HEADROOM);
 
   if (categoryId) query = query.eq("primary_category_id", categoryId);
   if (excludeIds && excludeIds.length > 0) {
@@ -313,30 +351,38 @@ async function directSelect({
     return { articles: [], error: error.message, configured: true };
   }
 
+  const mapped = ((data ?? []) as unknown[]).map((row) => {
+    const item = row as Record<string, unknown>;
+    return {
+      id: String(item.id),
+      slug: String(item.slug),
+      headline: String(item.headline),
+      excerpt: (item.excerpt as string) ?? null,
+      summary_points: (item.summary_points as string[]) ?? null,
+      featured_image_url: (item.featured_image_url as string) ?? null,
+      image_highres_url: (item.image_highres_url as string) ?? null,
+      video_url: (item.video_url as string) ?? null,
+      video_embed_url: (item.video_embed_url as string) ?? null,
+      audio_url: (item.audio_url as string) ?? null,
+      gif_url: (item.gif_url as string) ?? null,
+      published_at: (item.published_at as string) ?? null,
+      source_name_snapshot: (item.source_name_snapshot as string) ?? null,
+      source_article_url: (item.source_article_url as string) ?? null,
+      source_count: Number(item.source_count ?? 1),
+      language: (item.language as "ne" | "en") ?? "ne",
+      category_slug: null,
+      category_name: null,
+    } satisfies LatestArticle;
+  });
+
+  // The `.is("duplicate_of", null)` filter above catches the copies the
+  // ingestion worker DID link. It cannot catch the ones it missed: the
+  // database has no uniqueness constraint on a syndicated headline, so a
+  // story that two sources stored in the same tick is two rows with
+  // duplicate_of = null on both. This is the second line of defence, and
+  // the only one that runs at read time.
   return {
-    articles: ((data ?? []) as unknown[]).map((row) => {
-      const item = row as Record<string, unknown>;
-      return {
-        id: String(item.id),
-        slug: String(item.slug),
-        headline: String(item.headline),
-        excerpt: (item.excerpt as string) ?? null,
-        summary_points: (item.summary_points as string[]) ?? null,
-        featured_image_url: (item.featured_image_url as string) ?? null,
-        image_highres_url: (item.image_highres_url as string) ?? null,
-        video_url: (item.video_url as string) ?? null,
-        video_embed_url: (item.video_embed_url as string) ?? null,
-        audio_url: (item.audio_url as string) ?? null,
-        gif_url: (item.gif_url as string) ?? null,
-        published_at: (item.published_at as string) ?? null,
-        source_name_snapshot: (item.source_name_snapshot as string) ?? null,
-        source_article_url: (item.source_article_url as string) ?? null,
-        source_count: Number(item.source_count ?? 1),
-        language: (item.language as "ne" | "en") ?? "ne",
-        category_slug: null,
-        category_name: null,
-      } satisfies LatestArticle;
-    }),
+    articles: dropDuplicateStories(mapped).slice(0, limit),
     error: null,
     configured: true,
   };
@@ -452,14 +498,14 @@ export async function getRelatedArticles(
     .eq("primary_category_id", categoryId)
     .neq("id", excludeId)
     .order("published_at", { ascending: false, nullsFirst: false })
-    .limit(limit);
+    .limit(limit * DEDUP_HEADROOM);
 
   if (error) {
     console.error("[news] related lookup failed:", error.message);
     return [];
   }
 
-  return ((data ?? []) as unknown[]).map((row) => {
+  const related = ((data ?? []) as unknown[]).map((row) => {
     const item = row as Record<string, unknown>;
     return {
       id: String(item.id),
@@ -481,6 +527,11 @@ export async function getRelatedArticles(
       category_name: null,
     } satisfies LatestArticle;
   });
+
+  // The rail under an article is where a near-duplicate of the article
+  // itself is most visible: the reader has just finished one version of
+  // a story and the next card is that story again.
+  return dropDuplicateStories(related).slice(0, limit);
 }
 
 export async function getCategories() {
@@ -514,14 +565,14 @@ export async function getBreakingNews(limit = 10): Promise<LatestArticle[]> {
     .is("duplicate_of", null)
     .eq("is_breaking", true)
     .order("published_at", { ascending: false, nullsFirst: false })
-    .limit(limit);
+    .limit(limit * DEDUP_HEADROOM);
 
   if (error) {
     console.error("[news] breaking lookup failed:", error.message);
     return [];
   }
 
-  return ((data ?? []) as unknown[]).map((row) => {
+  const breaking = ((data ?? []) as unknown[]).map((row) => {
     const item = row as Record<string, unknown>;
     return {
       id: String(item.id),
@@ -543,4 +594,9 @@ export async function getBreakingNews(limit = 10): Promise<LatestArticle[]> {
       category_name: null,
     } satisfies LatestArticle;
   });
+
+  // The ticker is the worst place for a repeat: ten slots, no pictures,
+  // read at a glance while the page is still loading. Same pass as the
+  // feed, same reason.
+  return dropDuplicateStories(breaking).slice(0, limit);
 }

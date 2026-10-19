@@ -55,8 +55,32 @@ export async function GET(request: Request) {
     );
   }
 
+  // `served_at` is the moment THIS response was computed, and
+  // `newest_age_minutes` is how old the freshest article in it is.
+  //
+  // They exist to settle a question that could not be answered from the
+  // code or the client: whether a reader is looking at a live response
+  // or a cached one. If a page shows `served_at` minutes or hours in the
+  // past, something in front of this route is serving a cached body
+  // despite `Cache-Control: no-store`, and the numbers above it are
+  // meaningless. If `served_at` is current and `newest_age_minutes` is
+  // small, the feed is healthy and the problem is elsewhere.
+  const newestMs = feed.articles.reduce((best, article) => {
+    const parsed = article.published_at ? Date.parse(article.published_at) : NaN;
+    return Number.isNaN(parsed) ? best : Math.max(best, parsed);
+  }, 0);
+
   return NextResponse.json(
-    { articles: feed.articles, configured: feed.configured, language: language ?? "all" },
+    {
+      articles: feed.articles,
+      configured: feed.configured,
+      language: language ?? "all",
+      served_at: new Date().toISOString(),
+      newest_article_at: newestMs ? new Date(newestMs).toISOString() : null,
+      newest_age_minutes: newestMs
+        ? Math.round((Date.now() - newestMs) / 60000)
+        : null,
+    },
     { headers: { "Cache-Control": NO_STORE } }
   );
 }

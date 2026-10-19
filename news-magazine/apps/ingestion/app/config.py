@@ -156,7 +156,8 @@ class Settings(BaseSettings):
     # NASA SDO clips. Terms keep the category on subject by default; add
     # your own comma-separated to widen it.
     reels_search_terms: str | None = (
-        "nepal,kathmandu,himalaya,everest,terai,pokhara,bhaktapur"
+        "nepal,nepali,kathmandu,himalaya,everest,terai,pokhara,"
+        "bhaktapur,mount everest,sagarmatha,india nepal,new deli nepal"
     )
     reels_http_timeout: float = 20.0
     # Wikimedia's API policy asks every client to identify itself and

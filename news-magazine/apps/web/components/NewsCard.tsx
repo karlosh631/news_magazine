@@ -78,7 +78,9 @@ function pickImages(article: NewsCardArticle): string[] {
     article.image_highres_url,
     article.featured_image_url,
     article.gif_url,
-  ].filter((u): u is string => Boolean(u) && /^https?:\/\//i.test(u as string));
+  ]
+    .map(toHttps)
+    .filter((u): u is string => Boolean(u) && /^https?:\/\//i.test(u as string));
 
   // Add the size-stripped form of each, so a dead "-1200x675" rendition
   // can fall back to the original file at its own path.
@@ -90,6 +92,21 @@ function pickImages(article: NewsCardArticle): string[] {
   }
 
   return [...new Set(candidates)];
+}
+
+/**
+ * Force https on an image URL.
+ *
+ * A stored `http://` image is blocked twice over on an https page: the
+ * browser treats it as mixed content, and the site's own CSP
+ * (`img-src 'self' https: data:`) rejects it. The browser already
+ * refuses plain http on an https origin, so rewriting to https cannot
+ * make a working image worse — it can only turn a blocked one into a
+ * rendered one. Every outlet CDN the site uses serves both schemes.
+ */
+function toHttps(url: string | null | undefined): string | null {
+  if (!url) return null;
+  return url.trim().replace(/^http:\/\//i, "https://");
 }
 
 /** Strip a width suffix so a dead "-1200x675" rendition falls back to its source. */

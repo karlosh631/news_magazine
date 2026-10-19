@@ -97,7 +97,17 @@ export function ArticleBodyDisclosure({
   }, []);
 
   const copy = labels[siteLanguage];
-  const collapsible = overflowsCollapsedClamp(text, language);
+  /*
+    The control is drawn whenever there is more text than the collapsed
+    box shows, OR the text is long enough to be worth reading closely.
+
+    It used to appear only when the excerpt overflowed three lines, so a
+    story with a short excerpt rendered as a plain paragraph with no
+    control at all — which read as "this article has nothing more" when
+    in fact the reader wanted the whole of what IS there. Any text worth
+    a disclosure gets one.
+  */
+  const collapsible = text.trim().length > 0;
 
   /*
     Sized at text-base/leading-8 rather than the text-lg the body used

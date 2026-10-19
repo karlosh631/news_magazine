@@ -90,6 +90,30 @@ class Settings(BaseSettings):
     enrich_media: bool = True
 
     # ---------------------------------------------------------
+    # Image validation
+    #
+    # Every image URL used to be chosen on the server by guessing
+    # from the URL's shape, and then stored unverified. Some of
+    # those guesses point at URLs that 403 or 404 forever — an
+    # assets-cdn.kathmandupost.com request with a foreign referer
+    # is refused outright — so the feed carried permanently dead
+    # links and the only party that found out was the reader's
+    # browser. This asks each URL to prove it returns an image
+    # before the row is written, so the guarantee is made once,
+    # server-side, for every reader on every page.
+    #
+    # Costs one ranged GET per NEW image, deduplicated per poll by
+    # URL, so outlets that reuse one image across stories pay for
+    # it once rather than per article.
+    # ---------------------------------------------------------
+    validate_images: bool = True
+    image_validation_timeout_seconds: float = 6.0
+    # Safety valve: how many renditions of one article may be probed
+    # before giving up on it. Almost every article has one candidate
+    # or two; this only bounds the pathological case.
+    max_image_candidates_per_article: int = 3
+
+    # ---------------------------------------------------------
     # Gemini (optional)
     #
     # NOT needed for the four-point summaries: those are extracted
@@ -125,6 +149,14 @@ class Settings(BaseSettings):
     pixabay_api_keys: str | None = None     # comma-separated
     reels_search_terms: str | None = None   # comma-separated hints
     reels_http_timeout: float = 20.0
+    # Wikimedia's API policy asks every client to identify itself and
+    # says anonymous traffic is what gets access withdrawn. This is a
+    # contact address that reaches a human, not a version string.
+    # It lives here rather than in os.environ so that setting it in
+    # .env works, exactly as every other setting in this file does.
+    reels_user_agent: str = (
+        "NepalNewsMagazineReels/1.0 (+https://new24hr.vercel.app)"
+    )
 
     # ---------------------------------------------------------
     # Logging

@@ -541,6 +541,378 @@ def test_build_source_rejects_an_unknown_key():
 
 
 # =============================================================
+# THE KEYLESS PROVIDER, END TO END
+#
+# This section exists because the one provider that needs no
+# configuration did not work, and nothing caught it.
+#
+# The scheduler builds a pool for EVERY provider with build_pool(),
+# which returns an empty KeyPool rather than None when nothing is
+# configured. `_get_json` only recognised None, so for Wikimedia —
+# requires_key=False, pool of zero keys — it computed one attempt,
+# called next_key(), and raised KeyPoolExhausted("All 0 key(s) are
+# rate limited"). Every pass failed, the page stayed empty on a
+# deploy with nothing set, and the log blamed rate limiting.
+#
+# Every other test in this file built the adapter with pool=None, which
+# is the path that worked. That is the whole lesson: the tests covered
+# a construction the scheduler never uses.
+# =============================================================
+
+
+class FakeResponse:
+    def __init__(self, payload, status_code=200, headers=None):
+        self._payload = payload
+        self.status_code = status_code
+        self.headers = headers or {}
+        # Only read on the error paths in _decode, but always present so
+        # a failure names the host rather than raising inside the error
+        # handler.
+        self.request = SimpleNamespace(
+            url=SimpleNamespace(host="commons.wikimedia.org")
+        )
+
+    def json(self):
+        return self._payload
+
+
+class RecordingClient:
+    """An httpx.AsyncClient stand-in that remembers what it was asked."""
+
+    def __init__(self, response):
+        self._response = response
+        self.calls: list[dict] = []
+
+    async def get(self, url, *, params=None, headers=None):
+        self.calls.append({"url": url, "params": params, "headers": headers})
+        return self._response
+
+
+def test_build_pool_returns_an_empty_pool_not_none():
+    """
+    The fact the rest of this section turns on. It looks like a
+    formality; it is the difference between a provider that works
+    unconfigured and one that raises "0 keys are rate limited".
+    """
+    pool = build_pool("wikimedia", None)
+
+    assert isinstance(pool, KeyPool)
+    assert pool is not None
+    assert pool.is_empty
+    assert len(pool) == 0
+
+
+def test_a_keyless_provider_still_issues_its_request_with_an_empty_pool():
+    """
+    The regression. Exactly what _sync_reels builds for Wikimedia on a
+    deploy with no secrets set, all the way through to the wire.
+    """
+    payload = {"query": {"pages": []}}
+    client = RecordingClient(FakeResponse(payload))
+    pool = build_pool("wikimedia", None)
+
+    source = build_source("wikimedia", pool=pool, client=client, hint="")
+    assert source.requires_key is False
+
+    assert run(source._get_json({"action": "query"})) == payload
+
+    # One request, not a retry storm against a pool that has no keys.
+    assert len(client.calls) == 1
+    assert client.calls[0]["url"] == PROVIDERS["wikimedia"].endpoint
+
+
+def test_a_keyless_provider_sends_no_authorization_header():
+    """
+    Empty must mean "no credential", never "an empty credential".
+    A header carrying '' would be sent to Commons on every request.
+    """
+    client = RecordingClient(FakeResponse({"query": {"pages": []}}))
+
+    source = build_source(
+        "wikimedia", pool=build_pool("wikimedia", None), client=client
+    )
+    run(source._get_json({"action": "query"}))
+
+    headers = client.calls[0]["headers"]
+    assert "Authorization" not in headers, headers
+
+
+def test_a_provider_that_needs_a_key_still_refuses_an_empty_pool():
+    """
+    The other half of the fix, so it cannot be over-applied: the empty
+    pool is only ever a no-op for a provider that does not require a
+    key. Pexels with no keys configured is still a configuration
+    error, not a silent unauthenticated request.
+    """
+    client = RecordingClient(FakeResponse({}, status_code=200))
+
+    source = build_source(
+        "pexels", pool=build_pool("pexels", None), client=client
+    )
+
+    with pytest.raises(reels_providers.ProviderError) as caught:
+        run(source._get_json({"per_page": 5}))
+
+    assert "no API key configured" in str(caught.value), str(caught.value)
+    assert client.calls == [], "an unconfigured provider must not hit the network"
+
+
+def test_a_configured_provider_still_rotates_and_books_keeps():
+    """
+    The keyless path must not have cost the keyed path its rotation.
+    """
+    client = RecordingClient(FakeResponse({"hits": []}))
+    pool = build_pool("pexels", "key-one,key-two")
+
+    source = build_source("pexels", pool=pool, client=client)
+
+    run(source._get_json({"per_page": 5}))
+    run(source._get_json({"per_page": 5}))
+
+    assert [call["headers"]["Authorization"] for call in client.calls] == [
+        "key-one",
+        "key-two",
+    ]
+
+
+# =============================================================
+# _sync_reels, END TO END, WITH NO CREDENTIALS
+#
+# One pass of the real scheduler entrypoint against a real Commons
+# response body, with nothing configured. This is the test that says
+# whether /category/reels can fill on a deploy where the operator has
+# set ENABLE_REELS=true and nothing else.
+#
+# It went green only once _get_json stopped asking an empty pool for a
+# key. Everything below the scheduler — the pool, the adapter, the
+# licence gate, the upsert — was already correct and individually
+# untested in combination, which is exactly how a feature can be 95%
+# finished and produce nothing.
+# =============================================================
+
+
+COMMONS_RESPONSE = {
+    "query": {
+        "pages": [
+            {
+                "pageid": 12345,
+                "title": "File:Nepal street video.webm",
+                "imageinfo": [
+                    {
+                        "url": (
+                            "https://upload.wikimedia.org/wikipedia/commons/"
+                            "a/ab/Nepal_street_video.webm"
+                        ),
+                        "thumburl": (
+                            "https://upload.wikimedia.org/wikipedia/commons/thumb/"
+                            "a/ab/Nepal_street_video.webm/640px-Nepal_street_video.webm.jpg"
+                        ),
+                        "width": 1280,
+                        "height": 720,
+                        "extmetadata": {
+                            "LicenseShortName": {"value": "CC BY-SA 4.0"},
+                            "License": {"value": "cc-by-sa-4.0"},
+                            "LicenseUrl": {
+                                "value": "https://creativecommons.org/licenses/by-sa/4.0/"
+                            },
+                            "Artist": {
+                                "value": '<a href="https://commons.wikimedia.org/wiki/User:A">A Photographer</a>'
+                            },
+                            "ImageDescription": {"value": "A street in Kathmandu."},
+                        },
+                    }
+                ],
+                "videoinfo": [
+                    {
+                        "duration": 12.5,
+                        "width": 720,
+                        "height": 1280,
+                        "timestamp": "2026-01-02T03:04:05Z",
+                        "descriptionurl": (
+                            "https://commons.wikimedia.org/wiki/File:Nepal_street_video.webm"
+                        ),
+                        "derivatives": [
+                            {
+                                "src": "https://upload.wikimedia.org/wikipedia/commons/transcoded/a/ab/Nepal_street_video.webm/Nepal_street_video.webm.720p.vp9.webm",
+                                "type": "video/webm",
+                                "width": 720,
+                                "height": 1280,
+                            },
+                            {
+                                "src": "https://upload.wikimedia.org/wikipedia/commons/transcoded/a/ab/Nepal_street_video.webm/Nepal_street_video.webm.720p.mp4",
+                                "type": "video/mp4",
+                                "width": 720,
+                                "height": 1280,
+                            },
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+}
+
+
+class FakeAsyncClient:
+    """Stands in for httpx.AsyncClient as _sync_reels builds it."""
+
+    def __init__(self, payload, recorder):
+        self._payload = payload
+        self._recorder = recorder
+        self.init_kwargs = None
+
+    def __call__(self, **kwargs):
+        self.init_kwargs = kwargs
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def get(self, url, *, params=None, headers=None):
+        self._recorder.append({"url": url, "params": params, "headers": headers})
+        return FakeResponse(self._payload)
+
+
+def _reels_settings(**overrides):
+    defaults = dict(
+        enable_reels=True,
+        reels_per_source=30,
+        reels_poll_seconds=900,
+        pexels_api_keys=None,
+        pixabay_api_keys=None,
+        reels_search_terms="nepal",
+        reels_http_timeout=20.0,
+        reels_user_agent="TestReels/1.0 (+https://example.test)",
+    )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+async def test_one_reels_pass_stores_commons_clips_with_no_api_keys(monkeypatch):
+    """
+    The whole point of Wikimedia being first in REEL_PROVIDERS. With
+    ENABLE_REELS=true and every key unset, one pass must reach the
+    database — not log an error and leave /category/reels empty.
+    """
+    import httpx
+
+    from app.workers import scheduler as sched
+
+    sent: list[dict] = []
+    db = FakeDB(rows=[{"id": GOOD_UUID}])
+    client = FakeAsyncClient(COMMONS_RESPONSE, sent)
+
+    monkeypatch.setattr(sched, "get_settings", lambda: _reels_settings())
+    monkeypatch.setattr(sched, "get_db", lambda: db)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+
+    await sched._sync_reels()
+
+    assert len(sent) == 1, sent
+    assert sent[0]["url"] == PROVIDERS["wikimedia"].endpoint
+    assert client.init_kwargs["headers"]["User-Agent"] == (
+        "TestReels/1.0 (+https://example.test)"
+    ), "the configured User-Agent must reach Commons"
+
+    assert len(db.upsert_rows) == 1, db.calls
+    row = db.upsert_rows[0]
+
+    assert row["source_key"] == "wikimedia"
+    assert row["external_id"] == "12345"
+    # The mp4 transcode, not the webm master: Safari and iOS refuse
+    # webm, so picking the wrong one is a black rectangle on phones.
+    assert row["video_url"].endswith(".mp4"), row["video_url"]
+    assert row["license_name"] == "CC BY-SA 4.0"
+    assert row["attribution_required"] is True
+    assert row["creator_name"] == "A Photographer"
+    assert row["published_at"].startswith("2026-01-02")
+
+
+async def test_a_pass_with_no_keys_at_all_survives_the_providers_that_need_them(
+    monkeypatch,
+):
+    """
+    Pexels and Pixabay have nothing configured here, and their absence
+    must be a SKIPPED line rather than a failure — and must not stop
+    Wikimedia from running. A pass is only wrong if it stores nothing.
+    """
+    import httpx
+
+    from app.workers import scheduler as sched
+
+    sent: list[dict] = []
+    db = FakeDB(rows=[{"id": GOOD_UUID}])
+    client = FakeAsyncClient(COMMONS_RESPONSE, sent)
+
+    monkeypatch.setattr(
+        sched,
+        "get_settings",
+        lambda: _reels_settings(pexels_api_keys="", pixabay_api_keys=None),
+    )
+    monkeypatch.setattr(sched, "get_db", lambda: db)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+
+    await sched._sync_reels()
+
+    assert [call["url"] for call in sent] == [PROVIDERS["wikimedia"].endpoint]
+    assert len(db.upsert_rows) == 1
+
+
+async def test_a_provider_error_does_not_lose_the_providers_that_worked(monkeypatch):
+    """
+    The isolation guarantee, at the level it is actually claimed: the
+    pass is wrapped whole, and each provider is wrapped on its own.
+
+    Pexels is configured here and then fails at the socket. Wikimedia
+    still runs — and still writes its rows. A reels provider being down
+    must never be able to affect a single outlet poll, and this is the
+    test that says so at the scheduler level rather than in the store.
+    """
+    import httpx
+
+    from app.workers import scheduler as sched
+
+    sent: list[dict] = []
+    db = FakeDB(rows=[{"id": GOOD_UUID}])
+    pexels_endpoint = PROVIDERS["pexels"].endpoint
+
+    def flaky(**kwargs):
+        class Flaky(FakeAsyncClient):
+            async def get(self, url, *, params=None, headers=None):
+                sent.append({"url": url, "headers": headers})
+                if url == pexels_endpoint:
+                    raise RuntimeError("pexels is down")
+                return FakeResponse(self._payload)
+
+        return Flaky(COMMONS_RESPONSE, sent)
+
+    monkeypatch.setattr(
+        sched, "get_settings", lambda: _reels_settings(pexels_api_keys="pexels-key")
+    )
+    monkeypatch.setattr(sched, "get_db", lambda: db)
+    monkeypatch.setattr(httpx, "AsyncClient", flaky)
+
+    await sched._sync_reels()
+
+    assert [call["url"] for call in sent] == [
+        PROVIDERS["wikimedia"].endpoint,
+        pexels_endpoint,
+    ]
+    # Both were asked, so the failure really was Pexels' alone. Commons
+    # is sent no credential at all, Pexels exactly one.
+    assert [call["headers"].get("Authorization") for call in sent] == [
+        None,
+        "pexels-key",
+    ]
+
+    # And the healthy provider's reels still landed.
+    assert [row["source_key"] for row in db.upsert_rows] == ["wikimedia"]
+
+
+# =============================================================
 # Fake supabase-py client
 #
 # supabase-py is a chainable builder: .table().select().order().limit()

@@ -663,3 +663,130 @@ def test_disable_source_reports_failure_without_raising():
             raise RuntimeError("supabase down")
 
     assert asyncio.run(_disable_source(ExplodingDB(), "source-1", {})) is False
+
+
+# =============================================================
+# REELS JOB REGISTRATION
+#
+# The whole Reels feature hangs off one setting. ENABLE_REELS defaults
+# to false, so on a deploy that never touches it the job is never
+# registered, nothing is ever fetched, and /category/reels is an empty
+# state that looks identical to "we ran and there was nothing".
+#
+# These pin the two halves of the switch that are easy to get wrong:
+# off must REMOVE a job that is already registered (a process started
+# with reels on must stop polling when the operator turns it off), and
+# it must do that without a redeploy, because _periodic_refresh calls
+# this same function every five minutes.
+# =============================================================
+
+
+class FakeJob:
+    def __init__(self, job_id):
+        self.id = job_id
+        self.removed = False
+
+    def remove(self):
+        self.removed = True
+
+
+class FakeScheduler:
+    def __init__(self, jobs=None):
+        self.jobs = dict(jobs or {})
+        self.added: list[dict] = []
+
+    def get_job(self, job_id):
+        return self.jobs.get(job_id)
+
+    def add_job(self, fn, **kwargs):
+        self.added.append({"fn": fn, **kwargs})
+        self.jobs[kwargs["id"]] = FakeJob(kwargs["id"])
+
+
+def _reel_settings(**overrides):
+    """The reels fields of Settings, with everything else irrelevant."""
+    defaults = dict(
+        enable_reels=True,
+        reels_poll_seconds=900,
+        reels_per_source=30,
+        reels_search_terms=None,
+        reels_http_timeout=20.0,
+        reels_user_agent="TestAgent/1.0",
+    )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def test_the_reels_job_is_registered_only_when_reels_are_enabled(monkeypatch):
+    from app.workers import scheduler as sched
+
+    for enabled, expect_job in ((True, True), (False, False)):
+        fake = FakeScheduler()
+        monkeypatch.setattr(
+            sched, "get_settings", lambda: _reel_settings(enable_reels=enabled)
+        )
+        monkeypatch.setattr(sched, "get_scheduler", lambda: fake)
+
+        sched._register_reels_job()
+
+        assert (sched.REELS_JOB_ID in fake.jobs) is expect_job, enabled
+        assert len(fake.added) is (1 if enabled else 0), enabled
+
+
+def test_disabling_reels_removes_a_job_that_is_already_running(monkeypatch):
+    """
+    Declining to ADD the job is not the same as turning it off. A
+    process started with reels enabled would otherwise keep polling
+    every provider for the life of the container.
+    """
+    from app.workers import scheduler as sched
+
+    existing = FakeJob(sched.REELS_JOB_ID)
+    fake = FakeScheduler({sched.REELS_JOB_ID: existing})
+    monkeypatch.setattr(sched, "get_settings", lambda: _reel_settings(enable_reels=False))
+    monkeypatch.setattr(sched, "get_scheduler", lambda: fake)
+
+    sched._register_reels_job()
+
+    assert existing.removed
+    assert fake.added == []
+
+
+def test_reels_reregistration_replaces_rather_than_duplicates(monkeypatch):
+    """
+    The 5-minute refresh calls this again on every tick, so the enabled
+    path has to be idempotent — otherwise the refresh itself would pile
+    up copies of the job.
+    """
+    from app.workers import scheduler as sched
+
+    fake = FakeScheduler()
+    monkeypatch.setattr(sched, "get_settings", lambda: _reel_settings())
+    monkeypatch.setattr(sched, "get_scheduler", lambda: fake)
+
+    sched._register_reels_job()
+    sched._register_reels_job()
+    sched._register_reels_job()
+
+    assert len(fake.added) == 3
+    assert all(call["replace_existing"] is True for call in fake.added)
+    assert {call["id"] for call in fake.added} == {sched.REELS_JOB_ID}
+
+
+def test_a_tiny_poll_interval_is_raised_to_the_floor(monkeypatch):
+    """
+    MIN_POLL_SECONDS exists so nothing can be configured into hammering
+    a provider. It has to apply to the reels job too, and not just to
+    the outlets.
+    """
+    from app.workers import scheduler as sched
+
+    fake = FakeScheduler()
+    monkeypatch.setattr(
+        sched, "get_settings", lambda: _reel_settings(reels_poll_seconds=1)
+    )
+    monkeypatch.setattr(sched, "get_scheduler", lambda: fake)
+
+    sched._register_reels_job()
+
+    assert fake.added[0]["trigger"].interval.total_seconds() == sched.MIN_POLL_SECONDS

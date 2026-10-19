@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -454,11 +453,9 @@ REEL_PROVIDERS: tuple[tuple[str, str | None], ...] = (
 # Wikimedia's API policy asks every client to identify itself, and
 # anonymous traffic is what gets access withdrawn. Set this to something
 # that reaches a human before going live — it is a contact address, not
-# a version string.
-REELS_USER_AGENT = os.environ.get(
-    "REELS_USER_AGENT",
-    "NepalNewsMagazineReels/1.0 (+https://new24hr.vercel.app)",
-)
+# a version string. It is a Settings field (reels_user_agent) rather
+# than a bare os.environ read so that setting REELS_USER_AGENT in .env
+# works like every other setting here.
 
 
 def _reels_summary(health: Any) -> str:
@@ -544,7 +541,7 @@ async def _sync_reels() -> None:
         async with httpx.AsyncClient(
             timeout=settings.reels_http_timeout,
             follow_redirects=True,
-            headers={"User-Agent": REELS_USER_AGENT},
+            headers={"User-Agent": settings.reels_user_agent},
         ) as client:
             for source_key, pool in pools:
                 try:

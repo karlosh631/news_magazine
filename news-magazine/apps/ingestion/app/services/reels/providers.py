@@ -419,7 +419,19 @@ class _BaseSource:
         """
         pool = self._require_pool() if self.requires_key else self._pool
 
-        if pool is None:
+        # An EMPTY pool means exactly what no pool means, and treating it
+        # as "has keys to rotate" is what stopped the one provider that
+        # needs no configuration from working at all: build_pool() hands
+        # every source a KeyPool, so Wikimedia arrives here with a pool
+        # of zero keys rather than None. `attempts` was 1, `next_key()`
+        # raised KeyPoolExhausted("All 0 key(s) are rate limited"), and
+        # the category stayed empty forever on a deploy with nothing set
+        # — while every test, which built the adapter with pool=None,
+        # passed.
+        #
+        # A provider that DOES require a key cannot reach this line with
+        # an empty pool: _require_pool() raises first.
+        if pool is None or pool.is_empty:
             # No key to rotate, so no reason to rotate anything. Same
             # status handling, minus the bookkeeping.
             return self._decode(await self._send(None, params, headers))

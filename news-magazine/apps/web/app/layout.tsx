@@ -99,10 +99,19 @@ export default async function RootLayout({
   // admin operation rather than a code change.
   const allCategories = await getCategories();
 
-  // Five in the nav. Eleven wrapped onto two lines and broke every
-  // word mid-syllable on desktop. All eleven remain reachable at
-  // /category/<slug>; this only limits what is shown.
-  const NAV_ORDER = ["national", "politics", "business", "technology", "world"];
+  // Six in the nav, and that is a space decision rather than a content
+  // one: all twelve wrapped onto two lines and broke every word
+  // mid-syllable on desktop. Reels is appended last so the five that
+  // were already there keep their positions. The other six remain
+  // reachable at /category/<slug>; this only limits what is shown.
+  const NAV_ORDER = [
+    "national",
+    "politics",
+    "business",
+    "technology",
+    "world",
+    "reels",
+  ];
   const categories = NAV_ORDER.map((slug) => allCategories.find((c) => c.slug === slug))
     .filter((c): c is NonNullable<typeof c> => Boolean(c))
     .map((c) => ({ slug: c.slug, name_en: c.name_en, name_ne: c.name_ne }));

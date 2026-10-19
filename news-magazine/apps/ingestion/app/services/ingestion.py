@@ -91,9 +91,11 @@ from app.services.summarizer import (
 )
 from app.sources.media import (
     ExtractedMedia,
-    best_image,
+    ImageValidator,
+    candidate_images,
     extract_from_article,
     media_client,
+    resolve_live_image,
     upgrade_to_highres,
 )
 
@@ -257,6 +259,11 @@ class IngestionResult:
     errors: int = 0
     pruned: int = 0
     links_skipped: int = 0
+    # Articles whose proposed image could not be proven loadable and
+    # were therefore stored without artwork. Not errors — a deliberate
+    # outcome — but worth watching: a source climbing here is an outlet
+    # whose CDN has started refusing us.
+    images_dropped: int = 0
     dedup_detail: str = ""
     error_details: list[dict] = field(default_factory=list)
 
@@ -270,6 +277,7 @@ class IngestionResult:
             "errors": self.errors,
             "pruned": self.pruned,
             "links_skipped": self.links_skipped,
+            "images_dropped": self.images_dropped,
             "dedup_detail": self.dedup_detail,
         }
 
@@ -463,6 +471,72 @@ def merge_media(
         "image_alt": page.image_alt if page is not None else None,
         "word_count": page.word_count if page is not None else None,
     }
+
+
+async def verify_media_images(
+    media: dict[str, Any],
+    validator: ImageValidator,
+    feed_media: dict[str, Any],
+    page: ExtractedMedia | None,
+    limit: int = 3,
+) -> tuple[dict[str, Any], int]:
+    """
+    Prove the chosen image exists, or take it away.
+
+    merge_media picks an image by rank: the page's og:image if there was
+    one, else the feed's thumbnail. Rank is not liveness. The winner can
+    be a URL the CDN refuses forever, and so can the "high-res upgrade"
+    applied to the feed thumbnail — that rewrite is a guess at a sibling
+    filename, and the sibling does not always exist. Both were stored
+    unchecked, so a card could carry two dead URLs and the web had to
+    discover that in the reader's browser, one failed <img> at a time.
+
+    So: walk the same candidate list the extractor built, take the first
+    that genuinely returns an image, and write that into both image
+    columns. When none does, the article is stored with no image at all.
+    No placeholder is invented — the web already has an honest "no image
+    available" state and now sorts imageless stories below illustrated
+    ones, so the honest answer is also the better one.
+
+    Returns (media, dropped) where dropped is 1 when an image was
+    proposed and could not be proven.
+    """
+    proposed = bool(media.get("image_url") or media.get("image_highres_url"))
+    if not proposed:
+        return media, 0
+
+    candidates = candidate_images(feed_media.get("image_url"), page)
+    live = await resolve_live_image(candidates, validator, limit=limit)
+
+    if not live:
+        logger.info(
+            "No loadable image for %r; storing the article with no artwork.",
+            (media.get("image_alt") or "")[:60] or "unstated story",
+        )
+        media = dict(media)
+        media["image_url"] = None
+        media["image_highres_url"] = None
+        # A gif_url is rendered by the card as a real <img>, so an
+        # unvalidated one is exactly the broken tile this removes.
+        media["gif_url"] = None
+        media["image_alt"] = None
+        return media, 1
+
+    media = dict(media)
+    # Both columns now hold the one URL proven to work. They used to be
+    # allowed to disagree, and the web prefers the highres column — so a
+    # dead highres was served in preference to a live featured image on
+    # the article page itself.
+    media["image_url"] = live
+    media["image_highres_url"] = live
+
+    # gif_url is a separate column and the card walks it last. Keep it
+    # only if it too survives the probe.
+    gif = media.get("gif_url")
+    if gif and gif != live and not await validator.is_live(gif):
+        media["gif_url"] = None
+
+    return media, 0
 
 
 # =============================================================
@@ -988,6 +1062,11 @@ async def run_source_sync(
 
     # ---- 6. Per-article pipeline ----
     async with media_client() as media_http:
+        # One validator for the whole source poll, so an image reused
+        # across ten stories is probed once rather than ten times.
+        validator = ImageValidator(
+            media_http, timeout=settings.image_validation_timeout_seconds
+        )
 
         for article in articles:
             try:
@@ -1058,6 +1137,24 @@ async def run_source_sync(
                         result.enriched += 1
 
                 media = merge_media(feed_media, extracted)
+
+                # ---- Prove the image exists before storing it ----
+                # Everything above chose an image by ranking URLs.
+                # Ranking is not liveness: the winner may 403 forever,
+                # and the feed thumbnail's "high-res upgrade" is a
+                # guess at a sibling filename that may not exist. Ask
+                # the CDN before the row is written, and take the
+                # artwork away entirely if it cannot prove itself.
+                if enrich_media and settings.validate_images:
+                    media, dropped = await verify_media_images(
+                        media,
+                        validator,
+                        feed_media,
+                        extracted,
+                        limit=settings.max_image_candidates_per_article,
+                    )
+                    if dropped:
+                        result.images_dropped += 1
 
                 # Use the richer description when the feed gave us none.
                 if not excerpt and extracted is not None:

@@ -4,6 +4,7 @@ import type { Metadata } from "next";
 
 import { ShareButtons } from "@/components/ShareButtons";
 import { ArticleViewTracker } from "@/components/ArticleViewTracker";
+import { ArticleBodyDisclosure } from "@/components/ArticleBodyDisclosure";
 import { ArticleMedia } from "@/components/ArticleMedia";
 import { ArticleTranslation } from "@/components/ArticleTranslation";
 import { getArticleBySlug, getCategories, getRelatedArticles } from "@/lib/news";
@@ -298,11 +299,21 @@ export default async function ArticlePage({ params }: Props) {
             opening sentences are normally the very sentences the points
             were built from — the page read as though the article were
             stating itself twice.
+
+            This is the whole of the story text the row carries. There is
+            no full article body to render: `body_html` is written by
+            the ingestion worker as `build_safe_paragraph(excerpt)` — the
+            excerpt in a single <p>, not the outlet's article — and
+            `full_body_html` is never populated because every seeded
+            outlet leaves republish_permission false. See
+            components/ArticleBodyDisclosure.tsx for the full note.
+
+            The disclosure therefore collapses and expands THIS excerpt,
+            and the "Read the full story on <outlet>" button below stays
+            the route to anything longer.
           */}
           {bodyText && (
-            <p className="mt-6 text-lg leading-8 text-gray-800 dark:text-gray-200">
-              {bodyText}
-            </p>
+            <ArticleBodyDisclosure text={bodyText} language={article.language} />
           )}
 
           {points.length === 0 && !article.excerpt && (

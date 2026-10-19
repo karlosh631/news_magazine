@@ -22,6 +22,11 @@ Design constraints:
 - Honours the same per-host rate limiter the feed fetch uses.
 - Records provenance (where each URL came from) so the DB can tell a
   genuine og:image from a 1x1 tracking pixel.
+- Every candidate image is PROVEN loadable before it is stored, via
+  ImageValidator below. Selecting an image by URL shape is guesswork:
+  the guess is wrong often enough that cards shipped carrying a URL
+  which 403s or 404s forever, and the only party that ever found out
+  was the reader's browser.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -164,6 +170,16 @@ _RESERVED_HOSTS = {
     "::1",
 }
 
+# A real Chrome string. Article pages 404 on a bare curl UA often enough
+# that this one is worth hard-coding, and an image CDN that answers a
+# bot string with a challenge page is exactly the false negative the
+# liveness probe must not walk into.
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
 
 @dataclass
 class ExtractedMedia:
@@ -174,6 +190,14 @@ class ExtractedMedia:
     image_width: int | None = None
     image_height: int | None = None
     image_alt: str | None = None
+    # Every image URL the page offered, best first, deduplicated.
+    #
+    # Only image_url was kept before, so when the winner turned out to
+    # be a dead rendition the article lost its artwork entirely — even
+    # though the page had offered two or three live alternates sitting
+    # right behind it. Keeping the full ranking is what lets the
+    # validator fall through to the next candidate instead of giving up.
+    image_candidates: list[str] = field(default_factory=list)
     video_embed_url: str | None = None
     video_id: str | None = None
     video_thumbnail_url: str | None = None
@@ -536,13 +560,7 @@ async def extract_from_article(
         response = await client.get(
             url,
             headers={
-                # Article pages 404 on a bare curl UA often enough that
-                # this one is worth hard-coding.
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
+                "User-Agent": BROWSER_USER_AGENT,
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "ne,en;q=0.8",
                 **({"Referer": referer} if referer else {}),
@@ -615,6 +633,15 @@ async def extract_from_article(
             result.image_url = best_url
             result.image_highres_url = best_url
             result.provenance["image_url"] = best_source
+
+            # Keep the whole ranking, deduplicated in score order, so a
+            # rendition that fails validation can be swapped for the next
+            # one the same page already offered.
+            ranked: list[str] = []
+            for _, url, _ in scored:
+                if url not in ranked:
+                    ranked.append(url)
+            result.image_candidates = ranked
 
             # Only call it high-res when the page actually told us it is
             # large enough to be worth the extra bytes.
@@ -694,23 +721,299 @@ async def extract_from_article(
         return result
 
 
+# Size suffixes the web card strips before trying the next rendition.
+# Kept byte-for-byte in step with withoutSizeSuffix() in
+# apps/web/components/NewsCard.tsx: when a "-1200x675" rendition is dead
+# the original file at its own path is usually alive, and the browser
+# already knew that. Doing it server-side means the reader never sees
+# the failed request in the first place.
+_SIZE_SUFFIX_PATTERNS = (
+    re.compile(r"[-_]\d{2,4}x\d{2,4}(?=\.(?:jpg|jpeg|png|webp))", re.IGNORECASE),
+    re.compile(
+        r"[-_](?:w|width|resize)[-_]?\d{2,4}(?=[x_.]|\.(?:jpg|jpeg|png|webp))",
+        re.IGNORECASE,
+    ),
+    re.compile(r"[?&]w=\d{2,4}\b", re.IGNORECASE),
+)
+
+
+def strip_size_suffix(url: str) -> str:
+    """The same URL with any width token removed. Unchanged if none."""
+    for pattern in _SIZE_SUFFIX_PATTERNS:
+        stripped = pattern.sub("", url)
+        if stripped != url:
+            return stripped
+    return url
+
+
+def candidate_images(feed_url: str | None, page: ExtractedMedia | None) -> list[str]:
+    """
+    Every image rendition worth trying, best first, deduplicated.
+
+    Ordering mirrors the web card exactly — page ranking first, feed
+    thumbnail second, and only then the size-stripped variants of each.
+    Preferring a real rendition over a stripped guess matters: the
+    stripped form is the fallback, not the favourite.
+
+    Resizers and junk are dropped here rather than merely ranked down.
+    A resizer can only return a downscaled version of something else,
+    and because proxy URLs are built from a handful of shared endpoints
+    the same picture used to land on eight unrelated cards. No image
+    beats a downscaled stand-in: the card has an honest "no image
+    available" state and the feed demotes imageless stories.
+    """
+    if page is not None and page.image_candidates:
+        ranked = list(page.image_candidates)
+    elif page is not None:
+        ranked = [u for u in (page.image_highres_url, page.image_url) if u]
+    else:
+        ranked = []
+
+    if feed_url:
+        ranked.append(feed_url)
+
+    ordered: list[str] = []
+
+    def push(url: str) -> None:
+        if not url or _is_resizer(url) or _looks_like_junk_image(url):
+            return
+        if url not in ordered:
+            ordered.append(url)
+
+    for url in ranked:
+        push(url)
+    for url in ranked:
+        push(strip_size_suffix(url))
+
+    return ordered
+
+
 def best_image(feed_url: str | None, page: ExtractedMedia) -> str | None:
     """
-    Decide the image to store.
+    Decide the image to store, without touching the network.
 
     A page-level og:image beats a feed thumbnail even when the thumbnail
     looks larger, because the og:image is the one the outlet chose for
     sharing. The feed URL is kept only as the fallback.
 
-    A resizer URL is never returned. If it is all either source offers,
-    the article is stored with no image rather than with a downscaled
-    proxy — the card already has an honest "no image available" state,
-    and a thumbnail proxy is how eight unrelated stories ended up
-    showing the same picture.
+    This is the shape of the answer, not the proof. `resolve_live_image`
+    below walks the same list and confirms which one actually loads.
     """
-    for candidate in (page.image_url, feed_url):
-        if candidate and not _is_resizer(candidate):
-            return candidate
+    candidates = candidate_images(feed_url, page)
+    return candidates[0] if candidates else None
+
+
+# ---------------------------------------------------------------------------
+# Image liveness
+#
+# Everything above this line decides an image from the URL's *shape*:
+# declared width, a size token, the tag it came from. That is a good
+# guess and a terrible guarantee. A CDN can answer 403 to every referrer
+# it does not recognise — assets-cdn.kathmandupost.com does exactly that
+# — and the row was written anyway, so the feed carried a permanently
+# dead URL and the only thing that ever discovered it was a reader's
+# browser, on their screen, after the card had already rendered.
+#
+# So before a URL is stored it is asked to prove itself, with a request
+# built to look like the one the browser will make.
+# ---------------------------------------------------------------------------
+
+# Content types a browser <img> can paint. A 200 is not enough on its
+# own: a CDN under load happily answers 200 with an HTML error page or
+# a JSON manifest, and that is still a broken card.
+#
+# image/svg+xml is deliberately absent. It is renderable in principle,
+# but on these outlets an SVG in a news slot is a logo or an ad rather
+# than a photograph, and _looks_like_junk_image already targets that
+# family. Storing one would be a visually correct way to put furniture
+# on the front page.
+RENDERABLE_IMAGE_TYPES = frozenset(
+    {
+        "image/jpeg",
+        "image/pjpeg",
+        "image/png",
+        "image/apng",
+        "image/gif",
+        "image/webp",
+        "image/avif",
+        "image/bmp",
+        "image/x-icon",
+        "image/vnd.microsoft.icon",
+        "image/tiff",
+        "image/heic",
+        "image/heif",
+    }
+)
+
+# How many bytes to pull. Enough to tell a real image from an HTML
+# error page, small enough that proving every thumbnail in a poll costs
+# kilobytes rather than megabytes. Servers honouring the Range answer
+# with exactly this many bytes; the rest never read the body at all.
+IMAGE_PROBE_BYTES = 1024
+
+# A 200 whose first byte is '<' is an error page or a bot challenge, not
+# an image. Cloudflare in front of an origin that 403s is the common
+# source of one of these, and it is precisely the failure a Content-Type
+# check alone lets through.
+_MARKUP_SNIFF = re.compile(rb"^\s*(?:<!doctype|<html|<head|<body|<)", re.IGNORECASE)
+
+
+def _content_type(response: httpx.Response) -> str:
+    """The media type alone, lowercased, with any parameters dropped."""
+    raw = response.headers.get("content-type", "") or ""
+    return raw.split(";", 1)[0].strip().lower()
+
+
+class ImageValidator:
+    """
+    Proves an image URL returns an image, and remembers the answer.
+
+    Two decisions make this affordable inside a poll of 27 outlets:
+
+    - **The request mirrors the browser's.** A ranged GET rather than a
+      bare HEAD, because CDNs answer the two differently often enough
+      that a HEAD-based check produces confident false negatives on
+      perfectly good images. No Referer, matching the web card's
+      referrerPolicy="no-referrer", because several of these CDNs reject
+      a foreign Referer outright — sending one would prove the image
+      dead precisely when it is alive for readers.
+
+    - **Results are cached per URL.** Outlets reuse one image across
+      stories: a channel logo, a standing photo, an ad that escaped the
+      chrome filter. Without the cache each of those is re-requested for
+      every article that shares it, and the poll cost scales with
+      articles instead of with distinct images.
+
+    Never raises. An unreachable CDN is an image that does not get
+    stored, not a sync that dies.
+    """
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        timeout: float = 6.0,
+        cache_size: int = 2048,
+    ) -> None:
+        self._client = client
+        self._timeout = timeout
+        self._cache_size = max(cache_size, 1)
+        self._cache: OrderedDict[str, bool] = OrderedDict()
+        # Counted so a poll can report what validation actually cost.
+        self.requests = 0
+        self.cache_hits = 0
+
+    def cached(self, url: str) -> bool | None:
+        """The remembered verdict for a URL, or None if never probed."""
+        return self._cache.get(url)
+
+    async def is_live(self, url: str | None) -> bool:
+        """True only if this URL is proven to return a renderable image."""
+        if not url:
+            return False
+
+        remembered = self._cache.get(url)
+        if remembered is not None:
+            self._cache.move_to_end(url)
+            self.cache_hits += 1
+            return remembered
+
+        live = await self._probe(url)
+        self._cache[url] = live
+        # Bounded: a long-running poll must not accumulate verdicts for
+        # every URL it has ever seen. Oldest verdict goes first, which
+        # for a single poll is the right thing to forget.
+        while len(self._cache) > self._cache_size:
+            self._cache.popitem(last=False)
+        return live
+
+    async def _probe(self, url: str) -> bool:
+        self.requests += 1
+        try:
+            async with self._client.stream(
+                "GET",
+                url,
+                headers={
+                    "User-Agent": BROWSER_USER_AGENT,
+                    # What Chrome sends for an <img>. Asking for modern
+                    # formats lets a CDN that does content negotiation
+                    # answer with WebP, which is what the reader gets.
+                    "Accept": (
+                        "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
+                    ),
+                    # Cap the transfer. A server that ignores this sends
+                    # the whole file, so the body is read only to the
+                    # byte budget below and the connection is then
+                    # dropped unread.
+                    "Range": f"bytes=0-{IMAGE_PROBE_BYTES - 1}",
+                },
+                timeout=self._timeout,
+                follow_redirects=True,
+            ) as response:
+                # 206 is the correct answer to a ranged GET; 200 means
+                # the server ignored the Range and is sending the whole
+                # file. Both are a live image. Anything else — 403 from
+                # a referer sniff, 404, 429 — is not.
+                if response.status_code not in (200, 206):
+                    logger.debug(
+                        "image rejected: %s answered %s", url, response.status_code
+                    )
+                    return False
+
+                content_type = _content_type(response)
+                if content_type not in RENDERABLE_IMAGE_TYPES:
+                    logger.debug(
+                        "image rejected: %s served %r", url, content_type or "no type"
+                    )
+                    return False
+
+                declared = response.headers.get("content-length")
+                if declared is not None:
+                    try:
+                        if int(declared) <= 0:
+                            logger.debug("image rejected: %s served 0 bytes", url)
+                            return False
+                    except ValueError:
+                        pass
+
+                head = b""
+                async for chunk in response.aiter_bytes():
+                    head += chunk
+                    if len(head) >= IMAGE_PROBE_BYTES:
+                        break
+
+                if not head:
+                    logger.debug("image rejected: %s served an empty body", url)
+                    return False
+                if _MARKUP_SNIFF.match(head):
+                    logger.debug(
+                        "image rejected: %s served markup as %s", url, content_type
+                    )
+                    return False
+
+                return True
+
+        except Exception as exc:  # noqa: BLE001 — a dead image is not an error
+            logger.debug("image probe failed for %s: %s", url, exc)
+            return False
+
+
+async def resolve_live_image(
+    candidates: list[str],
+    validator: ImageValidator,
+    limit: int = 3,
+) -> str | None:
+    """
+    The first candidate that proves it loads, or None.
+
+    Walks the list in rank order and stops at the first success, so the
+    common case costs exactly one request per NEW image. `limit` caps
+    the damage when every candidate is dead: a pathological page cannot
+    turn one article into an unbounded burst of requests against a CDN
+    that is already refusing to serve us.
+    """
+    for url in candidates[: max(limit, 0)]:
+        if await validator.is_live(url):
+            return url
     return None
 
 

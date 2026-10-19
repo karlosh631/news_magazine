@@ -158,7 +158,19 @@ async function languageSelect({
 }): Promise<FeedResult> {
   const supabase = createPublicSupabaseClient();
 
-  const build = () => {
+  // `lang` is a parameter, not a captured constant. The thin-coverage
+  // fallback below has to ask for the OTHER language, and chaining a
+  // second `.eq("language", ...)` onto a builder that already carries
+  // one does not do that: postgrest-js `eq()` *appends* to the query
+  // string, so the request went out as
+  //
+  //   ...&language=eq.en&language=eq.ne
+  //
+  // which PostgREST ANDs into `language = 'en' AND language = 'ne'` —
+  // zero rows, every time. The fallback was silently dead, so a thin
+  // edition rendered as a nearly empty page of its own oldest stories
+  // instead of being topped up.
+  const build = (lang: "ne" | "en" = language) => {
     let query = supabase
       .from("articles")
       .select(
@@ -166,7 +178,7 @@ async function languageSelect({
       )
       .eq("status", "published")
       .is("duplicate_of", null)
-      .eq("language", language)
+      .eq("language", lang)
       .order("published_at", { ascending: false, nullsFirst: false })
       .limit(limit);
     if (categoryId) query = query.eq("primary_category_id", categoryId);
@@ -187,10 +199,7 @@ async function languageSelect({
   // showing a nearly empty page.
   if (rows.length < limit / 2) {
     const other = language === "en" ? "ne" : "en";
-    const { data: fallbackData } = await build()
-      .eq("language", other)
-      .order("published_at", { ascending: false, nullsFirst: false })
-      .limit(limit);
+    const { data: fallbackData } = await build(other);
 
     const seen = new Set(rows.map((row) => row.id));
     for (const row of (fallbackData ?? []) as unknown[]) {

@@ -135,7 +135,10 @@ export async function getReels(opts?: { limit?: number }): Promise<ReelFeedResul
     // share a published_at. Break the tie on when we ingested them, which
     // is monotonic, so the order never shuffles between renders.
     .order("ingested_at", { ascending: false })
-    .limit(limit);
+    // Over-fetched so that filtering out unplayable clips still fills
+    // the feed. Asking for exactly `limit` and then discarding rows
+    // would shorten the page every time a provider contributed a few.
+    .limit(limit * 2);
 
   if (error) {
     // Migration 0014 not applied yet. An empty feed and an explanation,
@@ -149,10 +152,35 @@ export async function getReels(opts?: { limit?: number }): Promise<ReelFeedResul
   }
 
   return {
-    reels: ((data ?? []) as unknown[]).map(mapReelRow),
+    reels: ((data ?? []) as unknown[])
+      .map(mapReelRow)
+      .filter(isPlayableReel)
+      .slice(0, limit),
     error: null,
     configured: true,
   };
+}
+
+/**
+ * Drop a clip no browser will decode.
+ *
+ * The ingestion pipeline refuses to STORE these, but rows written before
+ * that check existed are still in the table — and a `.ogv` renders as
+ * "Replay unavailable" with no sound, which reads as a broken feature
+ * rather than an old row. The feed is also asked for more rows than it
+ * shows, so dropping a few here still fills the screen.
+ *
+ * Kept deliberately narrow: only formats we know browsers refuse are
+ * excluded. Anything unrecognised passes, because a file whose type we
+ * failed to guess is far more likely to play than not.
+ */
+function isPlayableReel(reel: Reel): boolean {
+  const url = ((reel.video_url ?? "").toLowerCase().split("?")[0] ?? "");
+  // Ogg Video (Theora) plays in no current browser; .ogg is audio.
+  if (url.endsWith(".ogv") || url.endsWith(".ogg") || url.endsWith(".theora")) {
+    return false;
+  }
+  return true;
 }
 
 /** Map a raw `reels` row to the shape the feed renders. */

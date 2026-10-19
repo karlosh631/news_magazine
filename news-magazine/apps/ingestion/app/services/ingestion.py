@@ -624,6 +624,68 @@ async def _lookup_id_by_slug(db, slug: str) -> str | None:
     return None
 
 
+def _is_content_hash_conflict(exc: BaseException) -> bool:
+    """
+    True when the write was rejected because the content_hash is taken.
+
+    Matching on the constraint NAME rather than the SQLSTATE alone:
+    23505 is "unique_violation" for any constraint, and a slug collision
+    is a completely different situation that must NOT be recovered by
+    hash — it means the slug already exists, which is what the upsert was
+    supposed to handle.
+
+    The text is checked as well as the code, because supabase-py wraps
+    the PostgREST error differently depending on which layer raised it,
+    and not every path exposes `.code`.
+    """
+    text = " ".join(
+        str(part) for part in (
+            getattr(exc, "details", ""),
+            getattr(exc, "message", ""),
+            getattr(exc, "hint", ""),
+            exc,
+        )
+    ).lower()
+
+    names_content_hash = (
+        "content_hash" in text
+        or "articles_content_hash_idx" in text
+    )
+    if not names_content_hash:
+        return False
+
+    code = getattr(exc, "code", None)
+    return code in (None, "23505") or "duplicate key" in text
+
+
+async def _lookup_id_by_content_hash(db, content_hash: str) -> str | None:
+    """
+    Recover the id of the row already holding this content_hash.
+
+    The twin of _lookup_id_by_slug, for the other way an upsert can
+    succeed in the database and fail to report an id: the row is not
+    reachable by the slug we generated, because the story was first
+    stored under a different one.
+    """
+    try:
+        response = await db_call(
+            lambda: db.table("articles")
+            .select("id")
+            .eq("content_hash", content_hash)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        logger.debug("content_hash recovery lookup failed for %s", content_hash[:16])
+        return None
+
+    for row in response.data or []:
+        found = (row or {}).get("id")
+        if _is_uuid(found):
+            return found
+    return None
+
+
 async def _upsert_article_source(
     db, article_id, source_id, source_article_url, is_primary=False
 ) -> str:
@@ -845,10 +907,29 @@ async def store_article(
         )
     except Exception as exc:
         # articles_content_hash_idx is UNIQUE (0001) while we upsert on
-        # `slug`, so a story whose hash already exists under a different
-        # slug cannot be written here. That is a legitimate outcome — the
-        # story is already stored — so it is reported, not raised, and the
-        # caller skips the link instead of chasing a dead article id.
+        # `slug`. A story already stored under a different slug therefore
+        # cannot be written here — and returning None for it is worse than
+        # it looks: the caller counts the article as rejected AND skips
+        # the article_sources link, so that outlet's copy is orphaned and
+        # source_count never rises for it.
+        #
+        # The row exists. Recover its id by hash, exactly as the empty
+        # representation case below recovers by slug, and let the link be
+        # written so the story counts as a second sighting rather than a
+        # rejection.
+        if _is_content_hash_conflict(exc):
+            recovered = await _lookup_id_by_content_hash(db, content_hash)
+            if recovered:
+                logger.info(
+                    "articles upsert hit an existing content_hash for %r; "
+                    "linked to the stored row.",
+                    article.headline[:80],
+                )
+                return recovered
+
+        # Not a hash collision, or the row could not be found. Report it
+        # rather than raising: the caller uses the return value to decide
+        # whether it is safe to write the article_sources link.
         logger.info(
             "articles upsert failed for %r: %s",
             article.headline[:80], exc,

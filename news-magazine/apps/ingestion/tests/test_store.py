@@ -790,3 +790,76 @@ def test_a_tiny_poll_interval_is_raised_to_the_floor(monkeypatch):
     sched._register_reels_job()
 
     assert fake.added[0]["trigger"].interval.total_seconds() == sched.MIN_POLL_SECONDS
+
+
+def test_a_content_hash_collision_recovers_the_stored_row():
+    """
+    articles_content_hash_idx is UNIQUE while the upsert targets `slug`,
+    so a story already stored under a different slug cannot be written.
+
+    Returning None for that was quietly harmful: the caller counted the
+    article as rejected AND skipped the article_sources link, so the
+    outlet's copy was orphaned and source_count never rose for it. The
+    row exists — recover its id and let the link be written.
+    """
+    from app.services.ingestion import store_article
+
+    class HashConflict(Exception):
+        code = "23505"
+        details = "Key (content_hash)=(abc123) already exists."
+        message = ('duplicate key value violates unique constraint '
+                   '"articles_content_hash_idx"')
+
+    class FakeQuery:
+        def select(self, *a, **k):
+            return self
+
+        def upsert(self, row, **k):
+            raise HashConflict("boom")
+
+        def eq(self, column, value):
+            self._last = (column, value)
+            return self
+
+        def limit(self, n):
+            return self
+
+        def execute(self):
+            if getattr(self, "_last", None) == ("content_hash", "abc123"):
+                return type("R", (), {"data": [{"id": GOOD_UUID}]})()
+            return type("R", (), {"data": []})()
+
+    class FakeDB:
+        def table(self, name):
+            return FakeQuery()
+
+    class Article:
+        headline = "Headline"
+        language = "ne"
+        source_article_url = "https://example.com/a"
+        canonical_url = "https://example.com/a"
+        published_at = None
+        raw_metadata = {}
+
+    got = asyncio.run(
+        store_article(
+            db=FakeDB(), article=Article(), media={}, category_id=None,
+            source_row={"id": OTHER_UUID, "name": "Example", "sector": "national"},
+            content_hash="abc123", title_normalized="headline", excerpt=None,
+        )
+    )
+    assert got == GOOD_UUID, "a hash collision must recover the stored row, not drop it"
+
+
+def test_a_slug_collision_is_not_mistaken_for_a_hash_collision():
+    """
+    23505 for any OTHER constraint means the slug already exists — which
+    is what the upsert handles. Recovering that by hash would attach an
+    article_sources link to a row that is not this story.
+    """
+    from app.services.ingestion import _is_content_hash_conflict
+
+    slug_conflict = Exception(
+        'duplicate key value violates unique constraint "articles_slug_key"'
+    )
+    assert not _is_content_hash_conflict(slug_conflict)

@@ -609,6 +609,16 @@ IMAGE_REPAIR_WINDOW_HOURS = 48
 # fetches rather than the scan.
 BROKEN_IMAGE_REPAIR_LIMIT = 5
 
+# How many stored rows one poll will re-resolve the artwork of, under
+# today's rules, as a one-shot pass over rows the marker has not
+# visited yet.
+#
+# Each row is fetched exactly ONCE, ever — the marker stops it being
+# fetched again — so this number does not set a permanent load. It sets
+# how fast the backlog clears: at 5 per poll per source every five
+# minutes, a source's 48-hour backlog is covered in about an hour.
+IMAGE_REFRESH_LIMIT = 5
+
 # How many stored rows one poll will re-run the classifier over.
 #
 # Bounded for the same reason IMAGE_REPAIR_LIMIT is: this is a repair of
@@ -730,6 +740,167 @@ async def reclassify_recent(
 
     if changed:
         logger.info("Reclassified %d stored article(s) under today's rules.", changed)
+
+    return changed
+
+
+async def refresh_stale_images(
+    db,
+    source_id: Any,
+    client: httpx.AsyncClient,
+    validator: ImageValidator,
+    limit: int = IMAGE_REFRESH_LIMIT,
+    window_hours: int = IMAGE_REPAIR_WINDOW_HOURS,
+) -> int:
+    """
+    Re-resolve the artwork of rows that were stored under older rules.
+
+    THE PROBLEM
+    -----------
+    An article's image is write-once. `dedup.check` matches the row on
+    every later sighting and `continue`s before the media block, so the
+    extraction that picks the picture runs exactly once — on the poll
+    that first stores the story.
+
+    That means fixing the extraction cannot move a stored row. The
+    ranking that now prefers the outlet's own og:image over a
+    photograph scraped out of the page body applies to every NEW row
+    and to no old one. A story stored under the old rules keeps its
+    wrong picture for ever, and the reader sees a photograph of
+    foliage on an article about a traffic jam.
+
+    The other repair passes cannot help: `repair_missing_images` only
+    looks at rows with NO image, and `repair_broken_image_urls` only at
+    rows whose url is malformed. This one looks at rows whose image is
+    perfectly well-formed and simply WRONG, which is the only way to
+    tell.
+
+    ONE FETCH PER ROW, EVER
+    -----------------------
+    Without a marker, this pass would re-fetch the same rows on every
+    poll for ever, which is a permanent extra load on 27 publishers.
+    `articles.image_verified_at` (migration 0016) is that marker: the
+    pass selects rows where it is NULL and sets it afterwards, so each
+    row is visited exactly once.
+
+    The column is written HERE and nowhere else, deliberately. The
+    main store path does not touch it, so a database that has not had
+    0016 applied keeps working — the repair query fails, this pass
+    logs it and moves on, and nothing else is affected. A store path
+    that wrote the column would fail every article insert on an
+    unmigrated database, which would take the whole news pipeline down
+    over an optional repair.
+
+    WHAT IT CANNOT FIX
+    ------------------
+    A row whose stored image is a well-formed, loadable, WRONG picture
+    is the only thing this fixes, and it fixes it by asking the outlet
+    again. It cannot know the answer without asking.
+    """
+    since = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+
+    try:
+        response = await db_call(
+            lambda: db.table("articles")
+            .select(
+                "id, slug, headline, source_article_url, canonical_url, "
+                "featured_image_url, image_highres_url, image_verified_at"
+            )
+            .eq("status", "published")
+            .is_("duplicate_of", None)
+            .eq("source_id", source_id)
+            # The marker. A row verified by an earlier pass is never
+            # fetched again.
+            .is_("image_verified_at", None)
+            .gte("ingested_at", since.isoformat())
+            # Oldest first, so the bounded batch walks the window and
+            # the whole table is covered over a day rather than the
+            # same newest rows being re-checked for ever.
+            .order("ingested_at", desc=False)
+            .limit(max(limit, 0))
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001 — a repair must not fail a poll
+        # Almost always "column image_verified_at does not exist", i.e.
+        # migration 0016 has not been applied. That is not an error
+        # worth failing a poll over, and it must not be retried in a
+        # tight loop either — hence the message.
+        logger.warning(
+            "image refresh skipped (is migration 0016 applied?): %s", exc
+        )
+        return 0
+
+    rows = response.data or []
+    if not rows:
+        return 0
+
+    refreshed = 0
+    changed = 0
+
+    for row in rows:
+        url = row.get("canonical_url") or row.get("source_article_url")
+        if not url:
+            continue
+
+        try:
+            page = await extract_from_article(url, client)
+            if page.is_empty():
+                continue
+
+            live = await resolve_live_image(
+                candidate_images(None, page),
+                validator,
+                limit=IMAGE_PROBE_CANDIDATES,
+                declared=page.declared_images,
+            )
+            if not live:
+                # Could not prove a picture this time. Leave the row
+                # unverified so a later pass can try again, and do NOT
+                # overwrite what it already has.
+                continue
+
+            current = row.get("featured_image_url")
+            if current != live:
+                await db_call(
+                    lambda live=live, row=row: db.table("articles")
+                    .update(
+                        {
+                            "featured_image_url": live,
+                            "image_highres_url": live,
+                            "last_seen_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
+                    .eq("id", row["id"])
+                    .execute()
+                )
+                changed += 1
+                logger.info(
+                    "Corrected the image for %r: %s -> %s",
+                    (row.get("headline") or "?")[:80],
+                    (current or "?")[-60:],
+                    live[-60:],
+                )
+
+            # Verified either way: the row now holds today's answer.
+            await db_call(
+                lambda row=row: db.table("articles")
+                .update({"image_verified_at": datetime.now(timezone.utc).isoformat()})
+                .eq("id", row["id"])
+                .execute()
+            )
+            refreshed += 1
+        except Exception as exc:  # noqa: BLE001 — one bad row, not the sweep
+            logger.debug(
+                "image refresh failed for %r: %s",
+                (row.get("headline") or "?")[:80],
+                exc,
+            )
+
+    if refreshed:
+        logger.info(
+            "Refreshed %d stored image(s) under today's rules; %d corrected.",
+            refreshed, changed,
+        )
 
     return changed
 
@@ -1977,6 +2148,22 @@ async def run_source_sync(
             )
         except Exception:
             logger.exception("Broken-image repair pass failed; rows stay as they are")
+
+        # Rows whose image is well-formed and loadable but WRONG — the
+        # picture belongs to a different story. Nothing but asking the
+        # outlet again can tell, and the marker makes it one fetch per
+        # row rather than one per row per poll. Needs migration 0016;
+        # skips itself cleanly when it has not been applied.
+        try:
+            result.images_repaired += await refresh_stale_images(
+                db,
+                source_id,
+                media_http,
+                validator,
+                limit=IMAGE_REFRESH_LIMIT,
+            )
+        except Exception:
+            logger.exception("Image refresh pass failed; rows keep their image")
 
     result.dedup_detail = dedup.summary()
 

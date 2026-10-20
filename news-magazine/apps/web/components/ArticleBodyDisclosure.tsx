@@ -7,29 +7,36 @@ import { useEffect, useId, useState } from "react";
  *
  * ================================== WHAT TEXT THIS IS ==================================
  *
- * There is no full article body in the database. The `articles` table has
- * a `body_html` column, but nothing writes real body text into it:
+ * `text` is whichever of two things the row actually carries, and the
+ * page (app/article/[slug]/page.tsx) decides:
  *
- *   - apps/ingestion/app/services/ingestion.py:730 stores
- *     `build_safe_paragraph(excerpt)` — i.e. `body_html` is the excerpt
- *     wrapped in a single <p>, already truncated to MAX_EXCERPT_LENGTH
- *     by sanitizer.py. It is not the outlet's article.
- *   - `NormalizedArticle.full_body_html` (sources/base.py:42) is the
- *     field that would hold it, but it is gated on
- *     `source.republish_permission`, which is false for every seeded
- *     outlet, and generic_rss.py:909 and html_listing.py:439 both
- *     hard-set it to None.
- *   - sources/media.py:188-190 says so explicitly: "Plain article text,
- *     used only to feed the extractive summariser. Never stored as
- *     body_html — the outlet did not license its body."
+ *   1. The outlet's full article, as plain text, when that outlet's
+ *      publisher licensed republication. `articles.body_html` then holds
+ *      several <p> blocks, because `_build_body()` in
+ *      apps/ingestion/app/services/ingestion.py rebuilds them from
+ *      `NormalizedArticle.full_body_html`, which
+ *      apps/ingestion/app/sources/body.py fills from the page the media
+ *      pass had already fetched. Real paragraphs, real length.
  *
- * So `text` here is `excerptWithoutOverlap(article.excerpt, points)` —
- * the excerpt, minus whatever the four points already say. It is the
- * most prose the row carries, and the "Read the full story on <outlet>"
- * button below it remains the route to anything longer.
+ *   2. Otherwise a single-paragraph excerpt — and note NOT the whole
+ *      excerpt: `excerptWithoutOverlap()` has already subtracted every
+ *      sentence the four summary points are built from, precisely so the
+ *      page does not state itself twice. What survives is the leftover
+ *      prose, which on a short feed excerpt is often one or two lines.
  *
- * The control is therefore labelled "Read more", not "Show full news":
- * the latter would promise text this page does not have.
+ * Case 2 is the common one. `sources.republish_permission` is false for
+ * every seeded outlet, and it is a licensing decision the code refuses
+ * to guess, so nothing here can widen case 2. The "Read the full story
+ * on <outlet>" button below is the route to the rest of the article.
+ *
+ * Which is why this component no longer draws a control that reveals
+ * nothing. It used to render the button for any non-empty `text`, so on
+ * a case-2 article the reader got a two-line summary, a "Read more"
+ * button, and — on clicking it — the identical two lines, because the
+ * collapsed box was taller than the text. The chevron rotated, so it
+ * looked like it had worked. `overflowsCollapsedClamp()` below is the
+ * check that was written for exactly this and never called; it is the
+ * only thing standing between the reader and a button that lies.
  */
 
 /**
@@ -74,7 +81,8 @@ export function ArticleBodyDisclosure({
   text,
   language,
 }: {
-  /** excerptWithoutOverlap(article.excerpt, points). Never null here. */
+  /** The outlet's full body where licensed, else the excerpt minus the
+   *  sentences the summary points already carry. Never null here. */
   text: string;
   /** The language the outlet published in, e.g. "ne" or "en". */
   language?: string | null;
@@ -98,16 +106,25 @@ export function ArticleBodyDisclosure({
 
   const copy = labels[siteLanguage];
   /*
-    The control is drawn whenever there is more text than the collapsed
-    box shows, OR the text is long enough to be worth reading closely.
+    Only draw the control when there is genuinely something under it.
 
-    It used to appear only when the excerpt overflowed three lines, so a
-    story with a short excerpt rendered as a plain paragraph with no
-    control at all — which read as "this article has nothing more" when
-    in fact the reader wanted the whole of what IS there. Any text worth
-    a disclosure gets one.
+    This was `text.trim().length > 0` — a button on every article, for
+    any text at all. The collapsed box is three lines tall, so on the
+    many articles whose `text` is one or two lines the button sat below
+    a box that was already showing everything: clicking it flipped the
+    chevron, changed the label to "Show less", and revealed exactly the
+    same words. That is the bug this component's own comment block used
+    to explain away instead of fixing, and the estimate written for it
+    sat unused two functions above.
+
+    So: no text, or text that already fits in the collapsed box, gets a
+    plain paragraph and no control. A licensed full body is thousands of
+    characters and collapses correctly; a one-line excerpt simply is not
+    a disclosure, and the "Read the full story on <outlet>" link below is
+    the honest route to the rest.
   */
-  const collapsible = text.trim().length > 0;
+  const collapsible =
+    text.trim().length > 0 && overflowsCollapsedClamp(text, language);
 
   // Blank-line separated blocks. A single-paragraph excerpt yields one
   // block and renders exactly as it always did.
@@ -134,10 +151,20 @@ export function ArticleBodyDisclosure({
     "text-base leading-8 text-gray-800 dark:text-gray-200";
 
   if (!collapsible) {
+    // Nothing is hidden, so there is nothing to disclose. Render the
+    // blocks as they came rather than welding them into one <p>: a
+    // licensed body can legitimately be short enough to fit three lines
+    // across two paragraphs, and joining those loses the paragraph the
+    // outlet wrote. A one-paragraph excerpt yields one <p> here and
+    // looks exactly as it always did.
     return (
-      <p lang={language ?? undefined} className={`mt-6 ${bodyClass}`}>
-        {text}
-      </p>
+      <div className={`mt-6 space-y-4 ${bodyClass}`}>
+        {paragraphs.map((paragraph, index) => (
+          <p key={index} lang={language ?? undefined} className="whitespace-pre-line">
+            {paragraph}
+          </p>
+        ))}
+      </div>
     );
   }
 

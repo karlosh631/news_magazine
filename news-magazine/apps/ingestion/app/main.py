@@ -32,7 +32,7 @@ from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.database import get_db
-from app.services.adapters import available_adapters, describe
+from app.services.adapters import available_adapters, body_status, describe
 from app.services.ingestion import prune_old_articles, run_source_sync
 from app.services.search_resurrect import search_with_resurrection
 from app.workers import scheduler as scheduler_module
@@ -270,6 +270,11 @@ async def sources_health(x_ingestion_secret: str | None = Header(default=None)):
             "status": status,
             "consecutive_failures": source.get("consecutive_failures", 0),
             "last_success_at": source.get("last_success_at"),
+            # Whether this outlet's articles carry a full body, and if
+            # not which gate blocks it. A source can be HEALTHY here and
+            # still publish excerpt-only articles, and that used to be
+            # indistinguishable from a source that is working.
+            "body_status": body_status(source),
             "last_sync": latest_log,
         })
 

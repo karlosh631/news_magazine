@@ -114,7 +114,7 @@ class Settings(BaseSettings):
     max_image_candidates_per_article: int = 3
 
     # ---------------------------------------------------------
-    # Full-text body storage (opt-in, licence-gated)
+    # Full-text body storage (licence-gated)
     #
     # `sources.republish_permission` is the operator's per-outlet
     # decision that a publisher's body may be republished. The
@@ -126,20 +126,34 @@ class Settings(BaseSettings):
     #
     # ENRICH_BODY is free. It reuses the page media enrichment already
     # fetches for og:image / video / audio, and takes the plain text
-    # trafilatura already pulled off it. ZERO extra requests.
+    # trafilatura already pulled off it. ZERO extra requests — which is
+    # the whole reason it defaults to True. It was False, which made
+    # the one path that costs nothing the one path nobody used: the
+    # producer in app/sources/body.py was wired into the store path and
+    # returned before doing anything, so an outlet with a granted
+    # licence still produced an excerpt-only article.
     #
-    # FETCH_FULL_TEXT is the knob that costs. It pays one page request
-    # per article for stories whose page was not being fetched anyway
-    # — the feed already carried an image, so media enrichment had no
-    # reason to open the page. Across 27 publishers that is one
-    # request per story per poll, which is a crawl rather than a poll
-    # and is how an operator's IP gets blocked. It is a separate flag
-    # so nobody turns body storage on by accident and acquires it.
+    # FETCH_FULL_TEXT is the knob that costs, and stays False. It pays
+    # one page request per article for stories whose page was not being
+    # fetched anyway — the feed already carried an image, so media
+    # enrichment had no reason to open the page. Across 27 publishers
+    # that is one request per story per poll, which is a crawl rather
+    # than a poll and is how an operator's IP gets blocked. It is a
+    # separate flag so nobody turns body storage on by accident and
+    # acquires it.
     #
-    # Both do nothing at all without republish_permission on the source
-    # row: the licence is checked before any request is made.
+    # Turning ENRICH_BODY on does not by itself make any article longer.
+    # Both flags do nothing at all without republish_permission on the
+    # source row, and that column is False for every seeded outlet
+    # (migration 0001 defaults it false, 0008 seeds it false). So this
+    # is necessary, not sufficient: until an operator flips that column
+    # for an outlet whose publisher licenses republication, that
+    # outlet's articles carry a summary and nothing more, and no flag
+    # in this file can change that. GET /api/sources reports
+    # `body_status` per outlet so the gap is visible rather than
+    # silent.
     # ---------------------------------------------------------
-    enrich_body: bool = False
+    enrich_body: bool = True
     fetch_full_text: bool = False
 
     # ---------------------------------------------------------

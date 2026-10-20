@@ -693,3 +693,163 @@ def test_input_that_is_not_an_article_becomes_nothing(value):
     """
     assert to_plain_paragraphs(value) is None
     assert body_text_from_extracted(ExtractedMedia(article_text=value)) is None
+
+# =============================================================
+# The gate is reported, not just enforced
+# =============================================================
+
+def _stub_settings(monkeypatch, enrich_body=True, fetch_full_text=False):
+    """
+    Point adapters.body_status at a settings stand-in.
+
+    It reads get_settings() itself rather than taking an argument, so
+    the seam is the module reference. Monkeypatched rather than built:
+    a real Settings needs SUPABASE_URL and two service keys, and this
+    decision must be inspectable without any credentials.
+    """
+    from types import SimpleNamespace
+
+    import app.services.adapters as adapters
+
+    monkeypatch.setattr(
+        adapters,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enrich_body=enrich_body, fetch_full_text=fetch_full_text
+        ),
+    )
+
+
+def test_an_unlicensed_outlet_reports_the_licence_as_the_reason(monkeypatch):
+    """
+    With the free path on and permission off, the answer must be the
+    licence — not a flag the operator could have flipped instead.
+
+    "no_licence" leads the ordering in body_status() precisely because
+    it is the gate that no setting in config.py can open, and telling
+    an operator to look anywhere else wastes their afternoon.
+    """
+    _stub_settings(monkeypatch)
+    from app.services.adapters import body_status
+
+    assert body_status({"republish_permission": False}) == "no_licence"
+    # A row that never carried the column must read as unlicensed, not
+    # as "probably fine" — the same fail-closed rule permits_full_text
+    # applies to the report it feeds.
+    assert body_status({}) == "no_licence"
+
+
+def test_a_licensed_outlet_reports_free_path_off_before_anything_else(monkeypatch):
+    """
+    With permission granted, what remains is settings. ENRICH_BODY costs
+    nothing, so it is the next thing to look at.
+    """
+    _stub_settings(monkeypatch, enrich_body=False, fetch_full_text=True)
+    from app.services.adapters import body_status
+
+    assert (
+        body_status({"republish_permission": True}) == "free_path_off"
+    )
+
+
+def test_a_licensed_outlet_on_the_free_path_needs_no_second_request(monkeypatch):
+    """
+    Licence granted and the free path on: bodies appear, but only for
+    stories whose page was already being fetched for media. That is
+    "fetch_only", not "ready" — calling it ready would overstate what
+    FETCH_FULL_TEXT=false actually delivers.
+    """
+    _stub_settings(monkeypatch, enrich_body=True, fetch_full_text=False)
+    from app.services.adapters import body_status
+
+    assert body_status({"republish_permission": True}) == "fetch_only"
+
+
+def test_only_the_paid_path_on_reaches_ready(monkeypatch):
+    _stub_settings(monkeypatch, enrich_body=True, fetch_full_text=True)
+    from app.services.adapters import body_status
+
+    assert body_status({"republish_permission": True}) == "ready"
+
+
+# =============================================================
+# End to end: producer -> stored column
+# =============================================================
+
+def test_a_licensed_article_stores_several_paragraphs_not_the_excerpt():
+    """
+    The whole chain, at the two ends that matter.
+
+    attach_full_body() writes the field and _build_body() reads it back
+    into `articles.body_html`. The web app decides what to render by
+    paragraph count (app/article/[slug]/page.tsx): a licensed body is
+    several <p>, an excerpt is exactly one, and only the former reaches
+    the reader as a full article.
+
+    So the assertion that matters is the PARAGRAPH COUNT, not that
+    body_html is non-empty — a one-paragraph body_html is a failure
+    that still "has a body", and it is what the article page renders
+    as the excerpt it already had.
+    """
+    import re
+
+    from types import SimpleNamespace
+
+    sentence = (
+        "The cabinet approved the bill on Tuesday after three hours of "
+        "debate in the lower house, and the opposition walked out."
+    )
+    extracted = ExtractedMedia(article_text="\n\n".join([sentence] * 6))
+
+    article = SimpleNamespace(
+        source_article_url="https://example.com/story",
+        headline="Cabinet approves bill",
+        full_body_html=None,
+        raw_metadata={},
+    )
+
+    assert asyncio.run(
+        attach_full_body(
+            article, {"republish_permission": True}, settings(), extracted=extracted
+        )
+    )
+
+    stored = _build_body(article, "A short feed excerpt.")
+    assert stored is not None
+    assert len(re.findall(r"<p>", stored)) == 6
+    # Plain text, escaped — the publisher's markup never reaches here.
+    assert "<script" not in stored
+
+
+def test_an_unlicensed_article_still_stores_exactly_one_paragraph():
+    """
+    The counterpart, and the licence guarantee: same page in hand, same
+    settings, no permission -> the column holds the single-paragraph
+    excerpt, exactly as it always has. Nothing about flipping the
+    production flags may weaken this.
+    """
+    import re
+
+    from types import SimpleNamespace
+
+    extracted = ExtractedMedia(
+        article_text="\n\n".join(["A sentence of the article body."] * 6)
+    )
+
+    article = SimpleNamespace(
+        source_article_url="https://example.com/story",
+        headline="Cabinet approves bill",
+        full_body_html=None,
+        raw_metadata={},
+    )
+
+    assert not asyncio.run(
+        attach_full_body(
+            article, {"republish_permission": False}, settings(), extracted=extracted
+        )
+    )
+    assert article.full_body_html is None
+
+    stored = _build_body(article, "A short feed excerpt.")
+    assert stored is not None
+    assert len(re.findall(r"<p>", stored)) == 1

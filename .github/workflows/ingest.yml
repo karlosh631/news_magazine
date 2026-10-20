@@ -1,0 +1,221 @@
+# =============================================================
+# Scheduled news ingestion
+#
+# Runs the Python ingestion worker on a cron so that pushing to git is
+# all that is needed to keep the deployed site fresh.
+#
+# Why this exists: the ingestion worker is a long-lived process. Vercel
+# runs serverless functions that are killed after ~10s of CPU, so it
+# cannot host the scraper. This workflow is the zero-config fallback —
+# the same code also runs as a proper always-on service on Render/Fly
+# for lower latency (see README "Deployment").
+#
+# What it does each run:
+#   - installs the ingestion dependencies
+#   - runs one full sync pass across every enabled source
+#   - prunes anything past the 48h retention window
+#   - uploads the log, and fails the run if sources are erroring
+# =============================================================
+
+name: Ingest news
+
+on:
+  schedule:
+    # Every 5 minutes — GitHub's shortest supported cron interval.
+    #
+    # 30 seconds is not available here on two counts. GitHub does not
+    # schedule below 5 minutes, and a 30-second sweep would put ~50
+    # requests a minute into 25 news publishers (versus 1.2/min today),
+    # which is not scraping, it is a load test. Publishers rate-limit or
+    # block on exactly that pattern, and the ones already refusing us
+    # outright would stop responding entirely.
+    #
+    # It would also buy nothing: outlets publish every few minutes, and
+    # each source already polls on its own interval (the fastest is 3
+    # minutes). Sweeping the whole set more often just re-fetches the
+    # same feed and finds the same articles.
+    #
+    # For genuinely tighter freshness, run `python -m app.worker` as an
+    # always-on service (Render/Fly/Railway) instead — it has no
+    # scheduler floor at all. See README "Deployment".
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+# Never run two syncs at once — they would race on the same rows and
+# waste requests on every outlet.
+concurrency:
+  group: ingest-news
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # =============================================================
+  # Keep the Render worker awake.
+  #
+  # Render's free instance suspends itself after a period with no
+  # inbound traffic, and a suspended worker stops fetching news
+  # entirely. GitHub Actions is the thing that never sleeps, so it
+  # pings the service every 5 minutes.
+  #
+  # IMPORTANT — this only helps ONCE the service is a Background
+  # Worker. `python -m app.worker` binds no port, so as a Web Service
+  # Render's health check cannot find a port, sends SIGTERM and
+  # restarts it every ~15 minutes regardless of how much traffic it
+  # receives. No amount of pinging fixes that; only the service type
+  # does. Settings -> Service Type -> Background Worker.
+  #
+  # Deliberately `continue-on-error`: this is a courtesy ping, and a
+  # sleeping worker must never be able to block the sync job below.
+  # =============================================================
+  keep-warm:
+    name: Keep worker awake
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+
+    steps:
+      - name: Ping the ingestion API
+        env:
+          INGESTION_URL: ${{ secrets.INGESTION_URL }}
+        run: |
+          set -uo pipefail
+          if [ -z "${INGESTION_URL:-}" ]; then
+            echo "INGESTION_URL is not set; skipping keep-warm."
+            echo "Set it to your Render URL to keep the free instance awake."
+            exit 0
+          fi
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+            "${INGESTION_URL%/}/api/health" || echo 000)
+          if [ "$code" = "200" ]; then
+            echo "Worker is awake (200)."
+          else
+            echo "Worker did not answer (${code}). If it is configured as a"
+            echo "Web Service it is being restarted every few minutes for"
+            echo "having no port; switch it to Background Worker."
+          fi
+
+  sync:
+    name: Sync sources
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: news-magazine/apps/ingestion/requirements.txt
+
+      - name: Install ingestion dependencies
+        working-directory: news-magazine/apps/ingestion
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Write .env from repository secrets
+        working-directory: news-magazine/apps/ingestion
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          INGESTION_SECRET: ${{ secrets.INGESTION_SECRET }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # Optional. The reels category works without them — Wikimedia
+          # Commons needs no key — but these are what make it deep and
+          # genuinely always-new, and what make the clips playable on
+          # iPhone. Set them as repository secrets to enable.
+          PEXELS_API_KEYS: ${{ secrets.PEXELS_API_KEYS }}
+          PIXABAY_API_KEYS: ${{ secrets.PIXABAY_API_KEYS }}
+          YOUTUBE_API_KEYS: ${{ secrets.YOUTUBE_API_KEYS }}
+          DEFAULT_REQUEST_TIMEOUT_SECONDS: "20"
+        run: |
+          set -euo pipefail
+          missing=0
+          for var in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY INGESTION_SECRET CRON_SECRET; do
+            if [ -z "${!var:-}" ]; then
+              echo "::error::Missing secret: $var"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Add these under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          {
+            echo "SUPABASE_URL=$SUPABASE_URL"
+            echo "SUPABASE_SERVICE_ROLE_KEY=$SUPABASE_SERVICE_ROLE_KEY"
+            echo "INGESTION_SECRET=$INGESTION_SECRET"
+            echo "CRON_SECRET=$CRON_SECRET"
+            echo "GEMINI_API_KEY=$GEMINI_API_KEY"
+            echo "SCHEDULER_ENABLED=false"
+            echo "RETENTION_HOURS=48"
+            echo "MAX_ARTICLE_ROWS=10000"
+            echo "DEDUP_WINDOW_HOURS=12"
+            echo "FUZZY_TITLE_THRESHOLD=78"
+            echo "MIN_POLL_SECONDS=60"
+            # ENABLE_GEMINI_SUMMARY has no caller in services/ingestion.py
+            # (synthesize_summary is unwired), so it is left false rather
+            # than implying a behaviour that does not exist.
+            echo "ENABLE_GEMINI_SUMMARY=false"
+            # Safe to enable: the model only returns an ordering of the
+            # four already-extracted points, at temperature 0.0, and
+            # anything not verbatim in that list is discarded.
+            echo "ENABLE_GEMINI_RANKING=true"
+            # Reels, on the same five-minute cron as the news.
+            #
+            # The reels category used to be fetched ONLY by the
+            # long-lived worker's scheduler, so when the worker was
+            # asleep or restarting the category froze while the news
+            # feed kept moving — which is exactly what it looked like
+            # from the outside: news minutes old, reels a day old.
+            # Commons needs no key at all, so this is safe to enable
+            # unconditionally; the keyed providers below simply log
+            # SKIPPED when their key is absent.
+            echo "ENABLE_REELS=true"
+            echo "REELS_POLL_SECONDS=300"
+            echo "REELS_PER_SOURCE=30"
+            # The optional stock providers. Empty is fine — the keyless
+            # one still fills the category.
+            echo "PEXELS_API_KEYS=${PEXELS_API_KEYS:-}"
+            echo "PIXABAY_API_KEYS=${PIXABAY_API_KEYS:-}"
+            echo "YOUTUBE_API_KEYS=${YOUTUBE_API_KEYS:-}"
+            echo "LOG_LEVEL=INFO"
+            echo "LOG_FORMAT=console"
+          } > .env
+
+      - name: Run one sync pass
+        working-directory: news-magazine/apps/ingestion
+        run: |
+          python -m scripts.sync_once 2>&1 | tee sync.log
+
+      - name: Upload run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ingest-log-${{ github.run_number }}
+          path: news-magazine/apps/ingestion/sync.log
+          retention-days: 7
+
+      - name: Fail if every source errored
+        working-directory: news-magazine/apps/ingestion
+        run: |
+          set -euo pipefail
+          # A run where nothing could be fetched is almost always a bad
+          # secret or an expired one, and should be loud rather than a
+          # silently green check that left the site stale.
+          if grep -q "SOURCES_OK=0" sync.log; then
+            echo "::error::No source was successfully synced. Check the secrets and the log artifact."
+            exit 1
+          fi
+          grep -E "SOURCES_OK=" sync.log || true
+          # Reels are reported but never fatal: a reels failure must not
+          # turn a green news run red, and a green news run must not be
+          # read as "reels worked too". A warning is the honest middle.
+          if grep -q "REELS_OK=0" sync.log; then
+            echo "::warning::The reels pass failed this run. The news sync succeeded; /category/reels may be stale."
+          fi
+          grep -E "REELS_OK=" sync.log || true

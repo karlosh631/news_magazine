@@ -314,6 +314,25 @@ export function Header({ categories }: { categories: NavCategory[] }) {
             <input
               ref={searchInputRef}
               type="search"
+              /*
+                id and name, so the field is a form control the browser
+                can label, autofill and restore rather than an
+                unlabelled box. Lighthouse flags a search input with
+                neither, and it is right to: a reader who has typed a
+                search once should not have to type it again after a
+                reload, and a password manager cannot offer to fill a
+                field it cannot name.
+
+                The two inputs are the same control in two layouts, so
+                they get the same id — only one is ever in the DOM's
+                accessibility tree at a time (the other is behind
+                `md:hidden` or `hidden md:block`), and the mobile one
+                is only mounted when the menu is open.
+              */
+              id="header-search"
+              name="q"
+              autoComplete="off"
+              aria-label="Search news"
               placeholder="Search news..."
               value={searchQuery}
               onChange={(e) => {
@@ -367,6 +386,18 @@ export function Header({ categories }: { categories: NavCategory[] }) {
           <form onSubmit={handleSearchSubmit} className="mb-1">
             <input
               type="search"
+              /* The same control as the desktop one, in the mobile
+               * menu. A DIFFERENT id, deliberately: on a phone the
+               * desktop form is still in the DOM (hidden by CSS, not
+               * unmounted) and this one is mounted when the menu
+               * opens, so two elements sharing an id would both be in
+               * the accessibility tree at once. Same `name` is fine —
+               * that is a form-field name, and only one of the two is
+               * ever submitted. */
+              id="header-search-mobile"
+              name="q"
+              autoComplete="off"
+              aria-label="Search news"
               placeholder="Search news..."
               value={searchQuery}
               onChange={(e) => {

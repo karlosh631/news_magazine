@@ -224,3 +224,161 @@ class TestDeterminism:
         assert a == b, (
             f"tie resolved differently by declaration order: {a!r} vs {b!r}"
         )
+
+
+# =============================================================
+# THE WRITE-ONCE TRAP
+# =============================================================
+#
+# `primary_category_id` is assigned inside the per-article loop, AFTER
+# `dedup.check`. Any row the deduplicator already knows is `continue`d
+# before that line is reached, so the field is written exactly once — on
+# the poll that first stores the story.
+#
+# The consequence is not subtle: fixing categorizer.py changes nothing
+# about a single row already in the database. A misfiled article stays
+# misfiled for ever. `/category/business` was observed serving disaster
+# and health stories whose rows carry a category assigned by rules that
+# no longer exist.
+#
+# `reclassify_recent` is what breaks that loop.
+
+
+class _FakeQuery:
+    def __init__(self, rows, updates):
+        self._rows = rows
+        self._updates = updates
+        self._filters: list = []
+
+    def _chain(self, *_a, **_k):
+        return self
+
+    select = eq = is_ = gte = order = _chain
+
+    def limit(self, n):
+        self._rows = self._rows[:n]
+        return self
+
+    def update(self, values):
+        return _FakeUpdate(self._updates, values)
+
+    def execute(self):
+        return type("R", (), {"data": self._rows, "error": None})()
+
+
+class _FakeUpdate:
+    def __init__(self, sink, values):
+        self._sink = sink
+        self._values = values
+
+    def eq(self, *_a, **_k):
+        return self
+
+    def execute(self):
+        self._sink.append(self._values)
+        return type("R", (), {"data": None, "error": None})()
+
+
+class _FakeDb:
+    def __init__(self, rows):
+        self._rows = rows
+        self.updates: list[dict] = []
+
+    def table(self, _name):
+        return _FakeQuery(self._rows, self.updates)
+
+
+def _run(coro):
+    import asyncio
+
+    return asyncio.run(coro)
+
+
+def test_reclassify_moves_a_misfiled_row_onto_todays_rules():
+    """
+    The article is filed under business; today's rules say it has no
+    business keyword at all, so it belongs to national.
+
+    Nothing else would ever move it — every future sighting of this
+    story hits dedup.check and `continue`s before the category block.
+    """
+    from app.services.ingestion import reclassify_recent
+
+    categorizer = Categorizer(SLUG_TO_ID)
+    db = _FakeDb(
+        [
+            {
+                "id": "22222222-2222-2222-2222-222222222222",
+                "headline": "विपदका २४ घटनामा एकको मृत्यु",
+                "excerpt": "विभिन्न जिल्लामा विपद घटनाको विवरण।",
+                "primary_category_id": "BUS",
+            }
+        ]
+    )
+
+    changed = _run(
+        reclassify_recent(db, "src-1", categorizer, "NAT")
+    )
+
+    assert changed == 1
+    assert db.updates == [{"primary_category_id": "NAT"}], (
+        "a row with no category signal must fall back to national, not keep "
+        "whatever it was first filed as"
+    )
+
+
+def test_reclassify_writes_nothing_when_the_rules_still_agree():
+    """
+    The steady state. An UPDATE on every row of the window would be pure
+    write amplification for no change, on every poll, for ever.
+    """
+    from app.services.ingestion import reclassify_recent
+
+    categorizer = Categorizer(SLUG_TO_ID)
+    db = _FakeDb(
+        [
+            {
+                "id": "33333333-3333-3333-3333-333333333333",
+                "headline": "प्रधानमन्त्रीले भारत भ्रमण",
+                "excerpt": None,
+                "primary_category_id": "POL",
+            }
+        ]
+    )
+
+    changed = _run(reclassify_recent(db, "src-1", categorizer, "NAT"))
+
+    assert changed == 0
+    assert db.updates == []
+
+
+def test_reclassify_survives_a_row_it_cannot_classify():
+    """
+    One unparseable row must not abandon the rest of the batch, or a
+    single bad headline would freeze reclassification for the whole
+    source until it aged out of the window.
+
+    The first row has no headline and no excerpt, so the classifier has
+    nothing to go on and it falls back to national. That IS a change —
+    it was filed as business, which nothing supports — so both rows
+    move. What matters is that the second row was still processed.
+    """
+    from app.services.ingestion import reclassify_recent
+
+    categorizer = Categorizer(SLUG_TO_ID)
+    db = _FakeDb(
+        [
+            {"id": "a", "headline": None, "excerpt": None,
+             "primary_category_id": "BUS"},
+            {"id": "b", "headline": "नेपालको शेयर बजार उकालो",
+             "excerpt": None, "primary_category_id": "NAT"},
+        ]
+    )
+
+    changed = _run(reclassify_recent(db, "src-1", categorizer, "NAT"))
+
+    assert changed == 2
+    assert db.updates == [
+        {"primary_category_id": "NAT"},  # no signal -> national fallback
+        {"primary_category_id": "BUS"},  # the second row still got through
+    ], "the second row was abandoned after the first"

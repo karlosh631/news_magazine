@@ -292,6 +292,10 @@ class IngestionResult:
     # one found for them by repair_missing_images. The counterpart to
     # images_dropped: without it, a dropped image is permanent.
     images_repaired: int = 0
+    # Rows whose primary_category_id was rewritten by reclassify_recent.
+    # Non-zero on a steady-state deployment means the category rules
+    # changed and the stored rows are catching up.
+    recategorized: int = 0
     dedup_detail: str = ""
     error_details: list[dict] = field(default_factory=list)
 
@@ -307,6 +311,7 @@ class IngestionResult:
             "links_skipped": self.links_skipped,
             "images_dropped": self.images_dropped,
             "images_repaired": self.images_repaired,
+            "recategorized": self.recategorized,
             "dedup_detail": self.dedup_detail,
         }
 
@@ -593,12 +598,135 @@ IMAGE_REPAIR_LIMIT = 5
 # `dropImageless` in apps/web/lib/feed-images.ts.
 IMAGE_REPAIR_WINDOW_HOURS = 48
 
+# How many stored rows one poll will re-run the classifier over.
+#
+# Bounded for the same reason IMAGE_REPAIR_LIMIT is: this is a repair of
+# work an earlier poll already did, so it must not grow into a re-scan of
+# the whole table. It costs no network at all — the classifier is pure
+# string matching over the headline and excerpt already in the row — so
+# this number is about how much UPDATE traffic to spend, not how many
+# requests to make.
+RECLASSIFY_LIMIT = 40
+
+# Only re-classify rows ingested within this window. A story older than
+# this was categorised by a rule set that no longer exists; re-running
+# today's rules over it is a judgement call about the past, and the
+# newest rows are the ones readers actually see on the category pages.
+RECLASSIFY_WINDOW_HOURS = 72
+
+
+async def reclassify_recent(
+    db,
+    source_id: Any,
+    categorizer: Categorizer,
+    fallback_category_id: str | None,
+    limit: int = RECLASSIFY_LIMIT,
+    window_hours: int = RECLASSIFY_WINDOW_HOURS,
+) -> int:
+    """
+    Re-run today's classifier over recently stored rows.
+
+    WHY THIS HAS TO EXIST
+    ---------------------
+    `primary_category_id` is written once, on the poll that first stores
+    an article, and never again. Every later sighting of the same story
+    matches `dedup.check` and `continue`s — before the category block at
+    the bottom of the loop is ever reached. So the categoriser is
+    write-once for the lifetime of a row, and fixing the classifier
+    changes nothing about the rows already in the database.
+
+    That is not hypothetical. `/category/business` was observed serving
+    disaster, childbirth and transport stories. The classifier was not
+    at fault — run against the old code, all three returned None, which
+    the caller correctly turns into national. Those rows carry a
+    category assigned before the current rules existed, and no amount of
+    correctness in `categorizer.py` will move them.
+
+    The same write-once property is why a misfiled article never
+    self-heals, exactly as a missing image used not to: the field is
+    only ever written on first insert, so an error made once is permanent.
+
+    WHY IT IS SAFE TO RE-RUN THE CLASSIFIER
+    ---------------------------------------
+    It is pure string matching over the headline and excerpt ALREADY in
+    the row. No request is made, no page is fetched, no outlet is
+    touched. The only cost is an UPDATE, which is why this is bounded
+    and windowed like the artwork repair beside it.
+
+    WHY IT IS SCOPED TO THE POLLING SOURCE
+    --------------------------------------
+    With ~27 independent pollers, an unscoped sweep would have every one
+    of them re-classifying the same rows. Same reasoning, same guard, as
+    `repair_missing_images`.
+    """
+    since = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+
+    try:
+        response = await db_call(
+            lambda: db.table("articles")
+            .select("id, headline, excerpt, primary_category_id")
+            .eq("status", "published")
+            .is_("duplicate_of", None)
+            .eq("source_id", source_id)
+            .gte("ingested_at", since.isoformat())
+            # Oldest first, so the bounded batch covers the oldest
+            # un-repaired rows and the window advances as they age out,
+            # rather than re-doing the newest rows every single pass.
+            .order("ingested_at", desc=False)
+            .limit(max(limit, 0))
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001 — a repair must not fail a poll
+        logger.warning("reclassify could not read candidate rows: %s", exc)
+        return 0
+
+    rows = response.data or []
+    if not rows:
+        return 0
+
+    changed = 0
+
+    for row in rows:
+        try:
+            fresh = categorizer.classify(row.get("headline"), row.get("excerpt"))
+            category_id = fresh or fallback_category_id
+
+            # No opinion, or the same answer. Nothing to write, and an
+            # UPDATE on every row of the window would be pure write
+            # amplification for no change.
+            if category_id is None or category_id == row.get("primary_category_id"):
+                continue
+
+            await db_call(
+                lambda category_id=category_id, row=row: db.table("articles")
+                .update({"primary_category_id": category_id})
+                .eq("id", row["id"])
+                .execute()
+            )
+            changed += 1
+            logger.info(
+                "Reclassified %r: %s -> %s",
+                (row.get("headline") or "?")[:80],
+                row.get("primary_category_id"),
+                category_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — one bad row, not the sweep
+            logger.debug(
+                "reclassify failed for %r: %s",
+                (row.get("headline") or "?")[:80],
+                exc,
+            )
+
+    if changed:
+        logger.info("Reclassified %d stored article(s) under today's rules.", changed)
+
+    return changed
+
 
 async def repair_missing_images(
     db,
     source_id: Any,
-    client: httpx.AsyncClient,
-    validator: ImageValidator,
+    client: httpx.AsyncClient,    validator: ImageValidator,
     limit: int = IMAGE_REPAIR_LIMIT,
     window_hours: int = IMAGE_REPAIR_WINDOW_HOURS,
 ) -> int:
@@ -1638,6 +1766,27 @@ async def run_source_sync(
                         "source_url": getattr(article, "source_article_url", None),
                     },
                 )
+
+    # ---- Re-apply today's category rules to recently stored rows ----
+    #
+    # Same write-once trap as the artwork repair below, and for the same
+    # reason: the loop above `continue`s on any row dedup.check already
+    # knows, so `primary_category_id` is only ever written on first
+    # insert. A misfiled article therefore stays misfiled for ever, and
+    # fixing categorizer.py would not move a single stored row.
+    #
+    # Free: the classifier is string matching over the headline and
+    # excerpt already in the row. No request, no page fetch.
+    try:
+        result.recategorized = await reclassify_recent(
+            db,
+            source_id,
+            categorizer,
+            national_category_id,
+            limit=RECLASSIFY_LIMIT,
+        )
+    except Exception:
+        logger.exception("Reclassification pass failed; rows keep their category")
 
     # ---- Retry the artwork of rows that were stored without any ----
     #

@@ -56,14 +56,39 @@ logger = logging.getLogger("media")
 # bulletin is still a real story worth summarising.
 MIN_ARTICLE_TEXT_CHARS = 120
 
-# In-body images outrank og:image by this much. A 1200x675 declared
-# og:image scores ~2737, so the bonus has to clear that comfortably.
+# Which <img> is this article's photograph, in order of authority.
 #
-# The Ministry of Foreign Affairs feed sets og:image to its own channel
-# logo, so every story from them rendered the same "IICT Samachar"
-# picture. An image found inside the article body is the photograph the
-# story is actually about, so it is preferred even when the declared
-# og:image is larger.
+# A news page offers, roughly in this order:
+#
+#   1. the outlet's own og:image / twitter:image - the picture it picked
+#      for this story, and the one it publishes to social and to us
+#   2. the story's photograph, first in reading order inside the body
+#   3. a long tail of furniture: a byline portrait, a utility strip of
+#      icons (flight, weather, gold rate), an ad banner, and a carousel
+#      of unrelated stories
+#
+# The TIERS decide the answer, and they have to - nothing about a URL's
+# shape can. WordPress writes the UPLOAD YEAR into the path, so
+# /uploads/2026/10/meat.jpg and /uploads/2026/10/gold.png are
+# indistinguishable to a scorer, and _SIZE_TOKEN_RE used to read that year
+# as a pixel width. That handed the ranking to whichever picture was
+# uploaded most recently, which is how a story about cooking meat for
+# Dashain ended up wearing a photograph of gold jewellery.
+#
+# Only ties inside a tier are broken by score, so the gap between tiers is
+# set wider than any score one candidate can reach.
+TIER_METADATA = 3
+TIER_ARTICLE_BODY = 2
+TIER_PAGE = 1
+
+TIER_STEP = 10_000
+
+# Still a real rule, and still the fix for an outlet that sets og:image to
+# its channel logo (the Ministry of Foreign Affairs did, so every story
+# from them rendered the same "IICT Samachar" picture). It is applied when
+# ranking body images against each other; metadata that is plainly
+# furniture is skipped outright rather than out-scored, because the URL
+# shape is the only evidence available before the bytes are read.
 CONTENT_IMAGE_BONUS = 5000
 
 # Container classes/ids whose <img> tags belong to the article body.
@@ -76,26 +101,55 @@ _ARTICLE_REGION_RE = re.compile(
 )
 
 
-def _article_region(html: str) -> str:
+def _article_region_span(html: str) -> tuple[int, int] | None:
     """
-    Narrow the page to the article body for image harvesting.
+    Offsets of the largest article container in the page, or None.
 
-    Falls back to the whole document when no article container is
-    marked up, because a wrong-region image beats no image.
+    Returns offsets rather than the markup so a candidate can still be
+    checked against the chrome spans, which are also offsets into the
+    original document.
+
+    The largest match is used because the first one is usually the wrong
+    one: `class="post-detail"` on a byline toolbar matches the `detail`
+    keyword and yields a 141-character div, and a 141-character div is
+    not the article. On nepalnews.com no container matches at all, which
+    is why the tiers below do not depend on this finding one - it only
+    separates body images from the rest of the page when a container
+    does exist.
     """
-    match = _ARTICLE_REGION_RE.search(html)
-    if match and len(match.group("body")) > 400:
-        return match.group("body")
-    return html
+    best: tuple[int, int] | None = None
+    for match in _ARTICLE_REGION_RE.finditer(html):
+        span = match.span("body")
+        if span[1] - span[0] <= 400:
+            continue
+        if best is None or (span[1] - span[0]) > (best[1] - best[0]):
+            best = span
+    return best
 
 
 # Containers whose <img> tags are site furniture — banners, ads, share
-# rails, related-story strips — not the story's photograph.
+# rails, related-story strips, byline blocks — not the story's photograph.
+#
+# `byline` / `writers-box` / `author-images` are here because a byline
+# portrait is the one piece of furniture that sits INSIDE the article
+# column, ahead of the photograph, and is served from the same
+# /wp-content/uploads/ tree as real artwork. On nepalnews.com the byline
+# is <div class="author-writer writers-box"> holding
+# <img class="post-author-image" src=".../uploads/2025/08/Nepalnews.jpg">
+# — a URL with no hint in it at all, which is exactly why the container
+# and class checks exist.
+#
+# `utility` catches the icon strip a Nepali masthead hangs under its
+# off-canvas menu — flight times, weather, air quality, forex, gold rate.
+# On nepalnews.com it is <div class="utility-icons sidebar-utilities">,
+# and the four icons that precede the gold icon are what the byline and
+# related-story filters leave standing when a page carries no og:image.
 _CHROME_CONTAINER_RE = re.compile(
     r"<(?:div|section|aside|nav|header|footer|ul)\b[^>]*(?:class|id)\s*=\s*[\"'][^\"']*"
     r"(?:banner|advert|ad-|-ad|ads|share|social|related|recommend|promo|"
     r"sidebar|widget|newsletter|subscribe|popup|modal|comment|breaking|"
-    r"trending|popular|most-read|footer|header|nav|menu|logo|brand)"
+    r"trending|popular|most-read|footer|header|nav|menu|logo|brand|"
+    r"byline|writers?-box|author-images?|utilit(?:y|ies))"
     r"[^\"']*[\"'][^>]*>",
     re.IGNORECASE,
 )
@@ -168,9 +222,30 @@ _IMAGE_FILE_RE = re.compile(
     r"\.(?:jpe?g|png|webp|gif|avif|bmp|svg)(?:$|[?#])", re.IGNORECASE
 )
 
-# Common image-URL size tokens. When several candidates exist we prefer
-# the one asking for the largest rendition.
-_SIZE_TOKEN_RE = re.compile(r"[-_/](?:w|width)?[-_]?(\d{2,4})(?=[x_/.-]|\.(?:jpg|jpeg|png|webp))", re.IGNORECASE)
+# Common image-URL size tokens, used to prefer the largest rendition.
+#
+# A token only counts when the URL attaches it to a SIZE. The earlier
+# version accepted any bare number between path separators, so
+# /wp-content/uploads/2026/10/meat.jpg scored as 2026 pixels wide and
+# /uploads/2025/01/gold.png as 2025 - the upload year, read as a width.
+# Ranking then followed the calendar instead of the article, and any
+# image the outlet had re-used from an older folder lost to whatever the
+# site had uploaded most recently. Snakes_-1433-scaled.jpg was read as
+# 1433 pixels for the same reason.
+#
+# Both remaining shapes say "this number is a dimension":
+#   - a width keyword:  -w1200.jpg   _width_1200.jpg   /w1200/
+#   - a width x height pair:  -1024x556.jpg   /1200x675/
+_SIZE_TOKEN_RE = re.compile(
+    r"(?:[-_]|/)(?:w|width|resize)[-_]?(\d{2,4})(?![0-9])"
+    r"|[-_/](\d{2,4})x\d{2,4}(?![0-9])",
+    re.IGNORECASE,
+)
+
+# The largest score a single size token is allowed to contribute. Real
+# renditions stop well short of this; unbounded, a five-digit token in a
+# filename would otherwise outrank a tier boundary.
+MAX_SIZE_TOKEN_SCORE = 2000
 
 _RESERVED_HOSTS = {
     "localhost",
@@ -207,6 +282,11 @@ class ExtractedMedia:
     # right behind it. Keeping the full ranking is what lets the
     # validator fall through to the next candidate instead of giving up.
     image_candidates: list[str] = field(default_factory=list)
+    # The URLs the outlet DECLARED as this story's picture (og:image /
+    # twitter:image), kept apart from image_candidates so a caller can
+    # see whether the publisher's choice was the one that survived.
+    # See resolve_live_image's `declared`.
+    declared_images: list[str] = field(default_factory=list)
     video_embed_url: str | None = None
     video_id: str | None = None
     video_thumbnail_url: str | None = None
@@ -308,6 +388,67 @@ def _looks_like_junk_image(url: str) -> bool:
     return not _IMAGE_FILE_RE.search(stripped)
 
 
+# An <img> tag, and the attributes that say what it is.
+_IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+_IMG_ATTR_RE = re.compile(
+    r"\b(class|alt|id|title|width|height)\s*=\s*[\"']([^\"']*)[\"']", re.IGNORECASE
+)
+
+
+def _img_attributes(tag: str) -> dict[str, str]:
+    """class / alt / id / title of one <img>, lowercased keys."""
+    found: dict[str, str] = {}
+    for key, value in _IMG_ATTR_RE.findall(tag):
+        found.setdefault(key.lower(), value)
+    return found
+
+
+# Words in an <img>'s own class/alt that mark it as furniture rather than
+# a photograph.
+#
+# The URL is not enough evidence. nepalnews.com serves its byline portrait
+# from .../wp-content/uploads/2025/08/Nepalnews.jpg - a plain filename with
+# an ordinary path and no junk token anywhere in it - and tags it
+# class="post-author-image". The markup the outlet ships is the only place
+# that says what the picture is, so it is read.
+#
+# Kept to byline/identity words rather than anything generic: "featured",
+# "main" or "large" describe real photographs, and dropping those would
+# throw away the article's own image.
+_FURNITURE_ATTR_RE = re.compile(
+    r"author|avatar|byline|\bwriter|profile|logo|brand|watermark|"
+    r"favicon|glyph|bullet",
+    re.IGNORECASE,
+)
+
+
+def _is_furniture_img(tag: str) -> bool:
+    """True when the <img>'s own class/alt identifies it as furniture."""
+    attributes = _img_attributes(tag)
+    label = " ".join(
+        attributes.get(key, "") for key in ("class", "id", "alt", "title")
+    )
+    return bool(_FURNITURE_ATTR_RE.search(label))
+
+
+# A wide, short <img> is an advertising slot, not a photograph. The top of
+# this article carried <img width="1200" height="110" src=".../1200-X-110.gif">
+# as a leaderboard, and a 10:1 strip is never a news photograph.
+_BANNER_MIN_RATIO = 4
+_BANNER_MAX_HEIGHT = 200
+
+
+def _is_banner_img(attributes: dict[str, str]) -> bool:
+    """True when declared width/height describe a strip, not a picture."""
+    try:
+        width = int(attributes.get("width", "0") or 0)
+        height = int(attributes.get("height", "0") or 0)
+    except ValueError:
+        return False
+    return bool(width and height and height <= _BANNER_MAX_HEIGHT
+                and width >= height * _BANNER_MIN_RATIO)
+
+
 # Proxies and resizers. These are disqualifying, not merely penalised.
 #
 # Kathmandu Post serves body images through
@@ -345,11 +486,27 @@ def _is_resizer(url: str) -> bool:
     return any(marker in lowered for marker in _RESIZER_MARKERS)
 
 
+def _size_tokens(url: str) -> list[int]:
+    """Every number in the URL the site meant as a pixel dimension."""
+    found: list[int] = []
+    for width_word, dimensions in _SIZE_TOKEN_RE.findall(url):
+        token = width_word or dimensions
+        try:
+            found.append(int(token))
+        except ValueError:
+            continue
+    return found
+
+
 def _score_image(url: str, declared_width: int | None, declared_height: int | None) -> int:
     """
-    Higher is better. Combines any declared dimensions with the size
-    token baked into the URL so we prefer e.g. ...-1200x0.jpg over
-    ...-320x180.jpg even when only one of them advertises a width.
+    Higher is better, but only ever WITHIN a tier.
+
+    Combines any declared dimensions with the size token baked into the
+    URL so we prefer e.g. ...-1200x675.jpg over ...-320x180.jpg even when
+    only one of them advertises a width. It says nothing about whether an
+    image is the story's photograph - see TIER_METADATA above for what
+    decides that.
     """
     score = 0
     if declared_width:
@@ -357,12 +514,9 @@ def _score_image(url: str, declared_width: int | None, declared_height: int | No
     if declared_height:
         score += min(declared_height, 2000) // 2
 
-    tokens = _SIZE_TOKEN_RE.findall(url)
+    tokens = _size_tokens(url)
     if tokens:
-        try:
-            score += max(int(t) for t in tokens)
-        except ValueError:
-            pass
+        score += min(max(tokens), MAX_SIZE_TOKEN_SCORE)
 
     # Prefer modern formats at equal size.
     if url.lower().split("?")[0].endswith((".webp", ".avif")):
@@ -547,6 +701,245 @@ def extract_article_text(html: str, max_chars: int = 20_000) -> str | None:
     return joined[:max_chars] if len(joined) > MIN_ARTICLE_TEXT_CHARS else None
 
 
+_SRCSET_ENTRY_RE = re.compile(r"([^\s,]+)\s+([0-9.]+)([wx])")
+
+
+def _best_srcset_url(value: str) -> str:
+    """
+    The largest rendition from a srcset, or the value unchanged.
+
+    `_clean_url` takes the FIRST entry of a srcset, which is the smallest
+    one - correct for og:image, where we only need an identifier, but
+    wrong for an <img>, where the whole point of the srcset is that
+    bigger renditions were offered. WordPress emits them in ascending
+    order, so the first entry is the one a reader on a phone would get
+    and the last is the one worth storing.
+
+    Picks on width descriptors (1200w) when present, otherwise on pixel
+    density (2x). Falls back to the first entry, which is what
+    _clean_url would have used, when the srcset is unparseable.
+    """
+    entries = _SRCSET_ENTRY_RE.findall(value)
+    if not entries:
+        return value.split(",")[0].strip()
+
+    widths = [(float(size), url) for url, size, unit in entries if unit == "w"]
+    if widths:
+        return max(widths, key=lambda item: item[0])[1]
+
+    densities = [(float(size), url) for url, size, unit in entries if unit == "x"]
+    if densities:
+        return max(densities, key=lambda item: item[0])[1]
+
+    return entries[0][0]
+
+
+_ANCHOR_TOKEN_RE = re.compile(
+    r"<a\b[^>]*\bhref\s*=\s*[\"']([^\"']+)[\"'][^>]*>|</a\s*>", re.IGNORECASE
+)
+
+
+def _anchor_spans(html: str) -> list[tuple[int, int, str]]:
+    """
+    (start, end, href) for every <a> in the page, including unclosed ones.
+
+    Nesting is tracked with a stack because a related-story carousel wraps
+    each thumbnail in its own link and a malformed page must not pair one
+    thumbnail with another story's URL.
+    """
+    spans: list[tuple[int, int, str]] = []
+    stack: list[tuple[int, str]] = []
+
+    for match in _ANCHOR_TOKEN_RE.finditer(html):
+        href = match.group(1)
+        if href is not None:
+            stack.append((match.start(), href))
+        elif stack:
+            start, opened = stack.pop()
+            spans.append((start, match.end(), opened))
+
+    # An anchor left open at the end of the document still wraps whatever
+    # follows it.
+    spans.extend((start, len(html), href) for start, href in stack)
+    return spans
+
+
+def _is_linked_to_another_story(
+    anchors: list[tuple[int, int, str]],
+    position: tuple[int, int],
+    src: str,
+    page_url: str,
+) -> bool:
+    """
+    True when this <img> is a thumbnail inside a link to a DIFFERENT story.
+
+    Every outlet runs a "related / सम्बन्धित समाचार" carousel, and its
+    thumbnails are the most persistent wrong-image source there is: they
+    are real photographs, they load, and they sit in containers whose
+    class names are whatever the theme happened to choose — on
+    nepalnews.com a related block is <div class="row"> holding
+    <div class="section-padding">, which matches no chrome keyword at all.
+
+    The link is the reliable signal instead. A story's own photograph is
+    unlinked, links to itself, or links to a larger copy of itself; a
+    related thumbnail links to the other story. Only same-host absolute
+    links count: a photo credited to another site is still this story's.
+    """
+    start, end = position
+    host = (urlparse(page_url).hostname or "").lower()
+
+    for anchor_start, anchor_end, href in anchors:
+        if not (anchor_start < start and end <= anchor_end):
+            continue
+
+        href = href.strip()
+        if not href or href.startswith("#"):
+            return False
+        if href.lower().startswith(("javascript:", "mailto:", "tel:")):
+            return False
+
+        # Relative hrefs are the other half of how WordPress writes a
+        # carousel, so they are resolved rather than dismissed.
+        absolute = _clean_url(href, page_url)
+        if not absolute:
+            return False
+        if (urlparse(absolute).hostname or "").lower() != host:
+            return False  # credited to another site: still this story's photo
+
+        if absolute.split("?")[0].rstrip("/") in (
+            src.split("?")[0].rstrip("/"),
+            page_url.split("?")[0].rstrip("/"),
+        ):
+            return False
+        if _IMAGE_FILE_RE.search(absolute.split("?")[0]):
+            return False  # lightbox to a bigger copy of this same photograph
+        return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Image ranking
+# ---------------------------------------------------------------------------
+
+def _rank_image_candidates(
+    html: str, meta: dict[str, str], base_url: str
+) -> list[tuple[int, int, str, str]]:
+    """
+    Every image the page offers, best first: (tier, score, url, source).
+
+    Tier decides the order. See TIER_METADATA for why the ranking cannot
+    be left to the score.
+
+    Reading order breaks ties inside a tier. A story's photograph is the
+    first picture a reader meets on the page, so among equally-plausible
+    images the earliest one in the document is the likeliest to be the
+    subject. `sorted` is stable, so appending in document order is enough
+    to preserve that.
+    """
+    ranked: list[tuple[int, int, str, str]] = []
+
+    # ---- Tier 1: what the outlet declared this story looks like ----
+    #
+    # og:image outranks anything found by scanning, because it is the
+    # outlet's own statement about this article rather than a guess about
+    # its layout. It is skipped when the URL says it is furniture: some
+    # outlets set og:image to their channel logo, and then every story
+    # renders the same picture.
+    for key, fallback_keys, source in (
+        ("og:image", ("og:image:secure_url", "og:image:url"), "og:image"),
+        ("twitter:image", ("twitter:image:src",), "twitter:image"),
+    ):
+        url = _clean_url(
+            meta.get(key) or next((meta.get(k) for k in fallback_keys if meta.get(k)), None),
+            base_url,
+        )
+        if not url or _looks_like_junk_image(url):
+            continue
+        width, height = _parse_dimensions(meta, key)
+        ranked.append(
+            (TIER_METADATA, _score_image(url, width, height), url, source)
+        )
+
+    # <link rel="image_src"> is the outlet naming the same picture in a
+    # second place, so it shares the metadata tier. apple-touch-icon is
+    # deliberately not treated as artwork: it is an app icon by
+    # definition, and it is caught as junk by the name.
+    link_image = _extract_link_rel(html, ("image_src",), base_url)
+    if link_image and not _looks_like_junk_image(link_image):
+        ranked.append((TIER_METADATA, _score_image(link_image, None, None), link_image, "link:image_src"))
+
+    # ---- Tiers 2 and 3: images found by scanning the page ----
+    #
+    # Reading order is the relevance signal here, so within a tier the
+    # score only breaks ties. Body images keep CONTENT_IMAGE_BONUS so a
+    # genuinely larger in-page rendition still wins between equals.
+    region = _article_region_span(html)
+    chrome = _chrome_spans(html)
+    anchors = _anchor_spans(html)
+    seen: set[str] = set()
+
+    for match in _IMG_TAG_RE.finditer(html):
+        tag = match.group(0)
+
+        src_match = re.search(
+            r'\bsrc(?:set)?\s*=\s*["\']([^"\']+)["\']', tag, re.IGNORECASE
+        )
+        if not src_match:
+            continue
+
+        raw_src = src_match.group(1)
+        # A srcset lists renditions smallest first; store the largest.
+        if "," in raw_src and re.search(r"\d+\s*[wx]", raw_src):
+            raw_src = _best_srcset_url(raw_src)
+
+        src = _clean_url(raw_src, base_url)
+        if not src or src in seen:
+            continue
+
+        # A byline portrait, a site logo, or a share icon. Checked on the
+        # tag's own class/alt because the URL often says nothing.
+        if _is_furniture_img(tag):
+            continue
+
+        # An advertising slot: wide and short.
+        if _is_banner_img(_img_attributes(tag)):
+            continue
+
+        # Inside a banner / ad / share / related / byline container. Those
+        # are the images that repeat across every story on the site.
+        if _inside_any((match.start(), match.end()), chrome):
+            continue
+
+        # The thumbnail of a different story, linked from this one. A
+        # related-story carousel is real photographs in a container whose
+        # class name is whatever the theme chose, so the link is the only
+        # dependable evidence that it is furniture.
+        if _is_linked_to_another_story(
+            anchors, (match.start(), match.end()), src, base_url
+        ):
+            continue
+
+        if _looks_like_junk_image(src):
+            continue
+
+        seen.add(src)
+        tier = TIER_ARTICLE_BODY if region and region[0] <= match.start() < region[1] else TIER_PAGE
+        # Scored 0 on purpose. Within the in-page tiers the order is
+        # reading order, and the size score is not allowed to promote a
+        # later image over an earlier one: that is precisely how a
+        # related-story thumbnail ending in -1024x556-1.jpg came to
+        # outrank the story's own photograph. Size still decides between
+        # renditions of the SAME image elsewhere, and still drives
+        # upgrade_to_highres.
+        ranked.append((tier, 0, src, "body"))
+
+    # Highest tier first; inside a tier, highest score first; and because
+    # sorted is stable, document order settles anything still equal.
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return ranked
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -596,67 +989,22 @@ async def extract_from_article(
         meta = _extract_meta_tags(html)
 
         # ---------------- Image ----------------
-        image_candidates: list[tuple[int, str, str]] = []  # (score, url, source)
-
-        og_image = _clean_url(
-            meta.get("og:image")
-            or meta.get("og:image:secure_url")
-            or meta.get("og:image:url"),
-            final_url,
-        )
-        if og_image:
-            w, h = _parse_dimensions(meta, "og:image")
-            image_candidates.append((_score_image(og_image, w, h), og_image, "og:image"))
-
-        twitter_image = _clean_url(
-            meta.get("twitter:image") or meta.get("twitter:image:src"), final_url
-        )
-        if twitter_image:
-            w, h = _parse_dimensions(meta, "twitter:image")
-            image_candidates.append((_score_image(twitter_image, w, h), twitter_image, "twitter:image"))
-
-        link_image = _extract_link_rel(
-            html, ("image_src", "apple-touch-icon", "apple-touch-icon-precomposed"), final_url
-        )
-        if link_image:
-            image_candidates.append((_score_image(link_image, None, None), link_image, "link:image_src"))
-
-        # In-body images, gathered from the article container only.
-        #
-        # These are weighted ABOVE og:image. Several Nepali outlets —
-        # the Ministry of Foreign Affairs feed being the clearest case —
-        # set og:image to the channel's own logo, so every story from
-        # them renders the same picture. The photograph inside the body is
-        # the story's actual image, so it wins.
-        body_html = html
-        chrome = _chrome_spans(html)
-        for match in re.finditer(
-            r'<img\b[^>]*\bsrc(?:set)?\s*=\s*["\']([^"\']+)["\'][^>]*>', body_html, re.IGNORECASE
-        ):
-            # Skip anything sitting inside a banner / ad / share / related
-            # container. Those are the images that repeat across every
-            # story on the site.
-            if _inside_any((match.start(), match.end()), chrome):
-                continue
-            src = _clean_url(match.group(1), final_url)
-            if not src or _looks_like_junk_image(src):
-                continue
-            image_candidates.append(
-                (_score_image(src, None, None) + CONTENT_IMAGE_BONUS, src, "body")
-            )
+        image_candidates = _rank_image_candidates(html, meta, final_url)
+        result.declared_images = [
+            url for tier, _, url, _ in image_candidates if tier == TIER_METADATA
+        ]
 
         if image_candidates:
-            scored = sorted(image_candidates, key=lambda item: item[0], reverse=True)
-            best_score, best_url, best_source = scored[0]
+            best_tier, best_score, best_url, best_source = image_candidates[0]
             result.image_url = best_url
             result.image_highres_url = best_url
             result.provenance["image_url"] = best_source
 
-            # Keep the whole ranking, deduplicated in score order, so a
+            # Keep the whole ranking, deduplicated in tier order, so a
             # rendition that fails validation can be swapped for the next
             # one the same page already offered.
             ranked: list[str] = []
-            for _, url, _ in scored:
+            for _, _, url, _ in image_candidates:
                 if url not in ranked:
                     ranked.append(url)
             result.image_candidates = ranked
@@ -1019,6 +1367,7 @@ async def resolve_live_image(
     candidates: list[str],
     validator: ImageValidator,
     limit: int = 3,
+    declared: list[str] | None = None,
 ) -> str | None:
     """
     The first candidate that proves it loads, or None.
@@ -1028,10 +1377,29 @@ async def resolve_live_image(
     the damage when every candidate is dead: a pathological page cannot
     turn one article into an unbounded burst of requests against a CDN
     that is already refusing to serve us.
+
+    `declared` is the page's og:image / twitter:image, passed separately
+    so that losing them is visible. Falling back from the outlet's own
+    declaration to something scraped out of the page is the exact moment
+    a wrong picture gets stored, and it used to pass in silence: the row
+    simply carried whatever the scan found, with nothing in the logs to
+    say the publisher's choice had been rejected.
     """
     for url in candidates[: max(limit, 0)]:
         if await validator.is_live(url):
+            if declared and url not in declared:
+                logger.info(
+                    "Declared image(s) %s did not load; stored %s found on the page.",
+                    ", ".join(declared),
+                    url,
+                )
             return url
+
+    if declared:
+        logger.info(
+            "Declared image(s) %s did not load and no other candidate did either.",
+            ", ".join(declared),
+        )
     return None
 
 

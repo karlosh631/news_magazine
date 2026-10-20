@@ -30,14 +30,20 @@ from app.sources.media import (
     RENDERABLE_IMAGE_TYPES,
     ExtractedMedia,
     ImageValidator,
-    _clean_url,
+    _best_srcset_url,
     _chrome_spans,
+    _clean_url,
     _inside_any,
+    _is_banner_img,
+    _is_furniture_img,
     _is_resizer,
     _looks_like_junk_image,
+    _rank_image_candidates,
     _score_image,
+    _size_tokens,
     best_image,
     candidate_images,
+    extract_from_article,
     resolve_live_image,
     strip_size_suffix,
     upgrade_to_highres,
@@ -154,13 +160,424 @@ def test_url_size_token_is_used_when_no_dimensions_declared():
 
 def test_content_image_bonus_outranks_a_declared_og_image():
     """
-    The bug: an outlet sets og:image to its channel logo, so every story
-    rendered the same picture. A photograph found in the body must win
-    even when the declared og:image is larger.
+    An outlet that sets og:image to its channel logo makes every story
+    render the same picture, so a body photograph must still be able to
+    beat a large declared image.
+
+    The ranking now decides this by skipping a junk-shaped og:image
+    outright rather than by out-scoring it - see
+    test_metadata_that_is_plainly_furniture_is_skipped. The arithmetic
+    below is kept because CONTENT_IMAGE_BONUS is still what separates two
+    body images from each other.
     """
     og_score = _score_image("https://a.com/logo-1200x675.jpg", 1200, 675)
     body_score = _score_image("https://a.com/story.jpg", None, None) + CONTENT_IMAGE_BONUS
     assert body_score > og_score
+
+
+# =============================================================
+# Picking the RIGHT image, not merely a live one
+#
+# The bug these pin: a story about cooking meat for Dashain rendered a
+# photograph of gold jewellery. The page had a correct og:image the whole
+# time; it was out-scored by an <img> in the page's utility-icon strip,
+# because WordPress writes the UPLOAD YEAR into the path and _SIZE_TOKEN_RE
+# read that year as a pixel width. Every candidate also returned HTTP 200
+# with an image content-type, so ImageValidator was right to accept it and
+# still the wrong picture. Nothing in the pipeline asked whether the image
+# was the story's.
+#
+# Every page shape below is taken from the real nepalnews.com article at
+# /2026/10/20/be-careful-when-eating-meat-during-dashain-how-much-to-eat-
+# and-how-to-cook-it/, which was fetched and read while fixing this.
+# =============================================================
+
+DASHAIN_URL = (
+    "https://nepalnews.com/2026/10/20/be-careful-when-eating-meat-during-"
+    "dashain-how-much-to-eat-and-how-to-cook-it/"
+)
+
+MEAT = "https://nepalnews.com/wp-content/uploads/2026/10/meat.jpg"
+GOLD = "https://english.nepalnews.com/wp-content/uploads/2025/01/gold.png"
+
+
+def _page(body_images: str, meta: str = "") -> str:
+    """A minimal page: some metadata, then body images in reading order."""
+    return f"<html><head>{meta}</head><body>{body_images}</body></html>"
+
+
+async def _resolve(html: str, url: str = DASHAIN_URL) -> ExtractedMedia:
+    """Run the real extractor over a page served from memory."""
+    async def handler(request):
+        return httpx.Response(200, text=html, headers={"content-type": "text/html"})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        return await extract_from_article(url, client)
+
+
+# ---- the headline case -------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_correct_og_image_beats_a_logo_sitting_first_on_the_page():
+    """
+    The reported bug. The page declares the right picture in og:image and
+    opens with a utility bar of icons — flight, weather, air quality,
+    forex, gold rate — whose containers are named "utility-icons
+    sidebar-utilities".
+
+    The og:image must win outright. It is the outlet's own statement about
+    this story; an icon in a navigation strip is not a candidate at all.
+    """
+    html = _page(
+        '<div class="utility-icons sidebar-utilities">'
+        f'<a href="/gold-silver"><img src="{GOLD}" /></a>'
+        "</div>"
+        f'<img src="{MEAT}" alt="" />',
+        f'<meta property="og:image" content="{MEAT}" />',
+    )
+    result = await _resolve(html)
+
+    assert result.image_url == MEAT
+    assert result.provenance["image_url"] == "og:image"
+
+
+@pytest.mark.asyncio
+async def test_the_gold_icon_is_never_chosen_even_when_it_is_the_first_image():
+    """
+    The same page with the og:image removed, so the extractor has to fall
+    back to scanning. It must still reach the photograph.
+
+    The icon has no class, no alt text and no dimensions to judge it by,
+    and it returns HTTP 200 with image/png, so neither the junk filter nor
+    the liveness probe will catch it. The only thing standing between it
+    and the article's artwork is the container it sits in.
+    """
+    html = _page(
+        '<div class="utility-icons sidebar-utilities">'
+        f'<a href="/gold-silver"><img src="{GOLD}" /></a>'
+        "</div>"
+        f'<img src="{MEAT}" alt="" />',
+    )
+    result = await _resolve(html)
+
+    assert result.image_url == MEAT
+    assert GOLD not in result.image_candidates
+
+
+@pytest.mark.asyncio
+async def test_a_utility_bar_not_named_sidebar_is_still_furniture():
+    """
+    Themes rename their classes. "utility-icons" with no "sidebar" in it
+    must be recognised just the same, or a single rename silently starts
+    putting gold icons on articles.
+    """
+    html = _page(
+        '<div class="utility-icons d-flex">'
+        f'<a href="/gold-silver"><img src="{GOLD}" /></a>'
+        "</div>"
+        f'<img src="{MEAT}" alt="" />',
+    )
+    result = await _resolve(html)
+
+    assert result.image_url == MEAT
+
+
+# ---- the year that was being read as a width --------------------------
+
+@pytest.mark.asyncio
+async def test_the_upload_year_in_the_path_does_not_decide_the_winner():
+    """
+    WordPress never moves a re-used photograph, so an article can carry an
+    image from /uploads/2023/ while the furniture around it was uploaded
+    this year. Scoring the path year as a pixel width handed the article to
+    the newest picture on the page.
+
+    The story's own photograph must win regardless of which year its file
+    happens to live in.
+    """
+    for year in ("2026", "2024", "2021"):
+        old_photo = f"https://nepalnews.com/wp-content/uploads/{year}/07/meat.jpg"
+        html = _page(
+            f'<img src="{old_photo}" alt="" />'
+            '<div class="section-padding"><div class="row row-cols-4 g-4">'
+            '<div class="col"><div class="card"><a href='
+            '"https://nepalnews.com/2026/10/20/teenager-dies-in-motorcycle-accident/">'
+            '<div class="image-container">'
+            '<img src="https://nepalnews.com/wp-content/uploads/2026/09/accident.jpeg" />'
+            "</a></div></div></div></div></div>",
+        )
+        result = await _resolve(html)
+        assert result.image_url == old_photo, year
+
+
+def test_a_bare_year_in_an_upload_path_is_not_read_as_a_pixel_width():
+    """The scoring bug itself, isolated from the layout around it."""
+    assert _size_tokens("https://nepalnews.com/wp-content/uploads/2026/10/meat.jpg") == []
+    assert _size_tokens("https://nepalnews.com/wp-content/uploads/2019/04/x.jpg") == []
+
+
+def test_a_real_size_token_is_still_read():
+    """Rendition sizes must keep working, or the module stops picking HD."""
+    assert _size_tokens("https://a.com/photo-1200x675.jpg") == [1200]
+    assert _size_tokens("https://a.com/photo_320x180.jpg") == [320]
+    assert _size_tokens("https://a.com/w1200/photo.jpg") == [1200]
+    assert _size_tokens("https://a.com/width_800/photo.jpg") == [800]
+
+
+def test_a_related_thumbnail_size_token_cannot_outrank_the_photo():
+    """
+    In reading order the story's photograph comes first, so it wins. A
+    later image ending -1024x556-1.jpg used to jump the queue on its size
+    token alone.
+    """
+    html = _page(
+        f'<img src="{MEAT}" alt="" />'
+        '<img src="https://nepalnews.com/wp-content/uploads/2026/02/drone-1024x556-1.jpg" />'
+    )
+    ranked = _rank_image_candidates(html, {}, "https://nepalnews.com/story/")
+    assert ranked[0][2] == MEAT
+
+
+def test_a_year_bearing_url_does_not_outscore_a_real_rendition():
+    """A 2026 upload is not a 2026-pixel-wide image."""
+    dated = "https://nepalnews.com/wp-content/uploads/2026/10/meat.jpg"
+    sized = "https://a.com/photo-1200x675.jpg"
+    assert _score_image(dated, None, None) < _score_image(sized, None, None)
+
+
+# ---- byline portraits and ad strips ------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_byline_portrait_is_not_the_article_image():
+    """
+    The one piece of furniture that sits inside the article column, ahead
+    of the photograph. nepalnews.com serves it from
+    .../uploads/2025/08/Nepalnews.jpg — an ordinary filename with no junk
+    token in it — and tags it class="post-author-image".
+
+    The URL gives nothing away, so the tag's own class has to.
+    """
+    html = _page(
+        '<div class="author-writer writers-box d-flex">'
+        '<div class="author-images-stack">'
+        '<a href="https://nepalnews.com/author/nepalnews/">'
+        '<img src="https://nepalnews.com/wp-content/uploads/2025/08/Nepalnews.jpg"'
+        ' alt="नेपलन्युज" class="post-author-image" />'
+        "</a></div></div>"
+        f'<img src="{MEAT}" alt="" />',
+    )
+    result = await _resolve(html)
+
+    assert result.image_url == MEAT
+
+
+@pytest.mark.asyncio
+async def test_a_leaderboard_ad_strip_is_not_the_article_image():
+    """
+    <img width="1200" height="110" src=".../1200-X-110.gif"> sits directly
+    above the article. Ten-to-one is an advertising slot, never a news
+    photograph.
+    """
+    html = _page(
+        '<img width="1200" height="110"'
+        ' src="https://nepalnews.com/wp-content/uploads/2026/09/1200-X-110.gif"'
+        ' class="image wp-image-212594" alt="" />'
+        f'<img src="{MEAT}" alt="" />',
+    )
+    result = await _resolve(html)
+
+    assert result.image_url == MEAT
+
+
+def test_a_wide_short_img_is_recognised_as_a_banner():
+    assert _is_banner_img({"width": "1200", "height": "110"})
+    assert _is_banner_img({"width": "970", "height": "90"})
+    # A real photograph is never a strip.
+    assert not _is_banner_img({"width": "1200", "height": "675"})
+    assert not _is_banner_img({"width": "800", "height": "600"})
+    # No declared dimensions means no opinion.
+    assert not _is_banner_img({})
+
+
+def test_a_byline_class_marks_an_img_as_furniture():
+    assert _is_furniture_img('<img src="https://a.com/x.jpg" class="post-author-image">')
+    assert _is_furniture_img('<img src="https://a.com/x.jpg" class="author-avatar round">')
+    assert _is_furniture_img('<img src="https://a.com/x.jpg" alt="writer portrait">')
+
+
+def test_a_photo_class_is_not_mistaken_for_furniture():
+    """
+    Only byline/identity words disqualify. "featured", "main" and "large"
+    describe real photographs, and rejecting them would throw away the
+    article's own image.
+    """
+    for tag in (
+        '<img src="https://a.com/x.jpg" class="article-featured-image">',
+        '<img src="https://a.com/x.jpg" class="main-photo large">',
+        '<img src="https://a.com/x.jpg" class="wp-image-212594 attachment-full">',
+        '<img src="https://a.com/x.jpg" alt="ministers cut a ribbon">',
+    ):
+        assert not _is_furniture_img(tag), tag
+
+
+# ---- metadata outranks page furniture, always --------------------------
+
+@pytest.mark.asyncio
+async def test_metadata_is_preferred_over_a_body_image():
+    """
+    The rule the fix rests on: the outlet's own og:image is a statement
+    about this article, and anything found by scanning the page is a guess
+    about its layout.
+    """
+    html = _page(
+        '<div class="related-stories"><img src="https://a.com/other-story.jpg" /></div>'
+        '<img src="https://a.com/in-body-photo.jpg" alt="" />',
+        '<meta property="og:image" content="https://a.com/declared.jpg" />',
+    )
+    result = await _resolve(html)
+
+    assert result.image_url == "https://a.com/declared.jpg"
+    assert result.provenance["image_url"] == "og:image"
+
+
+@pytest.mark.asyncio
+async def test_metadata_that_is_plainly_furniture_is_skipped():
+    """
+    The Ministry of Foreign Affairs set og:image to their channel logo, so
+    every story from them rendered the same picture. A metadata URL that
+    says it is a logo is not a candidate.
+    """
+    html = _page(
+        '<img src="https://mofa.gov.np/wp-content/uploads/2019/04/summit.jpg" alt="" />',
+        '<meta property="og:image" content="https://mofa.gov.np/img/logo.png" />'
+        '<meta property="og:image:width" content="1200" />'
+        '<meta property="og:image:height" content="675" />',
+    )
+    result = await _resolve(html)
+
+    assert result.image_url == "https://mofa.gov.np/wp-content/uploads/2019/04/summit.jpg"
+    assert result.provenance["image_url"] == "body"
+
+
+@pytest.mark.asyncio
+async def test_twitter_image_is_used_when_there_is_no_og_image():
+    html = _page(
+        '<img src="https://a.com/in-body.jpg" alt="" />',
+        '<meta name="twitter:image" content="https://a.com/twitter.jpg" />',
+    )
+    result = await _resolve(html)
+
+    assert result.image_url == "https://a.com/twitter.jpg"
+    assert result.provenance["image_url"] == "twitter:image"
+
+
+@pytest.mark.asyncio
+async def test_og_image_survives_when_the_page_has_no_images_at_all():
+    """Metadata is the whole answer when there is nothing else to find."""
+    html = _page("", '<meta property="og:image" content="https://a.com/only.jpg" />')
+    result = await _resolve(html)
+
+    assert result.image_url == "https://a.com/only.jpg"
+
+
+# ---- srcset ------------------------------------------------------------
+
+def test_the_largest_srcset_rendition_is_chosen():
+    """
+    WordPress emits srcsets smallest first, so taking the first entry
+    stored the rendition a phone would get instead of the largest offered.
+    """
+    srcset = (
+        "https://a.com/p-320.jpg 320w, "
+        "https://a.com/p-1200.jpg 1200w, "
+        "https://a.com/p-800.jpg 800w"
+    )
+    assert _best_srcset_url(srcset) == "https://a.com/p-1200.jpg"
+
+
+def test_srcset_density_descriptors_are_honoured():
+    srcset = "https://a.com/p.jpg 1x, https://a.com/p@2x.jpg 2x"
+    assert _best_srcset_url(srcset) == "https://a.com/p@2x.jpg"
+
+
+def test_an_unparseable_srcset_falls_back_to_the_first_entry():
+    """Never worse than what _clean_url would have chosen."""
+    assert _best_srcset_url("https://a.com/p.jpg") == "https://a.com/p.jpg"
+
+
+@pytest.mark.asyncio
+async def test_a_srcset_image_stores_its_largest_rendition():
+    html = _page(
+        '<img srcset="https://a.com/photo-320.jpg 320w, '
+        'https://a.com/photo-1200.jpg 1200w" src="https://a.com/photo-320.jpg" alt="" />'
+    )
+    result = await _resolve(html, "https://a.com/story/")
+
+    assert result.image_url == "https://a.com/photo-1200.jpg"
+
+
+# ---- the ranking keeps offering alternates -----------------------------
+
+@pytest.mark.asyncio
+async def test_the_correct_image_is_first_and_alternates_are_kept():
+    """
+    resolve_live_image walks this list and takes the first that loads, so
+    the correct image has to lead AND the page's other candidates have to
+    survive behind it. A CDN that 403s the winner must not cost the
+    article its artwork.
+    """
+    html = _page(
+        '<img src="https://nepalnews.com/wp-content/uploads/2019/04/summit.jpg" alt="" />'
+        '<div class="related-stories">'
+        '<img src="https://nepalnews.com/wp-content/uploads/2026/09/accident.jpeg" />'
+        "</div>",
+        f'<meta property="og:image" content="{MEAT}" />',
+    )
+    result = await _resolve(html)
+
+    assert result.image_candidates[0] == MEAT
+    assert len(result.image_candidates) > 1
+
+
+@pytest.mark.asyncio
+async def test_an_image_repeated_on_the_page_is_stored_once():
+    """
+    The outlet's og:image is usually the same file the body renders, and
+    the two must collapse to one candidate rather than occupying two
+    ranks of the same list.
+    """
+    html = _page(
+        f'<img src="{MEAT}" alt="" />',
+        f'<meta property="og:image" content="{MEAT}" />'
+        f'<meta name="twitter:image" content="{MEAT}" />',
+    )
+    result = await _resolve(html)
+
+    assert result.image_candidates == [MEAT]
+
+
+@pytest.mark.asyncio
+async def test_the_wrong_picture_is_not_merely_ranked_lower_but_removed():
+    """
+    A related-story thumbnail must not sit in the candidate list at all
+    when the outlet has already told us what the story looks like. Ranked
+    lower it would still be stored whenever the winner 403s.
+    """
+    html = _page(
+        f'<img src="{MEAT}" alt="" />'
+        '<div class="section-padding"><div class="row row-cols-4 g-4">'
+        '<div class="col"><div class="card h-100">'
+        '<a href="https://nepalnews.com/2026/10/20/teenager-dies-in-motorcycle-accident/">'
+        '<div class="image-container">'
+        '<img src="https://nepalnews.com/wp-content/uploads/2026/09/accident.jpeg" />'
+        "</a></div></div></div></div></div>",
+        f'<meta property="og:image" content="{MEAT}" />',
+    )
+    result = await _resolve(html)
+
+    assert result.image_url == MEAT
+    assert all("accident.jpeg" not in url for url in result.image_candidates)
 
 
 # =============================================================

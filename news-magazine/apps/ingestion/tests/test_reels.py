@@ -2941,9 +2941,31 @@ def test_the_preferred_rendition_is_high_definition():
 # path must fetch reels, and it must do so by reusing the worker's own
 # code rather than a second implementation that can drift.
 
-WORKFLOW_PATH = (
-    Path(__file__).resolve().parents[3] / ".github" / "workflows" / "ingest.yml"
-)
+def _find_workflow() -> Path:
+    """
+    Locate the scheduled workflow by SEARCHING UPWARD.
+
+    Not by counting directories. The repository root moved — the app
+    lives under news-magazine/ inside it — and a test that hardcodes
+    the depth breaks the moment it moves, which is exactly what
+    happened: CI failed on its very first run because this test was
+    looking one level above where the file now lives.
+
+    Walking up until the file appears is immune to that, and it also
+    fails LOUDLY if the workflow is ever deleted or renamed, which is
+    the condition the test exists to catch.
+    """
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / ".github" / "workflows" / "ingest.yml"
+        if candidate.exists():
+            return candidate
+    raise AssertionError(
+        "no .github/workflows/ingest.yml found above "
+        f"{Path(__file__).resolve()} — the scheduled run has gone missing"
+    )
+
+
+WORKFLOW_PATH = _find_workflow()
 
 
 def test_the_scheduled_run_fetches_reels_as_well_as_news():

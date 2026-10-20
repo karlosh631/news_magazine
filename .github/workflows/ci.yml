@@ -32,6 +32,16 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npx tsc --noEmit
+      # The web app had no test harness at all, so the duplicate
+      # suppression was completely unguarded — which is how a one-
+      # character regex change could silently disable it for the whole
+      # Nepali-language feed without anything going red.
+      #
+      # These specs are pure functions over pure modules: no browser is
+      # launched, so there is nothing to install and the suite runs in
+      # seconds. A spec that needs a page will say so, and the browser
+      # install belongs in that spec's own job.
+      - run: npm test
       # Isolated dist dir so this can never collide with a local dev server.
       - run: npm run build:verify
 

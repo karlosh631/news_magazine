@@ -61,6 +61,60 @@ export interface FeedResult {
   articles: LatestArticle[];
   error: string | null;
   configured: boolean;
+  /**
+   * Where the page after this one starts, or null when the feed is
+   * exhausted. See `FeedCursor`.
+   */
+  nextCursor: FeedCursor | null;
+  /**
+   * Rows matching the same filters, before deduplication. Null unless
+   * the caller asked for it — an exact count is a second query, and the
+   * polling path does not need it on every tick.
+   */
+  total: number | null;
+}
+
+/**
+ * A stable position in the feed: the last row of the page just read.
+ *
+ * This is deliberately NOT an offset. `OFFSET n` counts rows the database
+ * has since inserted, so on a table the ingestion worker writes to
+ * continuously, every reader skips and repeats rows — the second page of
+ * a feed can start in the middle of the first page, or replay it. A
+ * keyset ("seek") cursor instead asks for rows older than a row the
+ * reader has already seen, so rows arriving above the cursor never shift
+ * what comes next. It is the same reason the ticker uses a cursor rather
+ * than a page number.
+ *
+ * `published_at` is the raw string the database sent, not a re-serialised
+ * one. PostgreSQL timestamps carry microseconds and `Date` carries
+ * milliseconds, so round-tripping through an ISO string would truncate
+ * the cursor and quietly drop every row inside the truncated sliver.
+ *
+ * `published_at` is always a real timestamp: NULLs sort last in this
+ * ordering, so nothing can follow one and a cursor that pointed at an
+ * undated row would address nothing. A feed that ends on an undated
+ * article therefore reports "no more pages" — the one thing OFFSET could
+ * have reached and a keyset cannot, and it is reported as the end of the
+ * archive rather than as an infinite feed.
+ */
+export interface FeedCursor {
+  published_at: string;
+  id: string;
+}
+
+/** The cursor for whatever page of the feed ends at `article`. */
+function cursorAfter(article: LatestArticle): FeedCursor | null {
+  if (!article.published_at) return null;
+  return { published_at: article.published_at, id: article.id };
+}
+
+/** An empty result, for every early return that is not a successful read. */
+function emptyFeed(
+  error: string | null,
+  configured: boolean
+): FeedResult {
+  return { articles: [], error, configured, nextCursor: null, total: null };
 }
 
 /**
@@ -87,15 +141,23 @@ export async function getLatestArticles(options?: {
   categorySlug?: string;
   excludeIds?: string[];
   language?: "ne" | "en";
+  cursor?: FeedCursor | null;
+  withTotal?: boolean;
 }): Promise<FeedResult> {
-  const { limit = PAGE_SIZE, categorySlug, excludeIds, language } = options ?? {};
+  const {
+    limit = PAGE_SIZE,
+    categorySlug,
+    excludeIds,
+    language,
+    cursor = null,
+    withTotal = false,
+  } = options ?? {};
 
   if (!isSupabaseConfigured()) {
-    return {
-      articles: [],
-      error: "Supabase is not configured. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY to apps/web/.env.local.",
-      configured: false,
-    };
+    return emptyFeed(
+      "Supabase is not configured. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY to apps/web/.env.local.",
+      false
+    );
   }
 
   // Normalise: an unknown or absent value means "show everything".
@@ -113,11 +175,11 @@ export async function getLatestArticles(options?: {
       .maybeSingle();
 
     if (category.error) {
-      return { articles: [], error: category.error.message, configured: true };
+      return emptyFeed(category.error.message, true);
     }
     // An unknown category slug is an empty feed, not an error.
     if (!category.data) {
-      return { articles: [], error: null, configured: true };
+      return emptyFeed(null, true);
     }
     categoryId = category.data.id;
   }
@@ -147,9 +209,93 @@ export async function getLatestArticles(options?: {
   // The picture pass runs inside both selects, before the slice, so a
   // dropped card's slot is backfilled from further down this same
   // ordering rather than left as a hole.
-  return languageFilter
-    ? languageSelect({ language: languageFilter, limit, categoryId, excludeIds })
-    : directSelect({ limit, categoryId, excludeIds });
+  //
+  // The count is a second query and only runs when asked for. The poll
+  // ticks every ten seconds and never needs it; a reader paging through
+  // the archive wants it once, to know whether "Load more" is a lie.
+  const counted = withTotal
+    ? countFeed({ categoryId, language: languageFilter }).catch(() => null)
+    : Promise.resolve(null);
+
+  const feed = languageFilter
+    ? await languageSelect({ language: languageFilter, limit, categoryId, excludeIds, cursor })
+    : await directSelect({ limit, categoryId, excludeIds, cursor });
+
+  if (feed.error) return feed;
+
+  return { ...feed, total: await counted };
+}
+
+/**
+ * Rows matching the feed's filters, deduplication not applied.
+ *
+ * `head: true` with `count: "exact"` returns the number in a header and
+ * no rows, so this costs a scan of the published set and no payload. It
+ * counts rows the reader will never see — the copies the read-side dedup
+ * drops are counted here — so the number is an upper bound on how far
+ * paging goes, and the UI says "about".
+ *
+ * For the language toggle this counts the requested language only, while
+ * `languageSelect` may top the page up from the other one. Deliberate:
+ * the alternative is a second count query on every page load for a
+ * figure that is only ever shown as an approximation.
+ */
+async function countFeed({
+  categoryId,
+  language,
+}: {
+  categoryId: string | null;
+  language?: "ne" | "en";
+}): Promise<number | null> {
+  const supabase = createPublicSupabaseClient();
+
+  let query = supabase
+    .from("articles")
+    .select("id", { count: "exact", head: true })
+    .eq("status", "published")
+    .is("duplicate_of", null);
+
+  if (categoryId) query = query.eq("primary_category_id", categoryId);
+  if (language) query = query.eq("language", language);
+
+  const { count, error } = await query;
+  if (error) {
+    console.error("[news] feed count failed:", error.message);
+    return null;
+  }
+  return count ?? null;
+}
+
+/**
+ * Narrow an ordered feed query to the rows below `cursor`.
+ *
+ * The row-value comparison `(published_at, id) < (:ts, :id)` that makes
+ * this a keyset is not something PostgREST can express, so it is spelled
+ * as the boolean identity it is:
+ *
+ *   published_at < ts  OR  (published_at = ts AND id < id)
+ *
+ * which is exactly the same set of rows, and is the form the `.or()`
+ * escape hatch takes. `id` is the tiebreaker because `published_at` is
+ * only second- or microsecond-resolution and several outlets publish in
+ * the same instant; without it, a page boundary landing inside a run of
+ * equal timestamps would skip or repeat those rows.
+ *
+ * `query` is returned rather than mutated in place only because
+ * postgrest-js builders are immutable; the call site reassigns.
+ */
+function applyCursor<T extends { or: (filter: string) => T }>(
+  query: T,
+  cursor: FeedCursor | null
+): T {
+  // An undated cursor addresses nothing: NULLs sort last, so there is no
+  // row below it to compare against.
+  if (!cursor?.published_at) return query;
+
+  const timestamp = cursor.published_at;
+  return query.or(
+    `(published_at.lt.${timestamp},and(published_at.eq.${timestamp},id.lt.${cursor.id}))`
+  );
 }
 
 /**
@@ -188,11 +334,13 @@ async function languageSelect({
   limit,
   categoryId,
   excludeIds,
+  cursor,
 }: {
   language: "ne" | "en";
   limit: number;
   categoryId: string | null;
   excludeIds?: string[] | null;
+  cursor?: FeedCursor | null;
 }): Promise<FeedResult> {
   const supabase = createPublicSupabaseClient();
 
@@ -218,6 +366,10 @@ async function languageSelect({
       .is("duplicate_of", null)
       .eq("language", lang)
       .order("published_at", { ascending: false, nullsFirst: false })
+      // The tiebreaker for the keyset cursor. Deterministic, so a page
+      // boundary inside a run of identical timestamps cannot skip or
+      // repeat rows — see applyCursor.
+      .order("id", { ascending: false })
       // Over-fetched for the same reason as directSelect: duplicates are
       // removed after the query, and the slots they vacate are refilled
       // from further down the ordering rather than left empty.
@@ -226,15 +378,19 @@ async function languageSelect({
     if (excludeIds && excludeIds.length > 0) {
       query = query.not("id", "in", `(${excludeIds.join(",")})`);
     }
-    return query;
+    return applyCursor(query, cursor ?? null);
   };
 
   const { data, error } = await build();
   if (error) {
-    return { articles: [], error: error.message, configured: true };
+    return emptyFeed(error.message, true);
   }
 
   const rows = ((data ?? []) as unknown[]).map(mapArticleRow);
+  // Counted before the top-up below, because this is the database's own
+  // answer to "is there anything left below this page", and the top-up
+  // inflates it with rows from a second query.
+  const fetched = rows.length;
 
   // Too thin on its own? Top up from the other language rather than
   // showing a nearly empty page.
@@ -267,14 +423,42 @@ async function languageSelect({
   // preferIllustrated is asked to find pictures for, and it will not
   // reorder either, so the two cannot disagree about which story holds
   // which slot.
+  const articles = preferIllustrated(
+    dropRepeatedImages(dropDuplicateStories(newestFirst(rows))),
+    limit
+  );
+
   return {
-    articles: preferIllustrated(
-      dropRepeatedImages(dropDuplicateStories(newestFirst(rows))),
-      limit
-    ),
+    articles,
     error: null,
     configured: true,
+    nextCursor: nextCursorFor(articles, fetched < limit * DEDUP_HEADROOM),
+    total: null,
   };
+}
+
+/**
+ * The cursor for the page that follows `articles`, or null when there is
+ * nothing left to fetch.
+ *
+ * Anchored on the last row the caller can SEE, not the last row the
+ * database sent. The difference matters: the over-fetch read further down
+ * the feed, and some of those rows are duplicates and some were merely
+ * cut by the slice. Anchoring on the fetched end would skip every story
+ * between the slice and the fetch, which is most of the next page.
+ *
+ * `exhausted` is the database's own answer — fewer rows came back than
+ * were asked for, so there is nothing below this one. It is checked
+ * first, so a thin last page reports no cursor rather than handing back
+ * one that would fetch an empty page next time.
+ */
+function nextCursorFor(
+  articles: LatestArticle[],
+  exhausted: boolean
+): FeedCursor | null {
+  const last = articles[articles.length - 1];
+  if (exhausted || !last) return null;
+  return cursorAfter(last);
 }
 
 /**
@@ -341,10 +525,12 @@ async function directSelect({
   limit,
   categoryId,
   excludeIds,
+  cursor,
 }: {
   limit: number;
   categoryId: string | null;
   excludeIds?: string[] | null;
+  cursor?: FeedCursor | null;
 }): Promise<FeedResult> {
   const supabase = createPublicSupabaseClient();
 
@@ -361,6 +547,12 @@ async function directSelect({
     // position 1 and the newest real story is pushed down the page.
     // latest_articles() specified `nulls last`; this must say it too.
     .order("published_at", { ascending: false, nullsFirst: false })
+    // The keyset tiebreaker, and a determinism fix in its own right.
+    // Several outlets publish inside the same second, so without a
+    // second sort key PostgreSQL is free to return that run in any order
+    // it likes — which made page boundaries inside such a run skip and
+    // repeat rows. See applyCursor.
+    .order("id", { ascending: false })
     // Over-fetched so that dropping duplicates can backfill with the next
     // story down instead of leaving a hole. See DEDUP_HEADROOM.
     .limit(limit * DEDUP_HEADROOM);
@@ -369,10 +561,11 @@ async function directSelect({
   if (excludeIds && excludeIds.length > 0) {
     query = query.not("id", "in", `(${excludeIds.join(",")})`);
   }
+  query = applyCursor(query, cursor ?? null);
 
   const { data, error } = await query;
   if (error) {
-    return { articles: [], error: error.message, configured: true };
+    return emptyFeed(error.message, true);
   }
 
   const mapped = ((data ?? []) as unknown[]).map((row) => {
@@ -414,10 +607,17 @@ async function directSelect({
   // the story pass means the story pass has already chosen which copy of
   // a story survives, so the picture it contributes is the one the reader
   // would actually see.
+  const articles = dropRepeatedImages(dropDuplicateStories(mapped)).slice(0, limit);
+
   return {
-    articles: dropRepeatedImages(dropDuplicateStories(mapped)).slice(0, limit),
+    articles,
     error: null,
     configured: true,
+    // Fewer rows than were asked for means the database ran out, not
+    // that deduplication ate them: `mapped` is counted before a single
+    // card was dropped.
+    nextCursor: nextCursorFor(articles, mapped.length < limit * DEDUP_HEADROOM),
+    total: null,
   };
 }
 

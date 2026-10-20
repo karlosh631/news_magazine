@@ -282,6 +282,60 @@ function isBetterCopy(candidate: FeedRow, incumbent: FeedRow): boolean {
 }
 
 /**
+ * Rows worth actually comparing `self` against.
+ *
+ * The loop this feeds used to walk every row below `selfIndex` and ask
+ * `sameStory` about each one — 500k comparisons on a thousand-row feed,
+ * and the homepage runs this over its whole running union on every poll.
+ * Measured on a synthetic thousand-row Nepali feed: 149ms, re-run every
+ * 10 seconds. That is a visible stall on a page whose whole promise is
+ * that it feels alive.
+ *
+ * So candidates come out of an inverted index instead, and the index is
+ * built once per call rather than per row.
+ *
+ * The probe is the sound subset, not a heuristic one. A row can only
+ * match through the fuzzy path if it shares at least MIN_SHARED_TOKENS
+ * tokens with `self`, so it must carry at least one of `self`'s tokens —
+ * and specifically, at least one of the (tokens - MIN_SHARED_TOKENS + 1)
+ * rarest of them: a row sharing none of the rarest could share at most
+ * MIN_SHARED_TOKENS - 1 of the commonest, which is one short of the
+ * gate. Dropping the commonest tokens is also what makes it fast — in a
+ * Nepali feed "नेपाल" is in a third of the headlines, and probing it
+ * would hand back most of the feed.
+ *
+ * The exact-match path needs no separate handling: identical normalised
+ * headlines imply identical token sets, so such a row carries every token
+ * `self` has, probe included. And a row with no tokens has an empty
+ * normalised headline, which `sameStory` rejects outright.
+ *
+ * Returned in ascending index order, because the caller breaks on the
+ * FIRST match it finds and which match that is decides whether a
+ * cluster of three keeps the best of the three or merely the first two.
+ */
+function candidatesFor(
+  self: Prepared,
+  postings: Map<string, number[]>,
+  selfIndex: number
+): number[] {
+  if (self.tokens.size === 0) return [];
+
+  const tokens = [...self.tokens].sort(
+    (a, b) => (postings.get(a)?.length ?? 0) - (postings.get(b)?.length ?? 0)
+  );
+  const probe = tokens.slice(0, Math.max(1, tokens.length - (MIN_SHARED_TOKENS - 1)));
+
+  const found = new Set<number>();
+  for (const token of probe) {
+    for (const index of postings.get(token) ?? []) {
+      if (index > selfIndex) found.add(index);
+    }
+  }
+
+  return [...found].sort((a, b) => a - b);
+}
+
+/**
  * Keep one card per story.
  *
  * Order is never changed. The survivor keeps its OWN slot in the feed, so
@@ -290,10 +344,11 @@ function isBetterCopy(candidate: FeedRow, incumbent: FeedRow): boolean {
  * secondary signal — the same trade `preferIllustrated` refuses to make.
  *
  * Clustering is greedy in feed order, mirroring dedup.py: a row that
- * matches any already-kept row is a duplicate of it. The window is
- * bounded (a feed is tens of rows, not thousands), and a shared-token
- * prefilter keeps the quadratic loop down to the handful of pairs that
- * are actually candidates.
+ * matches any already-kept row is a duplicate of it. Which pairs get
+ * compared is narrowed by `candidatesFor`, but the DECISION is the same
+ * greedy scan over the same matches in the same order, so this returns
+ * exactly what a full pairwise scan would — it just stops paying to
+ * compare headlines that share no words.
  */
 export function dropDuplicateStories<T extends FeedRow>(rows: T[]): T[] {
   if (rows.length < 2) return rows;
@@ -301,12 +356,23 @@ export function dropDuplicateStories<T extends FeedRow>(rows: T[]): T[] {
   const prepared = rows.map(prepare);
   const dropped = new Set<string>();
 
+  const postings = new Map<string, number[]>();
+  for (let i = 0; i < prepared.length; i += 1) {
+    const row = prepared[i];
+    if (!row) continue;
+    for (const token of row.tokens) {
+      const list = postings.get(token);
+      if (list) list.push(i);
+      else postings.set(token, [i]);
+    }
+  }
+
   for (let i = 0; i < prepared.length; i += 1) {
     const self = prepared[i];
     const selfRow = rows[i];
     if (!self || !selfRow || dropped.has(self.id)) continue;
 
-    for (let j = i + 1; j < prepared.length; j += 1) {
+    for (const j of candidatesFor(self, postings, i)) {
       const other = prepared[j];
       const otherRow = rows[j];
       if (!other || !otherRow || dropped.has(other.id)) continue;

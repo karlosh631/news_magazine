@@ -8,33 +8,46 @@ Each publishes terms that permit republication; that is the only reason
 a `<video>` can appear in front of a reader who never asked us. Sources
 with murky terms are not here, and neither are scrapers.
 
-Why three and not one
----------------------
+Why four and not one
+--------------------
 - Wikimedia Commons needs no key and no configuration, which is the
   whole reason the category is alive on a fresh deploy. Its clips are
   also the least reliably vertical.
 - Pexels and Pixabay are the two stock libraries whose free tiers
   genuinely allow publication. They need a key, and they are what make
   the feed read like a feed once one is configured.
+- YouTube Shorts is the odd one out and is NOT a redistributable
+  source like the other three. We do not republish its clips; we embed
+  them through YouTube's own player, which is the sharing mechanism
+  YouTube provides and the only one that needs no credential we do not
+  have. Read YouTubeShortsSource before treating its rows like the
+  others — it plays in an <iframe>, and its "licence" is a permission
+  for the uploader, not for us.
 
 Why nothing is downloaded
 -------------------------
 A reel row is metadata plus an upstream URL; playback streams from the
-provider's own CDN. Reels are the largest objects in the system and
-storing the bytes would buy a fatter database and a bandwidth bill.
+provider's own CDN or its own player. Reels are the largest objects in
+the system and storing the bytes would buy a fatter database and a
+bandwidth bill.
 
 Licence handling
 ----------------
 Attribution is filled in whether or not the licence demands display.
 "No attribution required" is a claim about the licence, never a claim
 that the clip is ours, and only the first of those is true.
+YouTube is the exception that proves the rule: every row it produces
+carries attribution_required=True, because its licence is not ours to
+read as permissive in the first place.
 """
 
 from __future__ import annotations
 
+import hashlib
 import html
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -201,6 +214,44 @@ def _int_or_none(value: Any) -> int | None:
 
 def _clamp_duration(value: Any) -> float | None:
     return _number(value)
+
+
+#: YouTube reports a running time as an ISO-8601 duration ("PT1M23S"),
+#: not a number of seconds, so the duration filter has to parse one.
+#: Every other provider here sends seconds and gets to use _number().
+_ISO_DURATION_RE = re.compile(
+    r"^P(?:(?P<days>\d+)D)?"
+    r"(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?)?$",
+    re.IGNORECASE,
+)
+
+
+def _iso8601_duration(value: Any) -> float | None:
+    """
+    "PT1M23S" -> 83.0 seconds, or None when it is not a duration.
+
+    A bare "P" or "PT" matches the pattern while carrying no time at all,
+    so the zero-check is not optional: without it an empty duration would
+    parse as 0.0 seconds, which reads as "instant clip" rather than
+    "provider said nothing useful".
+    """
+    if not isinstance(value, str):
+        return None
+
+    match = _ISO_DURATION_RE.match(value.strip())
+    if match is None:
+        return None
+
+    parts = match.groupdict()
+    if not any(parts[key] for key in ("days", "hours", "minutes", "seconds")):
+        return None
+
+    return (
+        int(parts["days"] or 0) * 86400
+        + int(parts["hours"] or 0) * 3600
+        + int(parts["minutes"] or 0) * 60
+        + float(parts["seconds"] or 0)
+    )
 
 
 def _parse_retry_after(value: str | None) -> float | None:
@@ -419,6 +470,32 @@ class _BaseSource:
             headers["Authorization"] = key
         return headers
 
+    def _scrub(self, text: str) -> str:
+        """
+        Remove every configured key from text that is about to be logged.
+
+        A credential in an error message is never something to keep: those
+        messages end up in SourceHealth.error, which is persisted and
+        rendered in the admin panel, and in warning log lines.
+
+        Providers that authenticate with a header are safe by
+        construction. One that authenticates with `key=` in the query
+        string is not — httpx.InvalidURL renders the whole url, query
+        string and all, and it does NOT derive from httpx.HTTPError, so
+        it sails past the handler in _send and surfaces at the boundary
+        in fetch() instead. Scrubbing in both places closes both doors,
+        and doing it for the whole pool rather than one key means a
+        rotated-out key cannot leak either.
+        """
+        if self._pool is None or not text:
+            return text
+
+        for key in self._pool.keys:
+            if key and key in text:
+                text = text.replace(key, "***")
+
+        return text
+
     def _require_pool(self) -> KeyPool:
         """
         The pool, or a precise complaint.
@@ -434,7 +511,13 @@ class _BaseSource:
             )
         return self._pool
 
-    async def _get_json(self, params: dict[str, Any], headers: dict[str, str] | None = None) -> dict:
+    async def _get_json(
+        self,
+        params: dict[str, Any],
+        headers: dict[str, str] | None = None,
+        *,
+        endpoint: str | None = None,
+    ) -> dict:
         """
         One JSON GET, with key rotation.
 
@@ -442,6 +525,12 @@ class _BaseSource:
         the last key is cooling, `next_key()` raises KeyPoolExhausted and
         that propagates untouched, because a full pool is the
         orchestrator's backoff decision and not a provider failure.
+
+        `endpoint` overrides `self.endpoint` for providers that publish
+        more than one API. It is threaded through to the wire rather than
+        swapped by the caller, so a second call site cannot accidentally
+        bypass the rotation, the Retry-After handling or the error
+        boundary — all three of which are the reason this method exists.
         """
         pool = self._require_pool() if self.requires_key else self._pool
 
@@ -460,7 +549,9 @@ class _BaseSource:
         if pool is None or pool.is_empty:
             # No key to rotate, so no reason to rotate anything. Same
             # status handling, minus the bookkeeping.
-            return self._decode(await self._send(None, params, headers))
+            return self._decode(
+                await self._send(None, params, headers, endpoint)
+            )
 
         # Bounded so a pathological pool cannot spin. next_key() raises
         # first in practice once every key is in cooldown.
@@ -468,7 +559,7 @@ class _BaseSource:
 
         for _ in range(attempts):
             key = pool.next_key()
-            response = await self._send(key, params, headers)
+            response = await self._send(key, params, headers, endpoint)
 
             if response.status_code == 429:
                 retry_after = _parse_retry_after(response.headers.get("retry-after"))
@@ -535,16 +626,26 @@ class _BaseSource:
         key: str | None,
         params: dict[str, Any],
         headers: dict[str, str] | None,
+        endpoint: str | None = None,
     ) -> httpx.Response:
         merged = {"User-Agent": USER_AGENT}
         merged.update(self._headers(key))
         if headers:
             merged.update(headers)
 
+        # A provider that puts its credential in the query string (rather
+        # than in a header) overrides _send and injects it there. Copy
+        # first: `params` is the caller's dict and is reused across key
+        # rotation attempts, so mutating it would leak one key's value
+        # into the next attempt's URL.
+        url = endpoint or self.endpoint
+
         try:
-            return await self._client.get(self.endpoint, params=params, headers=merged)
+            return await self._client.get(url, params=params, headers=merged)
         except httpx.HTTPError as exc:
-            raise ProviderError(f"{self.key}: request failed: {exc}") from exc
+            raise ProviderError(
+                f"{self.key}: request failed: {self._scrub(str(exc))}"
+            ) from exc
 
     # -------------------------------------------------
     # Contract
@@ -566,7 +667,7 @@ class _BaseSource:
             raise
         except Exception as exc:  # noqa: BLE001 - boundary on purpose
             raise ProviderError(
-                f"{self.key}: {type(exc).__name__}: {exc}"
+                f"{self.key}: {type(exc).__name__}: {self._scrub(str(exc))}"
             ) from exc
 
         reels = reels[:limit]
@@ -1143,6 +1244,86 @@ class PixabaySource(_BaseSource):
     LICENSE_NAME = "Pixabay Content License"
     LICENSE_URL = "https://pixabay.com/service/license-summary/"
 
+    # Pixabay's terms require a 24-hour cache and say plainly: "the API
+    # is made for real human requests; do not send lots of automated
+    # queries."
+    #
+    # The reels job runs every five minutes, so without this it would
+    # issue 288 identical requests a day per search term — the exact
+    # pattern that clause exists to prevent, and it would spend a
+    # free-tier quota that is keyed per API key rather than per IP.
+    CACHE_TTL_SECONDS = 24 * 60 * 60
+
+    # Query fingerprint -> (fetched_at, payload). Module-level so the
+    # cache survives an adapter being rebuilt on every pass, and bounded
+    # so a rotating set of search terms cannot grow it for ever.
+    _cache: dict[str, tuple[float, dict]] = {}
+    _CACHE_MAX_ENTRIES = 64
+
+    async def _get_json_cached(self, params: dict[str, Any]) -> dict:
+        """
+        `_get_json`, memoised for the 24 hours Pixabay's terms require.
+
+        Pixabay: "To keep the Pixabay API fast for everyone, requests
+        must be cached for 24 hours. Also, the API is made for real
+        human requests; do not send lots of automated queries."
+
+        Both halves of that are load-bearing. The reels pass runs every
+        five minutes against one search term, so an uncached adapter
+        issues 288 byte-identical requests a day — precisely the
+        automated-query pattern the clause forbids, against a free tier
+        whose limit is counted per API key and not per IP, so hitting it
+        costs the operator a key rather than costing us a request.
+
+        The fingerprint deliberately EXCLUDES the key. Rotating keys is
+        how the pool spreads quota, and a cache keyed per key would
+        multiply every entry by the pool size — which is the opposite of
+        the point. Pixabay's result does not vary by which of our keys
+        asked for it.
+
+        Empty responses ARE cached, deliberately. An empty body is a
+        real answer to a real query, and re-asking it every five minutes
+        is precisely the traffic the 24-hour rule exists to prevent. The
+        cost of that choice is real and worth stating: one bad minute
+        costs that search term a day, and the fix is a wider term, not a
+        shorter TTL.
+
+        Failures are a different thing. They raise out of `_get_json`
+        before this method ever stores anything, so an upstream error can
+        never be cached — a transient 500 costs one pass, not 288.
+        """
+        fingerprint = hashlib.sha256(
+            "&".join(f"{key}={params[key]}" for key in sorted(params)).encode()
+        ).hexdigest()
+
+        now = time.monotonic()
+        hit = self._cache.get(fingerprint)
+        if hit is not None:
+            fetched_at, payload = hit
+            age = now - fetched_at
+            if age < self.CACHE_TTL_SECONDS:
+                logger.debug(
+                    "pixabay: cache hit for %s (%.1fh old of %.1fh), not re-requesting.",
+                    params.get("q"),
+                    age / 3600,
+                    self.CACHE_TTL_SECONDS / 3600,
+                )
+                return payload
+            # Expired. Dropped before the refetch so a failure cannot
+            # leave a stale entry behind pretending to be fresh.
+            del self._cache[fingerprint]
+
+        payload = await self._get_json(params)
+
+        # Evict the oldest insertions first. dict preserves order, and
+        # every entry is written once and left alone, so the first key
+        # is the oldest — no sorting needed.
+        while len(self._cache) >= self._CACHE_MAX_ENTRIES:
+            self._cache.pop(next(iter(self._cache)), None)
+
+        self._cache[fingerprint] = (now, payload)
+        return payload
+
     async def _fetch(self, limit: int) -> list[Reel]:
         params = {
             "q": self.hint or "vertical",
@@ -1153,7 +1334,7 @@ class PixabaySource(_BaseSource):
             "json": "1",
         }
 
-        payload = await self._get_json(params)
+        payload = await self._get_json_cached(params)
 
         # The API wraps hits in "videos" and the count in "videoCount",
         # and for a single hit "videos" arrives as an object rather than
@@ -1275,6 +1456,468 @@ class PixabaySource(_BaseSource):
 
 
 # ---------------------------------------------------------------------------
+# YOUTUBE SHORTS
+# ---------------------------------------------------------------------------
+
+class YouTubeShortsSource(_BaseSource):
+    """
+    YouTube Shorts, embedded through YouTube's own player.
+
+    This adapter is categorically different from the three above, and the
+    difference is the whole reason it is documented at length.
+
+    What it is NOT
+    --------------
+    It is not a redistributable stock library. Pexels, Pixabay and
+    Commons all grant US permission to republish their clips as our own
+    feed items. YouTube grants nothing of the kind: the YouTube Standard
+    Licence is a licence the UPLOADER holds over their own video, and it
+    confers no republication right on a third party at all. Treating this
+    adapter like its neighbours — "a source whose clips we may show" —
+    would be a straight misreading of what the API returns.
+
+    What it is
+    ----------
+    An EMBEDDING source. Every row points at YouTube's official embed
+    player, which is the sharing mechanism YouTube itself provides and
+    documents. We show the video inside YouTube's own player, credit the
+    channel, and link to the channel. We do not download it, we do not
+    re-host it, and we do not claim it.
+
+    Why `video_url` is an embed URL and NEVER a media URL
+    ------------------------------------------------------
+    The playable bytes behind a YouTube video live on googlevideo.com and
+    are served from URLs carrying a signature that must be derived from
+    the client. Extracting one means reproducing YouTube's player
+    obfuscation — scraping, in every sense that matters — and it breaks
+    the moment YouTube changes the scheme, which it does without notice.
+
+    So this adapter does not attempt it, at all, ever. `video_url` is
+    `https://www.youtube.com/embed/<id>`: the official iframe player
+    src. That URL plays, it is stable, and using it is the sanctioned
+    path. A row whose video_url is a googlevideo.com URL could only have
+    come from somewhere that decoded a signature, and that is a bug.
+
+    Consequence for the web player
+    ------------------------------
+    An embed URL is an HTML document, not a media file, so it does NOT
+    play in a `<video src>` — the browser rejects it and the card renders
+    "Replay unavailable". Every row from this adapter therefore also sets
+    `embed_url`, which is what tells ReelCard to render an <iframe>
+    instead. See `Reel.embed_url` and migration 0015.
+
+    What `player` would have given us, and why it is not called
+    ----------------------------------------------------------
+    The `player` part returns the direct streaming formats, and it is
+    the only place the real media URL exists. It REQUIRES OAuth: an
+    API key returns HTTP 401 for it, always. This adapter uses an API
+    key and must never grow an OAuth token, an `Authorization: Bearer`,
+    or a `youtubeAnalytics` scope — there is no configured client secret
+    to make one with, and adding one would mean storing a user credential
+    to serve a feed that embeds perfectly well without it.
+
+    Quota — read this before enabling it on a 5-minute schedule
+    ----------------------------------------------------------
+    `search.list` costs 100 units per call and `videos.list` costs 1.
+    Google's default daily quota is 10,000 units, which is roughly 95
+    searches. REELS_POLL_SECONDS defaults to 300, i.e. 288 passes a day,
+    so an unconfigured-for-this YouTube provider will exhaust its quota
+    within half an hour and then 429 for the rest of the day. That is
+    survivable — the pool cools the key and the other providers carry on
+    — but it means YouTube adds nothing unless REELS_POLL_SECONDS is
+    raised to an hour or two, or several keys are configured.
+    """
+
+    key = "youtube"
+    requires_key = True
+    provider_name = "YouTube"
+    endpoint = "https://www.googleapis.com/youtube/v3/search"
+
+    #: search.list and videos.list are one host and one key but two
+    #: paths, so the second call goes through _get_json(endpoint=...).
+    videos_endpoint = "https://www.googleapis.com/youtube/v3/videos"
+
+    #: The official embed player. `video_url` and `embed_url` are both
+    #: this, which is why a bare <video src> cannot play it.
+    _EMBED_BASE = "https://www.youtube.com/embed/"
+
+    #: The licence most uploads carry: the uploader keeps their rights
+    #: and grants nothing to us beyond embedding.
+    LICENSE_STANDARD = "YouTube Standard License"
+    LICENSE_STANDARD_URL = (
+        "https://support.google.com/youtube/answer/2797468"
+    )
+
+    #: A genuinely permissive one. CC BY 3.0 is a real Creative Commons
+    #: licence the uploader chose, so this is the case where we can say
+    #: what the terms actually are instead of describing a permission
+    #: that was never extended to us.
+    LICENSE_CC = "CC BY 3.0"
+    LICENSE_CC_URL = "https://creativecommons.org/licenses/by/3.0/"
+
+    #: search.list caps maxResults at 50, and videos.list accepts at
+    #: most 50 ids per call — the same number, so one videos.list always
+    #: covers everything search returned and no chunking is needed.
+    _MAX_RESULTS = 50
+
+    # -------------------------------------------------
+    # Credentials
+    # -------------------------------------------------
+
+    def _headers(self, key: str | None) -> dict[str, str]:
+        """
+        No Authorization header, deliberately.
+
+        The base class puts the key in `Authorization`, which is correct
+        for Pexels and wrong for Google: that header is reserved for
+        OAuth bearer tokens, and a bare API key sent there is either
+        ignored or rejected. Google's own parameter is `key=` in the
+        query string.
+        """
+        return {"Accept": "application/json"}
+
+    async def _send(self, key, params, headers, endpoint=None):
+        """
+        Add `key=` to the query string, then let the base do the rest.
+
+        `params` is copied rather than mutated: _get_json reuses the same
+        dict across every key-rotation attempt, and writing the first
+        key into it would leave that key sitting in the URL the second
+        attempt sends — a credential in a log line, from our own pool.
+        """
+        query = dict(params)
+        if key:
+            query["key"] = key
+        return await super()._send(key, query, headers, endpoint)
+
+    # -------------------------------------------------
+    # Fetch
+    # -------------------------------------------------
+
+    async def _fetch(self, limit: int) -> list[Reel]:
+        # Over-fetch, for the same reason Wikimedia does. Most hits are
+        # dropped for being long, for not being embeddable or for being
+        # live, and asking for exactly `limit` would return a short feed.
+        wanted = min(self._MAX_RESULTS, max(limit, 10) * 2)
+
+        hits = await self._search(wanted)
+        if not hits:
+            return []
+
+        details = await self._details([hit["id"] for hit in hits])
+
+        reels: list[Reel] = []
+        skipped_too_long = 0
+        skipped_not_embeddable = 0
+        skipped_live = 0
+        skipped_no_licence = 0
+
+        for hit in hits:
+            detail = details.get(hit["id"])
+            if detail is None:
+                # Deleted, private, or made non-embeddable between the
+                # two calls. videoEmbedDeny=FAIL already asked search to
+                # exclude the unembeddable ones; a miss here is the
+                # residual, and there is nothing honest to show for it.
+                continue
+
+            reel, reason = self._to_reel(hit, detail)
+
+            if reel is not None:
+                reels.append(reel)
+            elif reason == "too_long":
+                skipped_too_long += 1
+            elif reason == "not_embeddable":
+                skipped_not_embeddable += 1
+            elif reason == "live":
+                skipped_live += 1
+            elif reason == "no_licence":
+                skipped_no_licence += 1
+
+        if skipped_too_long or skipped_not_embeddable or skipped_live or skipped_no_licence:
+            logger.debug(
+                "youtube: dropped %d too long, %d not embeddable, %d live "
+                "and %d with no permissive licence.",
+                skipped_too_long, skipped_not_embeddable, skipped_live,
+                skipped_no_licence,
+            )
+
+        return _sorted_by_timestamp(reels)
+
+    async def _search(self, wanted: int) -> list[dict]:
+        """Video hits from search.list, reduced to id + snippet."""
+        params = {
+            "part": "snippet",
+            "type": "video",
+            "q": self.hint or "shorts",
+            "maxResults": str(wanted),
+            # Newest first, so a repeated pass finds material it has not
+            # already stored. Relevance ordering would re-serve the same
+            # top videos on every pass and the feed would never move.
+            "order": "date",
+            # YouTube's own "short" bucket. See the class docstring for
+            # the two things this does not do: it is a coarse server-side
+            # prefilter, and it excludes genuine Shorts under 60s.
+            "videoDuration": "short",
+            # The single most important filter in this adapter. FAIL
+            # means "exclude videos whose owner forbids embedding", so
+            # every hit that survives has already told us the uploader
+            # permits a player on another site.
+            "videoEmbedDeny": "FAIL",
+            # Keeps a Reels feed on a news site from becoming whatever
+            # else a keyword search turns up.
+            "safeSearch": "strict",
+        }
+
+        payload = await self._get_json(params)
+
+        items = payload.get("items")
+        if not isinstance(items, list):
+            return []
+
+        hits: list[dict] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            video_id = item.get("id")
+            if isinstance(video_id, dict):
+                video_id = video_id.get("videoId")
+            # The API returns id objects of several shapes depending on
+            # what `type` matched; only the video one is usable here.
+            if not isinstance(video_id, str) or not video_id.strip():
+                continue
+            hits.append(
+                {
+                    "id": video_id.strip(),
+                    "snippet": item.get("snippet")
+                    if isinstance(item.get("snippet"), dict)
+                    else {},
+                }
+            )
+
+        return hits
+
+    async def _details(self, ids: list[str]) -> dict[str, dict]:
+        """
+        The authoritative facts for a set of ids, keyed by id.
+
+        `contentDetails.duration` is the only trustworthy length we can
+        get, and `status.embeddable` is the only trustworthy answer to
+        "may we put a player on this page". Both are in `videos.list`;
+        neither is in `search.list`, which is why this call exists at all.
+        """
+        if not ids:
+            return {}
+
+        params = {
+            "part": "contentDetails,status,snippet",
+            "id": ",".join(ids[: self._MAX_RESULTS]),
+            "maxResults": str(min(len(ids), self._MAX_RESULTS)),
+        }
+
+        payload = await self._get_json(params, endpoint=self.videos_endpoint)
+
+        items = payload.get("items")
+        if not isinstance(items, list):
+            return {}
+
+        found: dict[str, dict] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            video_id = item.get("id")
+            if isinstance(video_id, str) and video_id:
+                found[video_id] = item
+
+        return found
+
+    # -------------------------------------------------
+    # Parsing
+    # -------------------------------------------------
+
+    def _to_reel(self, hit: dict, detail: dict) -> tuple[Reel | None, str | None]:
+        """One video -> one Reel, or the reason it was dropped."""
+        video_id = hit["id"]
+
+        # The search snippet is preferred for the human fields because
+        # it is the same object the ordering came from, but either is
+        # fine — they are the same record from two calls.
+        snippet = hit.get("snippet") or {}
+        if not isinstance(snippet, dict):
+            snippet = {}
+        detail_snippet = detail.get("snippet") if isinstance(detail.get("snippet"), dict) else {}
+        merged = {**detail_snippet, **snippet}
+
+        status = detail.get("status") if isinstance(detail.get("status"), dict) else {}
+
+        # Embedding is a permission, and the search filter only believed
+        # the index. videos.list is the record of truth, and an absent
+        # `embeddable` is a NO: defaulting it to True would let exactly
+        # the videos the owner locked down into the feed.
+        if status.get("embeddable") is not True:
+            return None, "not_embeddable"
+
+        if status.get("privacyStatus") == "private":
+            return None, "not_embeddable"
+
+        # A live or scheduled broadcast is not a Short. `none` is the
+        # only value that means "an ordinary uploaded video".
+        broadcast = str(merged.get("liveBroadcastContent") or "").lower()
+        if broadcast and broadcast != "none":
+            return None, "live"
+
+        content_details = (
+            detail.get("contentDetails")
+            if isinstance(detail.get("contentDetails"), dict)
+            else {}
+        )
+
+        duration = _iso8601_duration(content_details.get("duration"))
+        if duration is None or duration <= 0:
+            # Unlike the other providers, an unknown length here is a
+            # REJECT rather than a pass. _within_duration() lets None
+            # through because Commons clips often have no running time
+            # and are still fine; a YouTube video with no parseable
+            # duration is a record we could not verify is a Short, and
+            # "we could not verify" is not a licence to publish.
+            return None, "too_long"
+        if duration > MAX_SECONDS:
+            return None, "too_long"
+
+        licence = self._licence(status)
+        if licence is None:
+            return None, "no_licence"
+        license_name, license_url = licence
+
+        creator_name, creator_url = self._creator(merged)
+
+        title = _plain_text(merged.get("title"))
+        if not title:
+            # Never emit an untitled, unattributed card. The channel is
+            # still known, so the reel is real — but a row whose only
+            # text is a channel name is not what a feed wants, and the
+            # caller can always fetch a wider search.
+            title = None
+
+        embed_url = self._EMBED_BASE + video_id
+
+        return (
+            Reel(
+                source_key=self.key,
+                external_id=video_id,
+                # An embed player src, deliberately. See the class
+                # docstring: the raw googlevideo stream needs signature
+                # decoding and is never produced here.
+                video_url=embed_url,
+                embed_url=embed_url,
+                poster_url=self._poster(merged, video_id),
+                title=title,
+                description=_plain_text(merged.get("description")),
+                creator_name=creator_name,
+                creator_url=creator_url,
+                license_name=license_name,
+                license_url=license_url,
+                # True unconditionally, including for the CC rows. A
+                # uploader who picked CC BY 3.0 is owed the credit, and
+                # the class docstring explains why nothing here is ever
+                # "attribution not required".
+                attribution_required=True,
+                # YouTube does not report the dimensions of a Short, and
+                # guessing 1080x1920 from the format would be inventing
+                # data. None renders as an unknown aspect ratio, which
+                # the feed already handles.
+                width=None,
+                height=None,
+                duration_seconds=duration,
+                published_at=_iso(merged.get("publishedAt")),
+            ),
+            None,
+        )
+
+    def _licence(self, status: dict) -> tuple[str, str] | None:
+        """
+        (license_name, license_url) — or None when we cannot read one.
+
+        `creativeCommon` means the uploader licensed the video CC BY 3.0,
+        which is a real, named, permissive licence. `youtube` is the
+        platform default: it says the uploader keeps their rights, and it
+        extends nothing to a third party that embeds it.
+
+        Anything else is refused rather than guessed. YouTube has shipped
+        licence values this adapter has never seen, and defaulting an
+        unrecognised one to "standard" would publish a row whose licence
+        we had not actually read.
+
+        The spellings are the documented ones — `creativeCommon` and
+        `youtube` — lowercased before comparison because the API has
+        returned this field with inconsistent casing, and a licence that
+        is dropped for a capital C would silently empty the feed's best
+        material.
+        """
+        licence = str(status.get("license") or "").strip().lower()
+
+        if licence == "youtube":
+            return self.LICENSE_STANDARD, self.LICENSE_STANDARD_URL
+
+        # `status.license` is documented as one of "youtube" or
+        # "creativeCommon". `creativeCommon` is the value the API
+        # actually sends; the long form is accepted too so a future
+        # rename is a licence that keeps working rather than one that
+        # silently empties the feed of its best-attributed material.
+        if licence in {"creativecommons", "creativecommon"}:
+            return self.LICENSE_CC, self.LICENSE_CC_URL
+
+        return None
+
+    def _creator(self, snippet: dict) -> tuple[str, str | None]:
+        """
+        The channel, which is the only creator YouTube exposes.
+
+        `channelId` is authoritative and stable; `channelTitle` is the
+        display name and can be renamed out from under a stored row,
+        which is another reason to prefer the id for the link.
+
+        The channel title is mandatory. This adapter falls back to the
+        provider name rather than emitting None, because a card that
+        credits nobody is precisely the thing the whole package is
+        written to prevent — and on YouTube, a channel is always present
+        on a public video, so a missing title means the API shape moved.
+        """
+        name = _plain_text(snippet.get("channelTitle")) or self.provider_name
+
+        channel_id = snippet.get("channelId")
+        if isinstance(channel_id, str) and channel_id.strip():
+            return name, f"https://www.youtube.com/channel/{channel_id.strip()}"
+
+        return name, "https://www.youtube.com/"
+
+    def _poster(self, snippet: dict, video_id: str) -> str | None:
+        """
+        YouTube's own thumbnail for the video.
+
+        The API's `high` thumbnail is `hqdefault.jpg`, which is
+        guaranteed to exist for every video and is why it is used rather
+        than the 1280px `maxresdefault` — that one is absent on many
+        uploads and would 404 for a good share of the feed. It is 4:3
+        and letterboxed rather than vertical, so the card crops it; a
+        guaranteed image that crops beats a perfect one that is not
+        there.
+        """
+        thumbnails = (
+            snippet.get("thumbnails") if isinstance(snippet.get("thumbnails"), dict) else {}
+        )
+
+        for bucket in ("high", "medium", "default"):
+            entry = thumbnails.get(bucket)
+            if isinstance(entry, dict):
+                url = _absolute(entry.get("url"))
+                if url:
+                    return url
+
+        return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+
+
+# ---------------------------------------------------------------------------
 # REGISTRY
 # ---------------------------------------------------------------------------
 
@@ -1282,6 +1925,7 @@ PROVIDERS: dict[str, type] = {
     "wikimedia": WikimediaSource,
     "pexels": PexelsSource,
     "pixabay": PixabaySource,
+    "youtube": YouTubeShortsSource,
 }
 
 

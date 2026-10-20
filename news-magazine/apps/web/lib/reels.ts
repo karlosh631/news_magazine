@@ -34,11 +34,37 @@ const REELS_MAX_LIMIT = 50;
  * feature yet. That is not an error and must never render as one.
  */
 export const REELS_NOT_AVAILABLE_NOTE =
-  "Reels are not available yet: apply supabase/migrations/0014_reels.sql to create the reels and reel_likes tables.";
+  "Reels are not available yet: apply supabase/migrations/0014_reels.sql to create the reels and reel_likes tables. " +
+  "YouTube Shorts additionally need 0015_reels_embed_url.sql; without it those rows are filtered out of the feed rather than shown broken.";
 
 export interface Reel {
   id: string;
+  /**
+   * Which library this clip came from — `pixabay`, `pexels`, `wikimedia`,
+   * `youtube`.
+   *
+   * This is NOT a display detail. Pixabay's API terms: "If you make use
+   * of the API, show your users where the images and videos are from,
+   * whenever search results are displayed." The per-clip credit block
+   * satisfies the licence; it does not satisfy that, because the uploader
+   * of a Pixabay clip is a Pixabay user and not the library itself. The
+   * card therefore renders the provider on every reel, unconditionally,
+   * not inside the disclosure.
+   */
+  source_key: string | null;
   video_url: string;
+  /**
+   * Official provider embed-player src, present only when `video_url`
+   * is NOT a directly playable media file (migration 0015).
+   *
+   * Currently only the YouTube provider sets it. A YouTube embed URL is
+   * an HTML document, so `<video src>` refuses it and the card would
+   * render "Replay unavailable" — the player branches on this field to
+   * choose `<iframe>`, never on `source_key`, so a future provider gets
+   * the right player by setting one field. null means a plain media
+   * file, which is every other provider and every pre-0015 row.
+   */
+  embed_url: string | null;
   poster_url: string | null;
   title: string | null;
   description: string | null;
@@ -124,7 +150,7 @@ export async function getReels(opts?: { limit?: number }): Promise<ReelFeedResul
   const { data, error } = await supabase
     .from("reels")
     .select(
-      "id, video_url, poster_url, title, description, creator_name, creator_url, license_name, license_url, attribution_required, width, height, duration_seconds, published_at, reel_likes(count)"
+      "id, source_key, video_url, embed_url, poster_url, title, description, creator_name, creator_url, license_name, license_url, attribution_required, width, height, duration_seconds, published_at, reel_likes(count)"
     )
     // nullsFirst: false is required, not cosmetic — the same trap the
     // articles feed documents. PostgreSQL defaults `ORDER BY ... DESC` to
@@ -180,6 +206,17 @@ function isPlayableReel(reel: Reel): boolean {
   if (url.endsWith(".ogv") || url.endsWith(".ogg") || url.endsWith(".theora")) {
     return false;
   }
+
+  // A YouTube embed URL with no companion `embed_url` cannot play at all:
+  // `<video>` rejects it and the card is "Replay unavailable". That is
+  // what a youtube row looks like before migration 0015 has been
+  // applied. Dropping it here turns a grid of broken cards into a feed
+  // that is merely shorter, and the YouTube rows come back on their own
+  // once the migration lands — nothing has to be re-ingested.
+  if (!reel.embed_url && url.includes("youtube.com/embed/")) {
+    return false;
+  }
+
   return true;
 }
 
@@ -189,9 +226,18 @@ function mapReelRow(row: unknown): Reel {
 
   return {
     id: String(item.id),
+    // Present since 0014, so no absent-column concern here — but a row
+    // written by a hand or an import may still carry a null, and the
+    // card renders nothing rather than "null" in that case.
+    source_key: (item.source_key as string) ?? null,
     // The only two columns the schema declares NOT NULL, and the player
     // cannot start without them.
     video_url: String(item.video_url),
+    // Absent on every database that has not had 0015 applied, which is
+    // the whole point of it being nullable: reading a column that does
+    // not exist is a PGRST error, and a column that is there but null is
+    // just "this clip is a plain media file".
+    embed_url: (item.embed_url as string) ?? null,
     poster_url: (item.poster_url as string) ?? null,
     title: (item.title as string) ?? null,
     description: (item.description as string) ?? null,

@@ -79,6 +79,7 @@ export default async function HomePage() {
 
       <LiveArticleFeed
         initialArticles={feed.articles}
+        initialCursor={feed.nextCursor}
         emptyState={{
           title: feed.configured ? "No stories yet" : "Cannot reach the database",
           description:

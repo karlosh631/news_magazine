@@ -446,6 +446,24 @@ export function ReelsFeed({
   */
   const layoutVisible = useLayoutVariant();
 
+  /*
+    `mountEmbed` follows the same rule `active` does, and for a much
+    heavier reason.
+
+    Both layouts exist in the DOM at once, so every embedded reel would
+    otherwise instantiate its player TWICE — twenty-four YouTube IFrame
+    Players on a twelve-card page. That is not a duplicate <video> that
+    quietly decodes in the background; each one is a separate third-party
+    player pulling its own script and session, and enough of them will
+    stall the page and get this host throttled by Google.
+
+    So exactly one embed exists on the page: the active clip, in the
+    layout that is actually on screen. Every other embedded card shows
+    its poster until it becomes the active one. The cost is that the
+    player is fetched as the reader arrives at a clip rather than ahead
+    of them, which is the same trade YouTube's own site makes and is
+    invisible against a poster.
+  */
   const renderFeed = (key: "mobile" | "desktop") => (
     <div
       key={key}
@@ -464,6 +482,7 @@ export function ReelsFeed({
           <ReelCard
             reel={reel}
             active={activeId === reel.id && layoutVisible === key}
+            mountEmbed={activeId === reel.id && layoutVisible === key}
             muted={muted}
             onMutedChange={setMuted}
           />

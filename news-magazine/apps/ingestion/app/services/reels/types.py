@@ -35,6 +35,18 @@ class Reel:
     # us and never stored — the browser fetches this URL directly.
     video_url: str
 
+    # Set ONLY by providers that cannot offer a directly playable file
+    # and must hand the browser a player instead. YouTube is the one
+    # today: its media lives behind a signature we deliberately do not
+    # decode, so `video_url` is the official embed player src and this
+    # repeats it to say "render an <iframe>, not a <video>".
+    #
+    # None means a plain media file, which is every other provider and
+    # every row written before this field existed. The web player
+    # branches on presence, not on source_key, so a new provider gets
+    # the right player by setting one field.
+    embed_url: str | None = None
+
     poster_url: str | None = None
     title: str | None = None
     description: str | None = None

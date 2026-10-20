@@ -185,6 +185,16 @@ class Settings(BaseSettings):
     # hour — frequent enough to read as live, courteous enough to keep.
     pexels_api_keys: str | None = None      # comma-separated
     pixabay_api_keys: str | None = None     # comma-separated
+    # YouTube Data API v3 key. Comma-separated for the same reason.
+    #
+    # This one is an EMBEDDING source, not a redistributable one — the
+    # adapter embeds YouTube's own player and never touches the media
+    # stream. Note also that search.list costs 100 quota units a call
+    # against a default daily budget of 10,000, so YouTube contributes
+    # almost nothing at REELS_POLL_SECONDS=300 unless several keys are
+    # configured or the poll interval is raised. See
+    # YouTubeShortsSource for the full arithmetic.
+    youtube_api_keys: str | None = None     # comma-separated
     # Comma-separated hints, rotated one per pass.
     #
     # The default is deliberately NOT empty. With no hint, the keyless

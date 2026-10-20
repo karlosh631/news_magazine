@@ -452,6 +452,14 @@ REEL_PROVIDERS: tuple[tuple[str, str | None], ...] = (
     ("wikimedia", None),
     ("pexels", "pexels_api_keys"),
     ("pixabay", "pixabay_api_keys"),
+    # An EMBEDDING source, not a redistributable one: the adapter embeds
+    # YouTube's own player and never decodes a media stream. It is also
+    # by far the most expensive key here — search.list is 100 units a call
+    # against a 10,000/day default — so on the default 5-minute cadence
+    # one key is spent inside half an hour. Harmless (the pool cools it
+    # and the providers above carry on), but it means YouTube adds little
+    # without several keys or a longer REELS_POLL_SECONDS.
+    ("youtube", "youtube_api_keys"),
 )
 
 # Wikimedia's API policy asks every client to identify itself, and

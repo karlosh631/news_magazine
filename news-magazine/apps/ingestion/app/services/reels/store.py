@@ -20,6 +20,12 @@ limits, and buy nothing a URL does not already buy. There is no column
 for video bytes in migration 0014_reels.sql and there must never be one.
 If a future change reaches for one, this file has been misunderstood.
 
+Migration 0015_reels_embed_url.sql adds `embed_url`, which is a second
+URL and not a payload. It exists because one provider cannot offer a
+directly playable file and will not decode one to manufacture it; the
+player needs to know that before it can pick between <video> and
+<iframe>. Nothing else about the rule above changes.
+
 The layering this file keeps
 ----------------------------
 Adapters talk to providers; this module talks to the database; neither
@@ -218,6 +224,7 @@ def _reel_row(reel: Reel) -> dict[str, Any]:
     }
 
     for column, value in (
+        ("embed_url", reel.embed_url),
         ("poster_url", reel.poster_url),
         ("title", reel.title),
         ("description", reel.description),
@@ -549,7 +556,17 @@ async def ingest_reels(
 # on the wire.
 FEED_COLUMNS: tuple[str, ...] = (
     "id",
+    # Which library the clip came from. The web card renders it on every
+    # reel because Pixabay's API terms require the origin of every
+    # result to be shown to the reader, so a feed row without it cannot
+    # satisfy that duty.
+    "source_key",
     "video_url",
+    # Migration 0015. Selected alongside video_url, never instead of it:
+    # video_url stays NOT NULL so the column the player and every
+    # existing query already depend on keeps its meaning, and embed_url
+    # only says whether that URL needs an <iframe> to play.
+    "embed_url",
     "poster_url",
     "title",
     "description",

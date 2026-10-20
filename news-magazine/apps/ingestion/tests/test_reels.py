@@ -38,6 +38,7 @@ import inspect
 import time
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from app.services.reels import keys as reels_keys
@@ -492,6 +493,7 @@ def test_requires_key_matches_the_deployment_reality():
     assert PROVIDERS["wikimedia"].requires_key is False
     assert PROVIDERS["pexels"].requires_key is True
     assert PROVIDERS["pixabay"].requires_key is True
+    assert PROVIDERS["youtube"].requires_key is True
 
 
 def test_a_constructed_source_satisfies_the_reel_source_protocol():
@@ -783,6 +785,7 @@ def _reels_settings(**overrides):
         reels_poll_seconds=900,
         pexels_api_keys=None,
         pixabay_api_keys=None,
+        youtube_api_keys=None,
         reels_search_terms="nepal",
         reels_http_timeout=20.0,
         reels_pass_timeout_seconds=180,
@@ -1405,3 +1408,884 @@ def test_mp4_and_webm_are_playable():
     # No mime from the provider: the extension decides.
     assert _is_browser_playable_video("https://x/Foo.mp4?ts=1")
     assert _is_browser_playable_video("https://x/Foo.webm")
+
+
+# =============================================================
+# YOUTUBE SHORTS
+#
+# This provider is the one that cannot behave like the others, and the
+# tests are mostly about the ways it could quietly get that wrong.
+#
+# The three assertions that matter most:
+#
+# 1. video_url IS AN EMBED URL AND NEVER A MEDIA URL. The bytes behind
+#    a YouTube video live on googlevideo.com behind a signature that has
+#    to be derived from YouTube's own player. Producing one is scraping.
+#    A test that pins "the video_url is the embed player src" is the
+#    only thing standing between a routine refactor and a scraper.
+#
+# 2. ATTRIBUTION IS NOT OPTIONAL. Every row carries a creator and a
+#    licence. YouTube's standard licence extends nothing to us, so
+#    attribution_required is True unconditionally and a Reel with a
+#    None creator is unreachable, not merely discouraged.
+#
+# 3. NO OAUTH, EVER. The `player` part would give us the real media
+#    URL and it is OAuth-only: an API key gets HTTP 401 from it,
+#    always. Adding a token would mean storing a user credential to
+#    serve a feed that embeds perfectly well without one.
+#
+# Every request below is served by httpx.MockTransport. No test in this
+# section reaches the network, and none of them needs a credential that
+# is not a plain API key.
+# =============================================================
+
+
+def _short(
+    video_id: str = "abc123XYZ_-",
+    *,
+    duration: str = "PT45S",
+    embeddable: bool = True,
+    licence: str = "youtube",
+    channel_title: str = "Sagarmatha Daily",
+    channel_id: str = "UCnepalNews",
+    broadcast: str = "none",
+    privacy: str = "public",
+) -> dict:
+    """One videos.list item, with a search snippet of the same shape."""
+    return {
+        "id": video_id,
+        "snippet": {
+            "channelTitle": channel_title,
+            "channelId": channel_id,
+            "title": f"A Short about {video_id}",
+            "description": "Forty-five seconds of Kathmandu.",
+            "publishedAt": "2026-10-18T09:30:00Z",
+            "liveBroadcastContent": broadcast,
+            "thumbnails": {
+                "high": {"url": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"}
+            },
+        },
+        "contentDetails": {"duration": duration},
+        "status": {"embeddable": embeddable, "license": licence,
+                   "privacyStatus": privacy},
+    }
+
+
+def fetch_youtube(items, *, detail_items=None, limit=30, keys="key-one,key-two"):
+    """
+    Run one real fetch() against a MockTransport.
+
+    Returns (reels, requests). Handing back the requests is how the
+    query-string assertions are made — `videoEmbedDeny=FAIL`, `key=`,
+    and the absence of any OAuth parameter are all things only visible
+    on the wire.
+
+    `detail_items` defaults to `items` and overrides only what
+    videos.list answers, so a test can simulate a video that search
+    returned and videos.list did not.
+    """
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append({
+            "path": request.url.path,
+            "params": dict(request.url.params),
+            "headers": dict(request.headers),
+        })
+
+        if request.url.path.endswith("/search"):
+            return httpx.Response(200, json={
+                "kind": "youtube#searchListResponse",
+                "items": [
+                    {"id": {"kind": "youtube#video", "videoId": item["id"]},
+                     "snippet": item["snippet"]}
+                    for item in items
+                ],
+            })
+
+        if request.url.path.endswith("/videos"):
+            answered = items if detail_items is None else detail_items
+            return httpx.Response(200, json={
+                "kind": "youtube#videoListResponse",
+                "items": answered,
+            })
+
+        return httpx.Response(404, json={"error": {"code": 404}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        source = build_source(
+            "youtube", pool=build_pool("youtube", keys), client=client, hint="nepal"
+        )
+        return run(source.fetch(limit=limit)), seen
+    finally:
+        run(client.aclose())
+
+
+def test_a_shorts_hit_becomes_a_reel_with_a_creator_and_a_licence():
+    """
+    The whole contract in one reel.
+
+    The feed's premise is that every card names who made it and under
+    what terms. A YouTube row with a null creator renders "Creator not
+    credited", which on a platform whose entire value is channel
+    identity is a row we should never have emitted.
+    """
+    items = [_short()]
+
+    reels, _ = fetch_youtube(items)
+
+    assert len(reels) == 1
+    reel = reels[0]
+
+    assert reel.source_key == "youtube"
+    assert reel.external_id == "abc123XYZ_-"
+
+    # Attribution, in full.
+    assert reel.creator_name == "Sagarmatha Daily"
+    assert reel.creator_url == "https://www.youtube.com/channel/UCnepalNews"
+    assert reel.license_name == "YouTube Standard License"
+    assert reel.license_url
+    assert reel.attribution_required is True
+
+    assert reel.duration_seconds == 45.0
+    assert reel.title == "A Short about abc123XYZ_-"
+    assert reel.published_at == "2026-10-18T09:30:00+00:00"
+
+
+def test_a_reel_is_never_emitted_without_a_creator_and_a_licence():
+    """
+    The invariant, not just the happy path.
+
+    An unreadable licence is DROPPED rather than shipped with a guess —
+    that is the safer failure, and guessing is exactly how a feed ends
+    up redistributing something it has no right to. A blank channel
+    title still yields a named creator, because every public YouTube
+    video has a channel and a card crediting nobody is the failure this
+    whole package is written to prevent.
+    """
+    items = [_short(channel_title="", licence="somethingNewWeHaveNotSeen")]
+
+    reels, _ = fetch_youtube(items)
+    assert reels == [], "an unrecognised licence must not be guessed at"
+
+    # A blank channel title still yields a named creator. The channel id
+    # is a separate field, so this case also blanks it: with an id
+    # present the adapter still resolves the channel URL, which is
+    # correct — the title is what goes missing, not the channel.
+    items = [_short(channel_title="", channel_id="", licence="youtube")]
+    reels, _ = fetch_youtube(items)
+
+    assert len(reels) == 1
+    assert reels[0].creator_name == "YouTube"
+    assert reels[0].creator_url == "https://www.youtube.com/"
+    assert reels[0].license_name is not None
+    assert reels[0].attribution_required is True
+
+    # A title we cannot read, with the channel id intact, must still
+    # fall back rather than emit None.
+    reels, _ = fetch_youtube([_short(channel_title="   ", licence="youtube")])
+    assert reels[0].creator_name == "YouTube"
+    assert reels[0].creator_url == "https://www.youtube.com/channel/UCnepalNews"
+
+
+def test_creative_common_uploads_are_labelled_with_their_real_licence():
+    """
+    "YouTube Standard License or better" — this is the better case.
+
+    A uploader who picked Creative Commons licensed the video CC BY 3.0,
+    a named licence we can actually describe, rather than the platform
+    default that grants a third party nothing.
+    """
+    items = [_short(licence="creativeCommon")]
+
+    reels, _ = fetch_youtube(items)
+
+    assert len(reels) == 1
+    assert reels[0].license_name == "CC BY 3.0"
+    assert reels[0].license_url == "https://creativecommons.org/licenses/by/3.0/"
+    # CC BY still requires the credit. A permissive licence is not a
+    # licence that waives attribution.
+    assert reels[0].attribution_required is True
+
+
+def test_the_video_url_is_an_embed_player_and_never_a_media_stream():
+    """
+    The assertion that keeps this a player and not a scraper.
+
+    The real bytes sit on googlevideo.com behind a signature derived from
+    YouTube's own player; producing one means reproducing that
+    obfuscation. So video_url and embed_url are both the official embed
+    src, and embed_url is the flag that makes the web app render an
+    <iframe> instead of pointing a <video> at an HTML document.
+    """
+    reels, _ = fetch_youtube([_short()])
+
+    reel = reels[0]
+    assert reel.video_url == "https://www.youtube.com/embed/abc123XYZ_-"
+    assert reel.embed_url == reel.video_url
+
+    # Nothing anywhere in the reel points at a raw stream.
+    for value in (reel.video_url, reel.embed_url, reel.poster_url or ""):
+        assert "googlevideo.com" not in value
+        assert "videoplayback" not in value
+
+
+def test_the_search_asks_for_embeddable_shorts_only():
+    """
+    videoEmbedDeny=FAIL is the single most important line in the
+    adapter: it excludes every video whose owner forbids embedding, so
+    the results already carry permission to put a player on our page.
+    """
+    _, seen = fetch_youtube([_short()])
+
+    search = seen[0]
+    assert search["path"].endswith("/search")
+    assert search["params"]["part"] == "snippet"
+    assert search["params"]["type"] == "video"
+    assert search["params"]["videoDuration"] == "short"
+    assert search["params"]["videoEmbedDeny"] == "FAIL"
+
+
+def test_a_video_whose_owner_forbids_embedding_is_excluded():
+    """
+    The search filter is only as good as the index. videos.list is the
+    record of truth, and an absent or false `embeddable` is a NO —
+    defaulting it to True would let exactly the locked-down videos that
+    videoEmbedDeny exists to exclude into the feed.
+    """
+    items = [
+        _short("allowed0000000000", embeddable=True),
+        _short("denied00000000000", embeddable=False),
+    ]
+    missing = _short("missing0000000000")
+    del missing["status"]["embeddable"]
+    items.append(missing)
+
+    reels, _ = fetch_youtube(items)
+
+    assert [reel.external_id for reel in reels] == ["allowed0000000000"]
+
+
+def test_a_private_video_is_excluded():
+    """
+    An unlisted video embeds; a private one has nothing to embed.
+    """
+    items = [
+        _short("private000000000", privacy="private"),
+        _short("unlisted00000000", privacy="unlisted"),
+    ]
+
+    reels, _ = fetch_youtube(items)
+
+    assert [reel.external_id for reel in reels] == ["unlisted00000000"]
+
+
+def test_a_clip_longer_than_three_minutes_is_dropped():
+    """
+    The duration filter the category is named for.
+
+    videoDuration=short is a coarse server-side prefilter, not the rule:
+    it buckets roughly 1-4 minutes and says nothing about a running
+    time the index has stale. contentDetails.duration decides, and the
+    boundary is inclusive — 180 seconds is a Short, 181 is not.
+    """
+    items = [
+        _short("short000000000000", duration="PT15S"),
+        _short("exact000000000000", duration="PT3M"),
+        _short("long0000000000000", duration="PT3M1S"),
+        _short("longer00000000000", duration="PT4M12S"),
+    ]
+
+    reels, _ = fetch_youtube(items)
+
+    assert [reel.external_id for reel in reels] == [
+        "short000000000000",
+        "exact000000000000",
+    ]
+
+
+def test_a_duration_we_cannot_read_is_dropped_not_guessed():
+    """
+    The opposite of _within_duration's default, on purpose.
+
+    Commons clips often have no running time and are still fine, so that
+    helper lets None through. Here an unreadable duration is a REJECT:
+    we could not verify the video is a Short, and "we could not verify"
+    is not permission to publish.
+    """
+    items = [
+        _short("good0000000000000", duration="PT30S"),
+        _short("broken0000000000", duration="not-a-duration"),
+        _short("empty000000000000", duration="P"),
+    ]
+
+    reels, _ = fetch_youtube(items)
+
+    assert [reel.external_id for reel in reels] == ["good0000000000000"]
+
+
+def test_live_and_upcoming_broadcasts_are_dropped():
+    """
+    A live stream is not a Short, whatever its running time says. Only
+    the explicit "none" is accepted.
+    """
+    items = [
+        _short("normal00000000000", broadcast="none"),
+        _short("live0000000000000", broadcast="live"),
+        _short("soon0000000000000", broadcast="upcoming"),
+    ]
+
+    reels, _ = fetch_youtube(items)
+
+    assert [reel.external_id for reel in reels] == ["normal00000000000"]
+
+
+def test_a_video_missing_from_videos_list_is_skipped_not_crashed():
+    """
+    Search and videos.list are two round trips and a video can vanish
+    between them. A missing detail record has nothing honest to render,
+    so it is skipped — and the rest of the batch still lands.
+    """
+    reels, seen = fetch_youtube(
+        [_short("present0000000000"), _short("gone000000000000")],
+        detail_items=[_short("present0000000000")],
+    )
+
+    assert [reel.external_id for reel in reels] == ["present0000000000"]
+
+    # Both ids were asked about; the answer simply omitted one.
+    videos_call = next(c for c in seen if c["path"].endswith("/videos"))
+    assert "present0000000000" in videos_call["params"]["id"]
+    assert "gone000000000000" in videos_call["params"]["id"]
+
+
+def test_the_key_is_sent_as_a_query_parameter_never_as_a_header():
+    """
+    Google's parameter is `key=`. `Authorization` is reserved for OAuth
+    bearer tokens there, and a bare API key in that header is ignored or
+    rejected — so the base class's header must be suppressed, which is
+    what this asserts.
+
+    It also pins that no OTHER credential is ever attached: no bearer
+    token, no client secret, no Authorization header of any kind.
+    """
+    _, seen = fetch_youtube([_short()])
+
+    assert seen, "the provider made no requests"
+    for call in seen:
+        assert "Authorization" not in call["headers"], call["headers"]
+        assert call["params"]["key"] in {"key-one", "key-two"}
+
+
+def test_a_429_cools_the_key_and_rotates_to_the_next_one():
+    """
+    search.list costs 100 quota units a call, so exhausting the daily
+    budget on a provider polled every few minutes is routine, not
+    exceptional. The pool has to absorb it the way it does everywhere
+    else: cool the key that was made to, spend the next one, and report
+    nothing as broken.
+    """
+    seen_keys: list[str] = []
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_keys.append(request.url.params.get("key") or "")
+        attempts["n"] += 1
+
+        if attempts["n"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "60"})
+        return httpx.Response(200, json={"items": []})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    pool = build_pool("youtube", "key-one,key-two")
+    try:
+        source = build_source("youtube", pool=pool, client=client)
+        assert run(source.fetch(limit=5)) == []
+    finally:
+        run(client.aclose())
+
+    # Rotated: the retry used a different key.
+    assert len(seen_keys) >= 2, seen_keys
+    assert seen_keys[0] != seen_keys[1], seen_keys
+    assert set(seen_keys) <= {"key-one", "key-two"}, seen_keys
+
+    # And the key that was rate limited is out of rotation.
+    cooled = [e for e in pool.snapshot() if not e["available"]]
+    assert len(cooled) == 1, pool.snapshot()
+
+
+def test_a_rejected_key_reports_a_configuration_error():
+    """
+    A 403 here is a wrong or restricted key — usually an API key whose
+    YouTube Data API has not been enabled in its Cloud project, which is
+    the single most common way this provider fails. It has to name
+    itself as a credential problem, not a provider outage, so the
+    operator does not go looking for a YouTube incident.
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"error": {"code": 403}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        source = build_source(
+            "youtube", pool=build_pool("youtube", "key-one"), client=client
+        )
+        with pytest.raises(reels_providers.ProviderError) as caught:
+            run(source.fetch(limit=5))
+    finally:
+        run(client.aclose())
+
+    assert "rejected" in str(caught.value), str(caught.value)
+
+
+def test_no_provider_call_ever_asks_for_the_oauth_only_player_part():
+    """
+    `player` is the only part that exposes the real media URL and it is
+    OAuth-only — an API key receives HTTP 401 from it, always.
+
+    Asking for it would be asking for something this adapter cannot
+    have, and the fix an engineer reaches for under pressure — "let me
+    add an OAuth client" — means storing a user credential to serve a
+    feed that embeds fine without one. So no code path may name it.
+    """
+    _, seen = fetch_youtube([_short()])
+
+    assert seen, "the provider made no requests"
+    for call in seen:
+        parts = call["params"].get("part", "")
+        assert "player" not in parts.split(","), call
+
+    # And nothing on the class reaches for an OAuth-shaped credential.
+    for attribute in ("access_token", "client_secret", "refresh_token",
+                      "oauth_token", "credentials"):
+        assert not hasattr(PROVIDERS["youtube"], attribute), attribute
+
+
+def test_the_second_call_reaches_videos_list_through_the_same_rotation():
+    """
+    Two endpoints, one key, one rotation path.
+
+    videos.list supplies the only trustworthy length and the only
+    trustworthy answer on embeddability, so a provider that fetched only
+    from search would be trusting a stale index. Both calls go through
+    _get_json so neither can skip the 429 handling.
+    """
+    _, seen = fetch_youtube([_short()])
+
+    paths = [call["path"] for call in seen]
+    assert any(p.endswith("/search") for p in paths), paths
+    assert any(p.endswith("/videos") for p in paths), paths
+
+    videos_call = next(c for c in seen if c["path"].endswith("/videos"))
+    assert videos_call["params"]["id"] == "abc123XYZ_-"
+    assert videos_call["params"]["part"] == "contentDetails,status,snippet"
+    assert "key" in videos_call["params"]
+
+
+def test_the_search_page_size_is_bounded():
+    """
+    search.list caps maxResults at 50 and videos.list accepts at most 50
+    ids, so one videos.list covers everything search returned and no
+    chunking is ever needed. Asking for more is a 400 from Google, which
+    would fail the whole pass.
+    """
+    many = [_short(f"video{i:014d}") for i in range(80)]
+
+    _, seen = fetch_youtube(many, limit=500)
+
+    for call in seen:
+        assert int(call["params"]["maxResults"]) <= 50, call
+
+
+def test_iso8601_durations_are_parsed_into_seconds():
+    """The one format conversion this provider needs that others do not."""
+    from app.services.reels.providers import _iso8601_duration as parse
+
+    assert parse("PT45S") == 45.0
+    assert parse("PT1M23S") == 83.0
+    assert parse("PT2M") == 120.0
+    assert parse("PT1H") == 3600.0
+    assert parse("PT1H2M3S") == 3723.0
+    assert parse("P1DT1S") == 86401.0
+
+    # Not durations, and never silently zero — zero would read as an
+    # instant clip rather than "the provider said nothing useful".
+    assert parse("P") is None
+    assert parse("PT") is None
+    assert parse("") is None
+    assert parse(None) is None
+    assert parse(45) is None
+    assert parse("45") is None
+    assert parse("45s") is None
+
+
+def test_a_key_never_reaches_an_error_message_or_a_log_line():
+    """
+    The credential is in the query string here, so every place that
+    renders a URL is a place that could publish it.
+
+    httpx.InvalidURL puts the FULL url — query string included — into its
+    message, and a malformed parameter is exactly how one gets raised.
+    ProviderError then reaches SourceHealth.error, which is persisted
+    and rendered in the admin panel, plus a warning log line. The
+    package already treats "a credential in a health endpoint" as a
+    load-bearing bug (see snapshot()); this is the same bug arriving
+    through a different door.
+    """
+    secret = "AIzaSySUPER-SECRET-KEY"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.InvalidURL(f"Invalid URL: {request.url}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        source = build_source(
+            "youtube", pool=build_pool("youtube", secret), client=client
+        )
+        with pytest.raises(reels_providers.ProviderError) as caught:
+            run(source.fetch(limit=5))
+    finally:
+        run(client.aclose())
+
+    message = str(caught.value)
+    assert secret not in message, message
+    assert message.startswith("youtube:"), message
+    # The diagnostic is still there — redaction must not cost us the
+    # ability to see what went wrong.
+    assert "Invalid URL" in message, message
+    assert "key=***" in message, message
+
+    # And the ordinary HTTPError path scrubs too, even though it cannot
+    # currently reach a query string.
+    def refused(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(
+            f"failed talking to {request.url}", request=request
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(refused))
+    try:
+        source = build_source(
+            "youtube", pool=build_pool("youtube", secret), client=client
+        )
+        with pytest.raises(reels_providers.ProviderError) as caught:
+            run(source.fetch(limit=5))
+    finally:
+        run(client.aclose())
+
+    message = str(caught.value)
+    assert secret not in message, message
+    assert "youtube: request failed" in message, message
+
+
+def test_youtube_is_registered_and_needs_a_key():
+    """
+    Registered, keyed, and last — it is the one provider that cannot be
+    reached without configuration and the one that costs the most quota
+    per call.
+    """
+    assert "youtube" in PROVIDERS
+    assert PROVIDERS["youtube"].key == "youtube"
+    assert PROVIDERS["youtube"].requires_key is True
+
+    from app.workers.scheduler import REEL_PROVIDERS
+
+    assert ("youtube", "youtube_api_keys") in REEL_PROVIDERS
+
+
+def test_a_youtube_pass_with_no_key_is_a_configuration_error():
+    """
+    Adding a fourth provider must not break the unconfigured deploy.
+    build_pool returns an empty KeyPool rather than None, so this is the
+    construction the scheduler actually makes — the same one that
+    silently disabled Wikimedia before _get_json was fixed.
+    """
+    source = build_source(
+        "youtube", pool=build_pool("youtube", None), client=None
+    )
+
+    with pytest.raises(reels_providers.ProviderError) as caught:
+        run(source.fetch(limit=5))
+
+    assert "no API key configured" in str(caught.value), str(caught.value)
+
+
+def test_the_embed_url_reaches_the_store_row():
+    """
+    The column has to actually be written, or every YouTube row lands as
+    an unplayable card no matter what the adapter produced. Optional
+    fields are omitted when absent, so this also pins that a plain
+    provider still sends no embed_url key at all.
+    """
+    from app.services.reels.store import _reel_row
+
+    embed = "https://www.youtube.com/embed/abc123XYZ_-"
+    row = _reel_row(Reel(
+        source_key="youtube",
+        external_id="abc123XYZ_-",
+        video_url=embed,
+        embed_url=embed,
+        creator_name="Sagarmatha Daily",
+        creator_url="https://www.youtube.com/channel/UCnepalNews",
+        license_name="YouTube Standard License",
+        license_url="https://support.google.com/youtube/answer/2797468",
+        attribution_required=True,
+        duration_seconds=45.0,
+    ))
+
+    assert row["embed_url"] == embed
+    assert row["video_url"] == embed
+
+    plain = _reel_row(make_reel())
+    assert "embed_url" not in plain, "a plain media row must not gain the key"
+
+
+def test_the_feed_carries_embed_url_to_the_web_app():
+    """
+    FEED_COLUMNS is the contract with the TypeScript Reel interface. If
+    embed_url is not in it, the web player receives rows with no embed
+    flag and renders every YouTube card through a <video>.
+    """
+    assert "embed_url" in FEED_COLUMNS
+    assert "video_url" in FEED_COLUMNS
+
+    embed = "https://www.youtube.com/embed/abc123XYZ_-"
+    db = FakeDB(rows=[{
+        "id": GOOD_UUID,
+        "video_url": embed,
+        "embed_url": embed,
+        "poster_url": None,
+        "title": "A Short",
+        "description": None,
+        "creator_name": "Sagarmatha Daily",
+        "creator_url": "https://www.youtube.com/channel/UCnepalNews",
+        "license_name": "YouTube Standard License",
+        "license_url": None,
+        "attribution_required": True,
+        "width": None,
+        "height": None,
+        "duration_seconds": 45.0,
+        "published_at": "2026-10-18T09:30:00+00:00",
+        "ingested_at": "2026-10-18T09:35:00+00:00",
+        "reel_likes": [],
+    }])
+
+    rows = run(load_reels(db, limit=10))
+
+    assert rows[0]["embed_url"] == embed
+
+
+# =============================================================
+# PIXABAY: the 24-hour cache its terms require
+# =============================================================
+
+def _pixabay_hit(video_id: int = 918273, *, duration: int = 21) -> dict:
+    """One item from pixabay.com/api/videos/."""
+    return {
+        "id": video_id,
+        "pageURL": f"https://pixabay.com/videos/watch-{video_id}/",
+        "tags": "kathmandu, street",
+        "duration": duration,
+        "videoImage": f"https://cdn.pixabay.com/video/{video_id}/image.jpg",
+        "user": "sagarmatha_photo",
+        "user_id": 4471,
+        "videos": [
+            {"url": f"https://cdn.pixabay.com/video/{video_id}/small.mp4",
+             "width": 640, "height": 360, "size": 900_000},
+            {"url": f"https://cdn.pixabay.com/video/{video_id}/medium.mp4",
+             "width": 1080, "height": 1920, "size": 4_200_000},
+        ],
+    }
+
+
+class PixabayHarness:
+    """
+    Runs PixabaySource.fetch() against a MockTransport and counts hits.
+
+    The cache lives on the class, so every test here clears it first.
+    Without that, one test's warm cache silently satisfies the next
+    test's request and the assertion stops meaning anything — the
+    failure mode looks exactly like a passing test.
+    """
+
+    def __init__(self, *, videos=None, keys="pix-key-one"):
+        self.hits = 0
+        self.requests: list[dict] = []
+        self._videos = [_pixabay_hit()] if videos is None else videos
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.hits += 1
+            self.requests.append(dict(request.url.params))
+            return httpx.Response(200, json={
+                "total": len(self._videos),
+                "videoCount": len(self._videos),
+                "videos": self._videos,
+            })
+
+        self._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    def __enter__(self):
+        reels_providers.PixabaySource._cache.clear()
+        return self
+
+    def __exit__(self, *exc):
+        run(self._client.aclose())
+        reels_providers.PixabaySource._cache.clear()
+        return False
+
+    async def fetch(self, limit: int = 30):
+        source = build_source(
+            "pixabay",
+            pool=build_pool("pixabay", "pix-key-one"),
+            client=self._client,
+            hint="nepal",
+        )
+        return await source.fetch(limit=limit)
+
+
+def test_a_pixabay_fetch_records_the_library_on_every_clip():
+    """
+    Pixabay's API terms: "If you make use of the API, show your users
+    where the images and videos are from, whenever search results are
+    displayed."
+
+    The web card renders that badge off `source_key`, so a Reel without
+    it produces a card that breaks the rule it is displayed under.
+    """
+    with PixabayHarness() as harness:
+        reels = run(harness.fetch())
+
+    assert len(reels) == 1
+    assert reels[0].source_key == "pixabay"
+
+
+def test_pixabay_asks_for_json_and_keeps_safesearch_on():
+    """
+    `json=1` is not a preference: without it the endpoint answers in XML
+    and `_decode` sees a parse error, which reads as an empty feed.
+
+    `safesearch=true` is the filter behind "no nudity" — it is on the
+    wire, not assumed, so a test can see it was actually sent.
+    """
+    with PixabayHarness() as harness:
+        run(harness.fetch())
+
+    sent = harness.requests[0]
+    assert sent["json"] == "1"
+    assert sent["safesearch"] == "true"
+
+
+def test_a_second_pixabay_fetch_within_the_day_hits_the_network_zero_times():
+    """
+    The rule being pinned: "requests must be cached for 24 hours."
+
+    The reels pass runs every five minutes. Without this the adapter
+    would send 288 byte-identical requests a day per search term, which
+    is the "lots of automated queries" their terms forbid — and against
+    a free tier counted per API key rather than per IP, so the bill for
+    it lands on the operator, not on us.
+    """
+    with PixabayHarness() as harness:
+        first = run(harness.fetch())
+        after_first = harness.hits
+
+        second = run(harness.fetch())
+
+    assert after_first == 1, "the first pass must actually reach the API"
+    assert harness.hits == 1, (
+        f"the second pass issued {harness.hits - 1} more request(s) inside "
+        "the 24-hour window"
+    )
+    assert [r.external_id for r in second] == [r.external_id for r in first]
+
+
+def test_the_pixabay_cache_is_shared_across_adapter_instances():
+    """
+    The cache is keyed on the params, not on the object.
+
+    `build_source()` runs on every pass, so a cache scoped to an
+    instance would start empty 288 times a day and satisfy nothing.
+    """
+    with PixabayHarness() as harness:
+        run(harness.fetch())
+        assert harness.hits == 1
+
+        # A brand new adapter, sharing the same client, as the next pass
+        # would build it.
+        again = build_source(
+            "pixabay",
+            pool=build_pool("pixabay", "pix-key-one"),
+            client=harness._client,
+            hint="nepal",
+        )
+        run(again.fetch(limit=30))
+
+    assert harness.hits == 1, "a rebuilt adapter re-requested the same query"
+
+
+def test_a_different_pixabay_search_term_is_not_served_from_the_first_terms_cache():
+    """
+    The fingerprint includes the query.
+
+    Serving "nepal" results for a "pokhara" request would be a silently
+    wrong feed rather than a visible failure, which is the worst kind.
+    """
+    with PixabayHarness() as harness:
+        run(harness.fetch())
+
+        other = build_source(
+            "pixabay",
+            pool=build_pool("pixabay", "pix-key-one"),
+            client=harness._client,
+            hint="pokhara",
+        )
+        run(other.fetch(limit=30))
+
+    assert harness.hits == 2
+    assert harness.requests[0]["q"] != harness.requests[1]["q"]
+
+
+def test_the_pixabay_cache_cannot_grow_without_bound():
+    """
+    Search terms come from configuration, so they are meant to rotate —
+    and an unbounded module-level dict is how a config change turns into
+    a slow leak inside a long-lived worker process.
+    """
+    cap = reels_providers.PixabaySource._CACHE_MAX_ENTRIES
+
+    with PixabayHarness() as harness:
+        for term in range(cap + 12):
+            source = build_source(
+                "pixabay",
+                pool=build_pool("pixabay", "pix-key-one"),
+                client=harness._client,
+                hint=f"term-{term}",
+            )
+            run(source.fetch(limit=30))
+
+    assert len(reels_providers.PixabaySource._cache) <= cap
+
+
+def test_a_pixabay_response_is_cached_even_when_it_is_worthless():
+    """
+    The point of the test is the negative: today, an empty response IS
+    cached, for 24 hours.
+
+    That is defensible on its own terms — an empty result set is a real
+    answer to a real query, and re-asking 288 times a day is exactly
+    what the cache exists to prevent. But it means one unlucky minute
+    (a bad search term, a provider-side hiccup that still returns 200)
+    costs a full day of that term's feed, and the honest fix is to widen
+    the term, not to wait. Pinned here so the behaviour is a decision
+    rather than an accident.
+    """
+    with PixabayHarness(videos=[]) as harness:
+        first = run(harness.fetch())
+        assert first == []
+
+        run(harness.fetch())
+
+    assert harness.hits == 1, (
+        "an empty answer is cached like any other; see the docstring "
+        "above for why that is the intended trade"
+    )

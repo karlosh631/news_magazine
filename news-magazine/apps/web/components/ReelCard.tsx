@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { SafeImage } from "@/components/SafeImage";
 import type { Reel } from "@/lib/reels";
@@ -44,14 +44,125 @@ function formatDuration(seconds: number | null): string | null {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+/**
+ * The library a clip came from, in the reader's language.
+ *
+ * Pixabay's API terms require it: "If you make use of the API, show your
+ * users where the images and videos are from, whenever search results are
+ * displayed." That is a separate duty from the per-clip credit, and the
+ * credit does not cover it — the uploader named in `<details>` is a
+ * Pixabay *user*, not Pixabay.
+ *
+ * An unrecognised key is title-cased rather than hidden. Hiding it would
+ * satisfy the letter of the rule on the day a new provider ships and
+ * break it on the day it is used, which is the failure mode worth
+ * designing against.
+ */
+function providerLabel(sourceKey: string | null): string | null {
+  if (!sourceKey) return null;
+  const known: Record<string, string> = {
+    pixabay: "Pixabay",
+    pexels: "Pexels",
+    wikimedia: "Wikimedia Commons",
+    youtube: "YouTube",
+  };
+  const label = known[sourceKey];
+  if (label) return label;
+  return sourceKey.charAt(0).toUpperCase() + sourceKey.slice(1);
+}
+
+/**
+ * True when this clip has to be rendered as an <iframe>.
+ *
+ * Branching on the FIELD rather than on `source_key` is the point: a new
+ * provider that cannot offer a directly playable file sets `embed_url`
+ * and gets the right player, without this component learning its name.
+ */
+function isEmbedded(reel: Reel): boolean {
+  return typeof reel.embed_url === "string" && reel.embed_url.length > 0;
+}
+
+/**
+ * The iframe src for an embedded clip.
+ *
+ * `enablejsapi=1` is what makes the frame drivable by postMessage at
+ * all, and it is required for the play/pause/mute effects below — without
+ * it the embed is a static box that only the reader's own clicks can
+ * drive, and the feed's one-clip-at-a-time rule silently stops working.
+ *
+ * `rel=0` suppresses recommendations from other channels, which is both
+ * tasteful and the difference between a reader leaving on our URL and
+ * being handed to a competitor by the last clip they watched.
+ *
+ * `mute=1` is fixed in the src and never changes. It is here because
+ * every current autoplay policy refuses an unmuted one, and the feed
+ * starts muted by design. It is NOT tied to the `muted` state: a src
+ * that changed with the mute button would re-navigate the iframe on
+ * every unmute and restart the clip from zero, so unmuting is done by
+ * postMessage instead. See the mute effect below.
+ */
+function embedPlayerSrc(embedUrl: string | null): string | null {
+  if (!embedUrl) return null;
+  try {
+    const url = new URL(embedUrl);
+    url.searchParams.set("enablejsapi", "1");
+    url.searchParams.set("rel", "0");
+    url.searchParams.set("playsinline", "1");
+    url.searchParams.set("modestbranding", "1");
+    url.searchParams.set("mute", "1");
+    return url.toString();
+  } catch {
+    // A malformed embed URL is a provider bug, not a reason to render a
+    // frame pointing at nothing. The caller falls back to the poster.
+    return null;
+  }
+}
+
+/**
+ * The exact origin an embedded frame lives on.
+ *
+ * Used to target postMessage and to reject inbound ones. `"*"` is the
+ * wrong value for both: as a send target it publishes the commands to
+ * whatever document is in the frame, and as a filter it accepts them
+ * from anywhere on the internet.
+ */
+function embedOrigin(embedUrl: string | null): string | null {
+  if (!embedUrl) return null;
+  try {
+    return new URL(embedUrl).origin;
+  } catch {
+    return null;
+  }
+}
+
 export function ReelCard({
   reel,
   active = false,
+  mountEmbed = true,
   muted: mutedProp,
   onMutedChange,
 }: {
   reel: Reel;
   active?: boolean;
+  /**
+   * Whether this card may instantiate an embedded player at all.
+   *
+   * The feed renders BOTH its mobile and desktop layouts at once and
+   * hides one with CSS, so every reel exists twice in the DOM. That is
+   * free for a <video> — a hidden copy costs nothing to decode — but an
+   * <iframe> is not free at all: each one is a whole YouTube IFrame
+   * Player, fetching YouTube's player script and establishing its own
+   * session. Duplicating the feed that way is two players per clip and
+   * twenty-four on a twelve-card page, which is enough to stall the page
+   * and to get this host throttled by Google.
+   *
+   * So the feed mounts the embed for the one clip that is both on screen
+   * and active, and every other card shows its poster — which is what a
+   * <video> with preload="metadata" costs anyway.
+   *
+   * Defaults to true so the component still works on its own.
+   */
+  mountEmbed?: boolean;
   /**
    * Sound state, owned by the feed.
    *
@@ -68,6 +179,28 @@ export function ReelCard({
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const frameRef = useRef<HTMLIFrameElement>(null);
+
+  /**
+   * Whether this card has to drive an embedded player instead of a
+   * <video>. See `isEmbedded` and `embedPlayerSrc`.
+   */
+  const embedded = isEmbedded(reel);
+  const frameSrc = useMemo(() => embedPlayerSrc(reel.embed_url), [reel.embed_url]);
+  /** An embed is only mounted when the feed says this clip is the one. */
+  const embedMounted = embedded && mountEmbed && frameSrc !== null;
+  const frameOrigin = useMemo(() => embedOrigin(reel.embed_url), [reel.embed_url]);
+
+  /**
+   * Whether an embedded player has announced itself.
+   *
+   * postMessage to a frame that has not finished loading is simply
+   * dropped on the floor, so the very first playVideo() would be lost
+   * and the card would sit still while every other clip in the feed
+   * moved. The player announces readiness itself, so we wait for that
+   * rather than guessing with a timeout.
+   */
+  const [frameReady, setFrameReady] = useState(false);
 
   // A reel starts muted because every current autoplay policy requires it
   // and because a phone that starts making noise in a scroll feed is
@@ -99,7 +232,37 @@ export function ReelCard({
     return () => query.removeEventListener("change", apply);
   }, []);
 
+  /**
+   * Send a command to the embedded player.
+   *
+   * Only meaningful when `embedded` is true; on a plain <video> card it
+   * finds no frame and returns. Declared above `play` because `play`
+   * closes over it.
+   */
+  const command = useCallback(
+    (func: string): void => {
+      const frame = frameRef.current;
+      if (!frame || !frameOrigin) return;
+      frame.contentWindow?.postMessage(
+        JSON.stringify({ event: "command", func, args: [] }),
+        frameOrigin,
+      );
+    },
+    [frameOrigin],
+  );
+
   const play = useCallback((): void => {
+    if (embedded) {
+      // An embedded player has no play() promise to await, so there is
+      // nothing to set `blocked` from. It starts muted (see
+      // embedPlayerSrc), which is what every autoplay policy requires,
+      // so the tap-to-play fallback is not reachable here in the first
+      // place — claiming otherwise would be inventing a state we cannot
+      // observe.
+      command("playVideo");
+      return;
+    }
+
     const video = videoRef.current;
     if (!video) return;
     const attempt = video.play();
@@ -108,12 +271,13 @@ export function ReelCard({
     // Swallowing it here means the tap-to-play overlay can take over
     // instead of the console filling with unhandled rejections.
     if (attempt) attempt.then(() => setBlocked(false)).catch(() => setBlocked(true));
-  }, []);
+  }, [embedded, command]);
 
   // Play only the reel the feed says is on screen, and never when the
   // reader has asked for less motion. Everything else stays paused: six
   // clips decoding at once is what makes a feed hot on a phone.
   useEffect(() => {
+    if (embedded) return; // handled by the embed effect below
     const video = videoRef.current;
     if (!video || failed) return;
     if (!active || reduceMotion) {
@@ -121,7 +285,46 @@ export function ReelCard({
       return;
     }
     play();
-  }, [active, reduceMotion, failed, play]);
+  }, [active, reduceMotion, failed, play, embedded]);
+
+  // Wait for the player to announce itself before driving it.
+  //
+  // Keyed on `embedMounted` rather than `embedded`, and that is the point
+  // rather than a detail. When the feed unmounts this card's iframe the
+  // cleanup clears `frameReady`, so the next mount — a fresh <iframe>,
+  // a fresh player that has not finished loading — starts from false
+  // and waits for its own onReady. Leaving it true would send the first
+  // playVideo into a frame that is not listening yet, lose it, and
+  // leave the card permanently still.
+  useEffect(() => {
+    if (!embedMounted) return;
+    if (!frameOrigin) return;
+
+    const onMessage = (event: MessageEvent) => {
+      if (event.origin !== frameOrigin) return;
+      if (typeof event.data !== "string") return;
+      try {
+        if (JSON.parse(event.data)?.event === "onReady") setFrameReady(true);
+      } catch {
+        // Not one of ours. The player also posts infoDelivery objects,
+        // and anything at all can post anything at all.
+      }
+    };
+
+    window.addEventListener("message", onMessage);
+    return () => {
+      window.removeEventListener("message", onMessage);
+      setFrameReady(false);
+    };
+  }, [embedMounted, frameOrigin]);
+
+  // The embedded equivalent of the play/pause effect above. Gated on
+  // readiness rather than fired blind, because a command sent to a
+  // loading frame is discarded.
+  useEffect(() => {
+    if (!embedded || !frameReady) return;
+    command(active && !reduceMotion && !failed ? "playVideo" : "pauseVideo");
+  }, [embedded, frameReady, active, reduceMotion, failed, command]);
 
   useEffect(() => {
     const onChange = () =>
@@ -131,9 +334,21 @@ export function ReelCard({
   }, []);
 
   const toggleSound = () => {
-    const video = videoRef.current;
     const next = !muted;
     setMuted(next);
+
+    if (embedded) {
+      // Unmuting is a user gesture, which is exactly the permission an
+      // autoplay-blocked player was missing a moment ago — so send it
+      // and start the clip while we have it. Deliberately NOT written
+      // into the iframe src: changing that would re-navigate the frame
+      // and restart the clip from zero.
+      command(next ? "unMute" : "mute");
+      if (next && !frameReady) command("playVideo");
+      return;
+    }
+
+    const video = videoRef.current;
     if (video) {
       video.muted = next;
       // Unmuting a clip that autoplay blocked is a user gesture, which is
@@ -151,11 +366,22 @@ export function ReelCard({
     the prop, and any later change to the shared state would not reach an
     already-mounted element. Syncing it here covers both — and it is what
     makes sound persist across the whole feed rather than per clip.
+
+    An embedded player has the same gap for the same reason, and needs
+    it just as much: the shared sound state survives swiping past the
+    clip that was unmuted, and a reel that MOUNTS mid-session unmuted
+    must not come up silent. Gated on readiness, because a mute command
+    sent to a loading frame is discarded — which would silently leave the
+    clip muted with no way to recover but the button.
   */
   useEffect(() => {
+    if (embedded) {
+      if (frameReady) command(muted ? "mute" : "unMute");
+      return;
+    }
     const video = videoRef.current;
     if (video && video.muted !== muted) video.muted = muted;
-  }, [muted]);
+  }, [muted, embedded, frameReady, command]);
 
   const toggleFullscreen = () => {
     const container = containerRef.current;
@@ -224,6 +450,7 @@ export function ReelCard({
 
   const duration = formatDuration(reel.duration_seconds);
   const caption = reel.title ?? reel.description;
+  const provider = providerLabel(reel.source_key);
 
   // Overlay button styling, repeated so each control is self-describing.
   const control =
@@ -246,7 +473,59 @@ export function ReelCard({
         className="absolute inset-0 h-full w-full object-cover"
       />
 
-      {!failed && (
+      {/*
+        Two players, one card.
+
+        A provider that offers a directly playable file gets a <video>,
+        which is every source except YouTube and has been since 0014.
+        A provider that set `embed_url` gets an <iframe> instead, because
+        its `video_url` is an HTML document — pointing a <video> at one
+        produces an instant MEDIA_ERR_SRC_NOT_SUPPORTED and a card that
+        says "Replay unavailable" for the whole feed.
+
+        The two are mutually exclusive on purpose. A <video> pointed at
+        an embed URL and an <iframe> pointed at an mp4 are both broken,
+        so exactly one renders.
+      */}
+      {!failed && embedMounted && frameSrc && (
+        <iframe
+          ref={frameRef}
+          src={frameSrc}
+          title={reel.title ?? "Reel"}
+          className="absolute inset-0 z-10 h-full w-full border-0"
+          /*
+            `autoplay` is required in the allow list or the player is
+            refused outright — every autoplay policy in current browsers
+            consults it, and YouTube's player checks it before its own
+            autoplay logic runs. `encrypted-media` and `picture-in-picture`
+            are what the YouTube player asks for and refuses to start
+            without in some browsers.
+          */
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+          allowFullScreen
+          /*
+            Sends the origin rather than the full URL, so nothing about
+            this page's own referrer reaches YouTube. `strict-origin-when-
+            cross-origin` is the browser default written out, because the
+            reason to set it here is to not have to think about it again.
+          */
+          referrerPolicy="strict-origin-when-cross-origin"
+        />
+      )}
+
+      {/*
+        A <video> ONLY for a clip that is genuinely a media file — hence
+        the `!embedded` guard, not merely `!embedMounted`.
+
+        An embedded clip that is not currently mounted (the copy in the
+        hidden layout, or any card the reader has not reached) must NOT
+        render a <video>: its `video_url` is an HTML document, so the
+        element would fail immediately and paint "Replay unavailable"
+        over every such card. Those cards fall through to nothing at all,
+        and the poster underneath carries them — which is exactly what a
+        <video> with preload="metadata" costs for a plain one anyway.
+      */}
+      {!failed && !embedMounted && !embedded && (
         <video
           ref={videoRef}
           src={reel.video_url}
@@ -301,11 +580,24 @@ export function ReelCard({
 
       {/* ================= TOP: sound, length, fullscreen ================= */}
       <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-start justify-between gap-2 p-2">
-        {duration && (
-          <span className="pointer-events-none rounded bg-black/60 px-2 py-1 text-[11px] font-medium tabular-nums text-white backdrop-blur">
-            {duration}
-          </span>
-        )}
+        <div className="flex flex-wrap items-center gap-1.5">
+          {duration && (
+            <span className="pointer-events-none rounded bg-black/60 px-2 py-1 text-[11px] font-medium tabular-nums text-white backdrop-blur">
+              {duration}
+            </span>
+          )}
+          {/*
+            The library, always visible. Not in the credit block and not
+            behind a tap: Pixabay's API terms ask for the origin of every
+            result to be shown to the user, which a disclosure nobody opens
+            does not do.
+          */}
+          {provider && (
+            <span className="pointer-events-none rounded bg-black/60 px-2 py-1 text-[11px] font-medium text-white/90 backdrop-blur">
+              {provider}
+            </span>
+          )}
+        </div>
 
         <div className="ml-auto flex gap-2">
           <button

@@ -64,8 +64,8 @@ const ROTATE_MS = 75_000;
  * How many of the newest articles rotation must never touch, when it is
  * switched on. Nine is three rows of the 3-column grid.
  *
- * Rotation is OFF by default. The reader asked for the newest news at
- * the top, everywhere, and for old stories to be replaced by new ones —
+ * Rotation is OFF by default. The reader asked for the newest news at the
+ * top, everywhere, and for old stories to be replaced by new ones —
  * a reshuffle works against both. It stays available as an opt-in, and
  * even then it only touches the tail: promoting the oldest quarter all
  * the way to position 1 would put a two-hour-old story above one
@@ -73,14 +73,59 @@ const ROTATE_MS = 75_000;
  */
 const PINNED = 9;
 
+/**
+ * How many cards one "Load more" brings in.
+ *
+ * Twenty-four, matching the server-rendered first page and PAGE_SIZE in
+ * lib/news.ts, so every page of the feed is the same size. The API's own
+ * ceiling is 500, so this is a choice about request size — not a limit on
+ * how far down the archive a reader can go.
+ */
+const MORE_PAGE_SIZE = 24;
+
+/**
+ * How far ahead of the viewport the sentinel starts a load.
+ *
+ * Not zero. At zero the request only starts once the sentinel is already
+ * on screen, so the reader always watches the gap arrive and always waits
+ * through a request they can see coming. 800px is about three rows, the
+ * same beat as a lazy-loaded image resolving.
+ *
+ * This is also what keeps "the whole feed" honest. The observer loads
+ * until the sentinel is pushed out of that band and then stops, so a
+ * reader who scrolls reaches the end of the archive while a reader who
+ * does not never pays for a card they did not look at.
+ */
+const SENTINEL_ROOT_MARGIN = "800px 0px";
+
 type Rotate = "off" | "on";
+
+/** Where the next page of the feed starts. See FeedCursor in lib/news.ts. */
+interface FeedCursor {
+  published_at: string;
+  id: string;
+}
+
+/** Newest first, with `source_count` breaking ties exactly as the server does. */
+function byNewest(a: LatestArticle, b: LatestArticle): number {
+  const left = a.published_at ? Date.parse(a.published_at) : 0;
+  const right = b.published_at ? Date.parse(b.published_at) : 0;
+  if (right !== left) return right - left;
+  return (b.source_count ?? 0) - (a.source_count ?? 0);
+}
 
 export function LiveArticleFeed({
   initialArticles,
+  initialCursor = null,
   emptyState,
   rotation = "off",
 }: {
   initialArticles: LatestArticle[];
+  /**
+   * Where the archive continues after the server-rendered cards. Null
+   * when the server already knows there is nothing below them.
+   */
+  initialCursor?: FeedCursor | null;
   emptyState?: { title: string; description: string };
   rotation?: Rotate;
 }) {
@@ -95,6 +140,22 @@ export function LiveArticleFeed({
   // a card, holding a selection, or having the tab in the background.
   const [paused, setPaused] = useState(false);
   const [reduceMotion, setReduceMotion] = useState(false);
+
+  // ---- The rest of the archive ----
+  //
+  // `cursor` is the last row the reader holds, and the next request asks
+  // for rows OLDER than it, so a story published since they started
+  // cannot shift what comes next. `hasMore` is the server's answer to
+  // whether any exist, and it alone decides whether the button is on
+  // screen: an exhausted feed must not leave a reader tapping a control
+  // that will never produce anything.
+  const [cursor, setCursor] = useState<FeedCursor | null>(initialCursor);
+  const [hasMore, setHasMore] = useState(Boolean(initialCursor));
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState<string | null>(null);
+  const [stalled, setStalled] = useState(false);
+  const [total, setTotal] = useState<number | null>(null);
+  const [loadedAPage, setLoadedAPage] = useState(false);
 
   // Stories whose every image rendition 404'd.
   //
@@ -124,12 +185,33 @@ export function LiveArticleFeed({
   const ids = useRef(new Set(initialArticles.map((a) => a.id)));
   const lastArrivalAt = useRef<number | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
 
+  // Two guards against two loads at once. `loadingMore` disables the
+  // button; this ref catches the observer firing while a request is
+  // already in the air, because a state update has not been committed yet
+  // when its next callback lands.
+  const moreInFlight = useRef(false);
+  // Bumped after each successful page so the observer re-attaches and
+  // asks again if the sentinel is still in view. See the effect below.
+  const [pageNonce, setPageNonce] = useState(0);
+
+  // A new server-rendered feed (navigation, or an RSC refresh) starts a
+  // new archive: the old cursor points into rows this page no longer
+  // shows. The server hands over the matching one alongside the cards.
   useEffect(() => {
     setArticles(initialArticles);
     ids.current = new Set(initialArticles.map((a) => a.id));
     lastArrivalAt.current = null;
-  }, [initialArticles]);
+    setCursor(initialCursor);
+    setHasMore(Boolean(initialCursor));
+    setMoreError(null);
+    setLoadedAPage(false);
+    setStalled(false);
+    setTotal(null);
+    moreInFlight.current = false;
+    setPageNonce((n) => n + 1);
+  }, [initialArticles, initialCursor]);
 
   // Respect the OS "reduce motion" setting. Reordering the grid under a
   // reader who asked for less movement is exactly the kind of thing that
@@ -157,6 +239,37 @@ export function LiveArticleFeed({
     return () => window.removeEventListener("site-language-change", onChange);
   }, []);
 
+  /**
+   * Fold a batch of articles into the running union.
+   *
+   * Shared by the poll and by "Load more", because the two must agree on
+   * what the union is. Merging on timestamp, never on position, is what
+   * keeps a page load honest: a story the worker published while the
+   * reader was three pages down belongs at the top of the feed, not in
+   * whatever slot it would have taken on a fresh request. The server
+   * already returns each page newest-first; re-sorting is what makes the
+   * UNION newest-first rather than each page being newest-first.
+   *
+   * Identity is preserved when nothing arrived. Once the archive is a
+   * thousand cards deep, `visible` below re-runs both deduplication
+   * passes over the whole union, and doing that on every ten-second poll
+   * that found nothing would be a visible stall for no reason at all.
+   */
+  const mergeInto = useCallback((fresh: LatestArticle[]) => {
+    setArticles((current) => {
+      const byId = new Map<string, LatestArticle>();
+      for (const article of current) byId.set(article.id, article);
+      for (const article of fresh) byId.set(article.id, article);
+
+      lastArrivalAt.current = Date.now();
+      if (byId.size === current.length) return current;
+
+      const merged = [...byId.values()].sort(byNewest);
+      ids.current = new Set(merged.map((a) => a.id));
+      return merged;
+    });
+  }, []);
+
   const check = useCallback(
     async (lang: "en" | "ne" | null, reset = false) => {
       setChecking(true);
@@ -174,7 +287,10 @@ export function LiveArticleFeed({
         });
         if (!response.ok) return;
 
-        const payload = (await response.json()) as { articles?: LatestArticle[] };
+        const payload = (await response.json()) as {
+          articles?: LatestArticle[];
+          next_cursor?: FeedCursor | null;
+        };
         const fresh = payload.articles ?? [];
         setLastChecked(Date.now());
 
@@ -183,53 +299,133 @@ export function LiveArticleFeed({
           // the old list is discarded rather than merged. It is still
           // re-sorted here: the ordering the page shows must not depend
           // on the order a response happens to arrive in.
-          const sorted = [...fresh].sort((a, b) => {
-            const left = a.published_at ? Date.parse(a.published_at) : 0;
-            const right = b.published_at ? Date.parse(b.published_at) : 0;
-            if (right !== left) return right - left;
-            return (b.source_count ?? 0) - (a.source_count ?? 0);
-          });
+          const sorted = [...fresh].sort(byNewest);
           setArticles(sorted);
           ids.current = new Set(sorted.map((a) => a.id));
           lastArrivalAt.current = null;
+
+          // The list is now exactly the rows that response carried, so
+          // paging continues from its last one. Without this, a language
+          // switch would leave the cursor pointing into the edition the
+          // reader just navigated away from and the next page would
+          // silently blend the two.
+          setCursor(payload.next_cursor ?? null);
+          setHasMore(Boolean(payload.next_cursor));
+          setStalled(false);
+          setLoadedAPage(false);
           return;
         }
 
-        // Merge on timestamp, never on position.
-        //
-        // Whatever order the response arrives in, the union of what we
-        // already show and what just came back is re-sorted by
-        // published_at here. So the newest article this tab has ever
-        // seen stays at the top, and a response that arrives
-        // out-of-order cannot demote it.
-        //
-        // This also makes the list converge on the real newest set:
-        // stories that fall out of the window are simply not in the
-        // union any more, so they age off the page on their own.
-        setArticles((current) => {
-          const byId = new Map<string, LatestArticle>();
-          for (const article of current) byId.set(article.id, article);
-          for (const article of fresh) byId.set(article.id, article);
-
-          const merged = [...byId.values()].sort((a, b) => {
-            const left = a.published_at ? Date.parse(a.published_at) : 0;
-            const right = b.published_at ? Date.parse(b.published_at) : 0;
-            if (right !== left) return right - left;
-            return (b.source_count ?? 0) - (a.source_count ?? 0);
-          });
-
-          ids.current = new Set(merged.map((a) => a.id));
-          lastArrivalAt.current = Date.now();
-          return merged;
-        });
+        // An ordinary poll says nothing about where the archive ends, so
+        // the cursor is deliberately left alone: this response is the top
+        // of the feed, not the page after the reader's cursor.
+        mergeInto(fresh);
       } catch {
         // Offline or the API restarting: the list stays as-is.
       } finally {
         setChecking(false);
       }
     },
-    []
+    [mergeInto]
   );
+
+  /**
+   * Fetch the page below the cursor and merge it in.
+   *
+   * The same endpoint the poll uses, with two differences: it carries the
+   * cursor, and it asks for the total so the reader can be told whether
+   * the archive ends. It merges through the same `mergeInto`, so a loaded
+   * page is deduplicated by headline and by photograph against
+   * everything already on screen exactly like a poll is — the `visible`
+   * memo does not know, and does not care, which call produced a row.
+   */
+  const loadMore = useCallback(async () => {
+    if (moreInFlight.current) return;
+    moreInFlight.current = true;
+    setLoadingMore(true);
+    setMoreError(null);
+
+    try {
+      const params = new URLSearchParams({
+        limit: String(MORE_PAGE_SIZE),
+        total: "1",
+        t: String(Date.now()),
+      });
+      if (cursor) {
+        params.set("published_at", cursor.published_at);
+        params.set("after_id", cursor.id);
+      }
+      if (language) params.set("language", language);
+
+      const response = await fetch(`/api/live-news?${params}`, {
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error(`live-news responded ${response.status}`);
+
+      const payload = (await response.json()) as {
+        articles?: LatestArticle[];
+        next_cursor?: FeedCursor | null;
+        total?: number | null;
+      };
+      const fresh = payload.articles ?? [];
+      const next = payload.next_cursor ?? null;
+
+      // A cursor that did not move means the server handed back the page
+      // we were already standing on. That should be impossible — it is
+      // what the cursor exists to prevent — but if it ever happened the
+      // reader would sit in an endless loop of requests for rows they
+      // already have, so the honest response is to stop and say so.
+      const cursorStalled =
+        next === null || (cursor !== null && next.id === cursor.id);
+
+      setTotal(payload.total ?? null);
+      setCursor(next);
+      // An empty page is the end of the road whatever the server claimed,
+      // so the button stops appearing rather than inviting a reader to
+      // tap it forever.
+      setHasMore(!cursorStalled && fresh.length > 0);
+      setStalled(cursorStalled);
+      setLoadedAPage(true);
+
+      if (fresh.length > 0) mergeInto(fresh);
+      // Only re-arm the observer when there is genuinely somewhere new to
+      // go, or a stalled page would retrigger itself.
+      if (!cursorStalled) setPageNonce((n) => n + 1);
+    } catch {
+      // The cursor is left where it was, so a retry asks for the same
+      // page rather than skipping it.
+      setMoreError("Could not load more stories.");
+    } finally {
+      moreInFlight.current = false;
+      setLoadingMore(false);
+    }
+  }, [cursor, language, mergeInto]);
+
+  // Automatic loading when the sentinel scrolls into view.
+  //
+  // The dependency on `pageNonce` is deliberate: attaching an
+  // IntersectionObserver to an element that is ALREADY intersecting makes
+  // it fire once straight away, so when an appended page does not push
+  // the sentinel past the 800px band — a tall window, or a page of cards
+  // that deduplication mostly removed — the next page starts on its own
+  // instead of waiting for a scroll that may never come.
+  //
+  // It stops on its own too: `hasMore` going false unmounts the sentinel,
+  // so this effect finds nothing to observe and no further requests go out.
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel) return;
+    if (typeof IntersectionObserver === "undefined") return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) void loadMore();
+      },
+      { rootMargin: SENTINEL_ROOT_MARGIN }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [loadMore, pageNonce]);
 
   // Reload immediately when the language changes so the swap is visible
   // straight away rather than waiting for the next poll tick.
@@ -325,7 +521,6 @@ export function LiveArticleFeed({
     };
   }, [check, language]);
 
-
   useEffect(() => {
     if (rotation === "off" || reduceMotion) return;
 
@@ -352,11 +547,11 @@ export function LiveArticleFeed({
     //
     // /api/live-news already deduplicates every response, so a poll can
     // never hand back two copies of one story at once. But this list is
-    // the running UNION of every poll this tab has made, and which copy
-    // of a story wins is not fixed: source_count keeps climbing as more
-    // outlets republish, so the copy the server picked ten minutes ago
-    // can lose to the copy it picks now. Both are then sitting in the
-    // union and both are rendered.
+    // the running UNION of every poll AND every page this tab has
+    // loaded, and which copy of a story wins is not fixed: source_count
+    // keeps climbing as more outlets republish, so the copy the server
+    // picked ten minutes ago can lose to the copy it picks now. Both are
+    // then sitting in the union and both are rendered.
     //
     // Same function, same thresholds, same order of preference — so this
     // keeps whichever copy the newest poll would have kept, and the two
@@ -370,6 +565,7 @@ export function LiveArticleFeed({
     // arrived just now wearing the same agency press shot. Every
     // response on its own passed the server's check — it only had one of
     // the pair — and the union is what puts them next to each other.
+    // A story loaded from page 40 of the archive is the third way in.
     //
     // The union is also why this needs no extra backfill logic: the deep
     // window is already sitting in `articles`, so dropping a card slides
@@ -386,6 +582,22 @@ export function LiveArticleFeed({
     // card's own "No image available" state is the honest last resort.
     return kept.length > 0 ? kept : deduped;
   }, [articles, imageless]);
+
+  const loadStatus = useMemo(() => {
+    if (loadingMore) return "Loading more stories…";
+    if (moreError) return moreError;
+    if (stalled) {
+      return "Stopped here — the archive did not advance. Reload the page to try again.";
+    }
+    if (hasMore) {
+      return total === null
+        ? "More stories are below. Keep scrolling for the rest of the archive."
+        : `${visible.length.toLocaleString("en")} shown, about ${total.toLocaleString("en")} in the archive.`;
+    }
+    return loadedAPage
+      ? "That is the whole archive — every story published so far."
+      : "That is everything published so far.";
+  }, [hasMore, loadedAPage, loadingMore, moreError, stalled, total, visible.length]);
 
   if (visible.length === 0) {
     return (
@@ -405,7 +617,10 @@ export function LiveArticleFeed({
       onMouseEnter={() => pause(true)}
       onMouseLeave={() => pause(false)}
     >
-      <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+      <div
+        id="live-article-grid"
+        className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3"
+      >
         {visible.map((article) => (
           <NewsCard
             key={article.id}
@@ -414,6 +629,42 @@ export function LiveArticleFeed({
             onImageUnavailable={markImageless}
           />
         ))}
+      </div>
+
+      {/* The end of the archive is not a dead end: it is a sentence, and
+          a button that only exists while there is something behind it. */}
+      <div className="mt-10 flex flex-col items-center gap-3">
+        {hasMore && (
+          <>
+            <button
+              type="button"
+              onClick={() => void loadMore()}
+              disabled={loadingMore}
+              aria-busy={loadingMore}
+              aria-controls="live-article-grid"
+              className="inline-flex min-h-[44px] items-center rounded-lg border border-gray-300 bg-white px-5 text-sm font-semibold text-gray-800 transition hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-60 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100 dark:hover:bg-gray-800 dark:focus-visible:ring-blue-400 dark:focus-visible:ring-offset-black"
+            >
+              {loadingMore ? "Loading…" : "Load more stories"}
+            </button>
+            {/* The IntersectionObserver's trigger. Rendered whenever there
+                might be another page, including when the button above is
+                mid-request — it is the automatic half of the same action,
+                so both must survive a toggle of `hasMore`. */}
+            <div ref={sentinelRef} aria-hidden="true" className="h-px w-full" />
+          </>
+        )}
+
+        {/* One sentence, announced once. `role="status"` is polite by
+            default and fires when its content changes, so it covers
+            "loading", "how much is left" and "that is everything"
+            without a second live region to keep in sync. */}
+        <p
+          role="status"
+          aria-live="polite"
+          className="text-center text-sm text-gray-500 dark:text-gray-400"
+        >
+          {loadStatus}
+        </p>
       </div>
 
       {/* Screen readers get the polling state without it costing a

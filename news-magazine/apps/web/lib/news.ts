@@ -281,6 +281,11 @@ async function countFeed({
  * the same instant; without it, a page boundary landing inside a run of
  * equal timestamps would skip or repeat those rows.
  *
+ * The filter is passed WITHOUT its own outer parentheses. postgrest-js
+ * wraps whatever `.or()` is given in a pair already, and a second pair
+ * makes PostgREST reject the whole tree with "failed to parse logic
+ * tree" — measured against the live server, which is how this was found.
+ *
  * `query` is returned rather than mutated in place only because
  * postgrest-js builders are immutable; the call site reassigns.
  */
@@ -294,7 +299,7 @@ function applyCursor<T extends { or: (filter: string) => T }>(
 
   const timestamp = cursor.published_at;
   return query.or(
-    `(published_at.lt.${timestamp},and(published_at.eq.${timestamp},id.lt.${cursor.id}))`
+    `published_at.lt.${timestamp},and(published_at.eq.${timestamp},id.lt.${cursor.id})`
   );
 }
 

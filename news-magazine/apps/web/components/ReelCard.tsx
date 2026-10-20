@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { SafeImage } from "@/components/SafeImage";
+import { playsHere } from "@/lib/reel-codec";
 import type { Reel } from "@/lib/reels";
 import { SITE_URL } from "@/lib/site";
 
@@ -213,6 +214,22 @@ export function ReelCard({
     onMutedChange?.(next);
   };
   const [failed, setFailed] = useState(false);
+  /**
+   * Whether THIS browser can decode THIS clip's container.
+   *
+   * Starts true and is corrected after mount, so the server render and
+   * the first client render agree and there is no hydration mismatch —
+   * and so the default, if the check never runs or throws, is to play
+   * the clip rather than to hide it.
+   *
+   * This is the only place a reel is withheld from a reader. It fires
+   * for exactly one case: a webm on a browser that says it cannot decode
+   * webm, which today means Safari on iOS. See lib/reel-codec.ts for why
+   * the question is asked of the browser rather than guessed from the
+   * user agent, and why nothing else is filtered here — formats that no
+   * browser plays are removed on the server instead.
+   */
+  const [playableHere, setPlayableHere] = useState(true);
   const [blocked, setBlocked] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [reduceMotion, setReduceMotion] = useState(false);
@@ -231,6 +248,20 @@ export function ReelCard({
     query.addEventListener("change", apply);
     return () => query.removeEventListener("change", apply);
   }, []);
+
+  // Ask the browser what it can decode, once mounted.
+  //
+  // Deliberately after mount rather than during render: `canPlayType`
+  // needs a `document`, and running it in the server render would either
+  // throw or — via the SSR guard in playsHere — bake "assume it plays"
+  // into the HTML and then correct it, which is a hydration mismatch.
+  useEffect(() => {
+    // Read through the two fields rather than the row, so the dependency
+    // list is exactly the data this decision is made from.
+    const embed = reel.embed_url;
+    const embedded = typeof embed === "string" && embed.length > 0;
+    setPlayableHere(playsHere(reel.video_url, embedded));
+  }, [reel.video_url, reel.embed_url]);
 
   /**
    * Send a command to the embedded player.
@@ -524,8 +555,16 @@ export function ReelCard({
         over every such card. Those cards fall through to nothing at all,
         and the poster underneath carries them — which is exactly what a
         <video> with preload="metadata" costs for a plain one anyway.
+
+        `playableHere` is the last guard and the narrowest. Mounting a
+        <video> at a container this browser has told us it cannot decode
+        costs a full fetch of the file, a decode attempt, an error event
+        and a black frame — on every card in the feed, twice over,
+        because the mobile and desktop layouts both exist in the DOM.
+        Skipping it leaves the poster, which has already loaded, in
+        place of a rectangle that was never going to show anything.
       */}
-      {!failed && !embedMounted && !embedded && (
+      {!failed && !embedMounted && !embedded && playableHere && (
         <video
           ref={videoRef}
           src={reel.video_url}
@@ -559,6 +598,41 @@ export function ReelCard({
           </svg>
           <p className="text-sm font-semibold text-white">Replay unavailable</p>
           <p className="text-xs text-white/70">This clip could not be loaded.</p>
+        </div>
+      )}
+
+      {/*
+        The clip is fine; this browser is not the audience for it.
+
+        Deliberately NOT the "Replay unavailable" panel above, which says
+        the file could not be loaded — a statement that would be false
+        here. The file loaded. It is a WebM, and this engine cannot
+        decode WebM, which today means Safari on iOS. The difference
+        matters to the reader: one is a broken site and the other is a
+        clip that was never going to play on this device.
+
+        The poster stays underneath, the caption and credit stay
+        readable, and the link out goes to the source — which plays it,
+        because Commons's own page uses the same webm and has the same
+        problem, so the honest destination is the file's description
+        page rather than a promise about playback.
+      */}
+      {!failed && !playableHere && (
+        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-1 bg-black/55 px-6 text-center">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path
+              d="M12 9v4m0 4h.01M10.3 3.9 2.4 17.5A2 2 0 0 0 4.1 20.5h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+          <p className="text-sm font-semibold text-white">Not playable on this browser</p>
+          <p className="text-xs text-white/70">
+            This clip is published as a WebM video, which Safari on iPhone and iPad cannot
+            decode.
+          </p>
         </div>
       )}
 

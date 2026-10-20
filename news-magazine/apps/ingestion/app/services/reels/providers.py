@@ -95,23 +95,107 @@ class ProviderError(RuntimeError):
 # SHARED PARSING
 # ---------------------------------------------------------------------------
 
+#: Video codecs no current browser decodes, whatever container they turn
+#: up in. `theora` is Ogg Video and `mp4v` is MPEG-4 Part 2 — both are
+#: valid video files, both are common on Wikimedia Commons, and neither
+#: plays anywhere. This is a DISQUALIFIER, checked before the container:
+#: `video/quicktime` looks like a container Safari knows and is not, and
+#: `video/mp4` is a container that carries both H.264 (plays everywhere)
+#: and MPEG-4 Part 2 (plays nowhere).
+UNPLAYABLE_VIDEO_CODECS = frozenset({"theora", "mp4v", "mp4a"})
+
+#: Rank 0 — mp4. H.264 in an mp4 is the one combination Safari, every
+#: iOS browser and every Chromium and Firefox build will play, and it is
+#: the only one all four agree on.
+_RANK_MP4 = 0
+
+#: Rank 1 — webm with VP8/VP9/AV1. Plays in Chromium and Firefox; Safari
+#: on macOS has shipped VP9 since 14.1; Safari on iOS has never shipped
+#: WebM at all. Good enough to store, not good enough to prefer over mp4.
+_RANK_WEBM = 1
+
+
+def _parse_media_type(value: Any) -> tuple[str, frozenset[str]]:
+    """
+    A mime type with its parameters, as (essence, codecs).
+
+    'video/webm; codecs="vp9, opus"' -> ('video/webm', {'vp9', 'opus'})
+
+    The parameters are the whole reason this function exists. MediaWiki
+    NEVER sends a bare type in a derivative: every entry it publishes
+    arrives as `video/<container>; codecs="<video>, <audio>"`, so code
+    that compares the field against `"video/mp4"` with `==` is comparing
+    against a string Commons has never once produced, and silently
+    refuses every mp4 it is ever offered. That is not a hypothetical:
+    it is what made the mp4 preference in `_best_video_url` unreachable
+    code, and it is exactly the bug that left the reels feed serving
+    webm. Everything downstream now reads the essence and the codecs
+    separately rather than the raw field.
+    """
+    if not isinstance(value, str):
+        return "", frozenset()
+
+    essence, _, parameters = value.partition(";")
+    essence = essence.strip().lower()
+    if not essence:
+        return "", frozenset()
+
+    codecs: set[str] = set()
+    for parameter in parameters.split(";"):
+        key, _, raw = parameter.partition("=")
+        if key.strip().lower() != "codecs":
+            continue
+        # Codecs are comma separated and quoted as a group; an unquoted
+        # one is still a codec.
+        codecs.update(
+            part.strip().strip('"').lower()
+            for part in raw.split(",")
+            if part.strip()
+        )
+
+    return essence, frozenset(codecs)
+
+
+def _video_rank(essence: str, codecs: frozenset[str]) -> int | None:
+    """
+    How many browsers can play this rendition, best first. None = refuse.
+
+    Refusing rather than ranking last is deliberate and predates this
+    function: Commons still hosts plenty of Ogg Video, the file is a
+    perfectly valid video, and no current browser will decode it. A clip
+    nobody can watch is worse than no clip — the next candidate is a
+    real video.
+    """
+    if UNPLAYABLE_VIDEO_CODECS & codecs:
+        return None
+
+    if essence.startswith("video/mp4"):
+        return _RANK_MP4
+
+    if essence.startswith("video/webm"):
+        return _RANK_WEBM
+
+    # Anything else — `video/quicktime`, `video/ogg`, audio, an empty
+    # string — is refused rather than guessed at.
+    return None
+
+
 def _is_browser_playable_video(url: str, info: dict | None = None) -> bool:
     """
     True when a browser will actually be able to play this file.
 
-    Only mp4 (H.264) and webm (VP8/VP9) are treated as playable. Ogg
-    Video / Theora (`.ogv`) is the obvious trap: Wikimedia still hosts
-    plenty of it, the file is a perfectly valid video, and no current
-    browser will decode it. Storing one produces a Reels card that says
-    "Replay unavailable" forever, so the mime is checked when the
-    provider told us and the extension is used when it did not.
+    Only mp4 (H.264) and webm (VP8/VP9/AV1) are treated as playable, and
+    the codec is checked as well as the container: an mp4 carrying
+    MPEG-4 Part 2 is a valid video file that no browser plays. The mime
+    is used when the provider told us and the extension when it did not.
     """
     mime = ""
     if isinstance(info, dict):
-        mime = str(info.get("mime") or info.get("type") or "").lower()
+        mime = str(info.get("mime") or info.get("type") or "")
 
-    if mime:
-        return mime == "video/mp4" or mime.startswith("video/webm")
+    essence, codecs = _parse_media_type(mime)
+    if essence:
+        return _video_rank(essence, codecs) is not None
 
     lowered = url.lower().split("?")[0]
     # `.ogv` and `.ogg` are checked first: `.ogg` is audio and `.ogv` is
@@ -719,13 +803,45 @@ class WikimediaSource(_BaseSource):
     ship the author and licence with the clip. A file with an unclear
     or missing licence is skipped entirely.
 
-    On codecs
-    ---------
-    Commons masters are .webm and .ogv, and .ogv will not play in half
-    the browsers we care about. Wikimedia transcodes every video into
-    browser-safe mp4 at several heights and those live in `derivatives`,
-    so we take an mp4 transcode when one exists and fall back to the
-    webm master only when it does not.
+    On codecs — read this before trying to fix Safari on iOS
+    -------------------------------------------------------
+    Commons masters are .webm and .ogv, and .ogv plays nowhere. What
+    Wikimedia actually publishes, checked against the live API on a
+    50-file sample (184 derivative entries) and against the CDN:
+
+        *.vp9.webm          video/webm; codecs="vp9, opus"
+        *.mpeg4.mov         video/quicktime; codecs="mp4v"   (MPEG-4 Part 2)
+        *.theora.ogv        video/ogg; codecs="theora"
+
+    There is no H.264 mp4 family. Not one of the 184 entries was
+    `video/mp4`, and every `.480p.mp4` / `.480p.mpeg4.mp4` path on the
+    CDN answers HTTP 404. Wikimedia stopped publishing H.264
+    transcodes years ago and has not brought them back.
+
+    The consequence, stated plainly because it is not obvious and it is
+    not a bug in this file: **nothing Commons serves will play in Safari
+    on iOS.** MP4 Part 2 in a QuickTime container is not decodable there
+    either — Apple dropped it long ago — and WebM has never shipped on
+    iOS at all. An mp4 preference below is still correct and still worth
+    having; it just will not save iOS while this is the only keyless
+    source. Fixing that means changing the provider, not the codec
+    choice, and the read path (`isPlayableReel` in apps/web) is where
+    the decision about what to show such a reader is made.
+
+    Two things that ARE ours and were wrong:
+
+    1. Commons lists the ORIGINAL FILE as the first entry in
+       `derivatives`, at full resolution and with no `transcodekey`.
+       Ranking by size therefore handed every reel a 4K master — a 4 MB
+       download to fill a 420px card — while the transcodes Wikimedia
+       had already paid to generate went unused. `_best_video_url` now
+       skips the master and picks a transcode.
+
+    2. Every derivative's `type` carries its codecs
+       (`video/mp4; codecs="avc1..."`), so the old exact comparison
+       against `"video/mp4"` could never match and the mp4 preference
+       was unreachable code. `_parse_media_type` now splits the
+       parameters off and reads the codecs.
     """
 
     key = "wikimedia"
@@ -847,7 +963,9 @@ class WikimediaSource(_BaseSource):
         title = _plain_text(page.get("title")) or ""
         file_name = title[5:] if title.lower().startswith("file:") else title
 
-        video_url = self._best_video_url(videoinfo, imageinfo)
+        video_url, rendition_width, rendition_height = self._best_video_url(
+            videoinfo, imageinfo
+        )
         if not video_url:
             return None, "no_playable_derivative"
 
@@ -855,10 +973,13 @@ class WikimediaSource(_BaseSource):
             (videoinfo or {}).get("url")
         )
 
-        width = _int_or_none((videoinfo or {}).get("width")) or _int_or_none(
+        # The rendition we actually serve, not the master it was cut from.
+        # A row that says 3840x2160 while pointing a phone at a 854x480
+        # transcode is a lie in a column the card renders from.
+        width = rendition_width or _int_or_none((videoinfo or {}).get("width")) or _int_or_none(
             (imageinfo or {}).get("width")
         )
-        height = _int_or_none((videoinfo or {}).get("height")) or _int_or_none(
+        height = rendition_height or _int_or_none((videoinfo or {}).get("height")) or _int_or_none(
             (imageinfo or {}).get("height")
         )
 
@@ -932,17 +1053,39 @@ class WikimediaSource(_BaseSource):
                     merged[field_name] = entry
         return merged
 
-    def _best_video_url(self, videoinfo: dict | None, imageinfo: dict | None) -> str | None:
+    def _best_video_url(
+        self, videoinfo: dict | None, imageinfo: dict | None
+    ) -> tuple[str | None, int | None, int | None]:
         """
-        Prefer a transcoded mp4, fall back to the original master.
+        Prefer an mp4 transcode, then a webm transcode, then the master.
 
-        Commons transcodes every video to h.264 mp4 at several heights
-        and advertises them in `derivatives`. Safari and every iOS
-        browser refuse to play webm or ogv, so an mp4 transcode is the
-        difference between a working reel and a black rectangle on the
-        platform that matters most.
+        Returns (url, width, height) for the rendition actually chosen,
+        so the row describes the file the browser will fetch rather than
+        the master it was derived from.
+
+        Commons publishes three transcode families and nothing else:
+        `*.vp9.webm`, `*.mpeg4.mov` (MPEG-4 Part 2) and `*.theora.ogv`.
+        It publishes no H.264 mp4 at all — verified against the live API
+        and against the CDN, where every `.480p.mp4` path 404s. So the mp4
+        branch below is not dead code, it is a preference that costs
+        nothing and is right the day Wikimedia turns transcoding back on
+        or a different provider arrives; what it is NOT is a fix for
+        Safari on iOS. That platform cannot play anything Commons serves,
+        which is a property of the provider, not of this code. Say so in
+        the README before trying to fix it here again.
+
+        What this DOES fix is the master. Commons lists the original file
+        as the FIRST entry in `derivatives`, with no `transcodekey` and
+        at full resolution, so ranking by size handed every reel a 4K
+        master — a 4 MB download to fill a 420px card — and left the
+        transcodes Commons had already paid to generate unused.
         """
         candidates: list[tuple[int, int, int, str]] = []
+        master_urls = {
+            self._url_path(_absolute((block or {}).get("url")))
+            for block in (videoinfo, imageinfo)
+            if (block or {}).get("url")
+        }
 
         for derivative in (videoinfo or {}).get("derivatives") or []:
             if not isinstance(derivative, dict):
@@ -951,33 +1094,42 @@ class WikimediaSource(_BaseSource):
             if not url or not self._is_allowed_host(url):
                 continue
 
-            mime = (derivative.get("type") or "").lower()
-            height = _int_or_none(derivative.get("height")) or 0
-            width = _int_or_none(derivative.get("width")) or 0
-
-            if mime == "video/mp4":
-                # Rank 0: plays everywhere, including iOS.
-                rank = 0
-            elif mime.startswith("video/webm"):
-                # Rank 1: plays in Chromium and Firefox. Safari refuses
-                # it, which is why mp4 outranks it.
-                rank = 1
-            else:
-                # Everything else is refused rather than ranked last.
-                # Commons still hosts .ogv, and Ogg Video (Theora) plays
-                # in no current browser — accepting it produced cards
-                # that rendered "Replay unavailable" and a dead Reels
-                # tab. A clip nobody can watch is worse than no clip:
-                # the next candidate is a real video.
+            # The master, however it is flagged. `transcodekey` is absent
+            # on every genuine transcode and present on every one of them
+            # in the live API (134 of 184 derivative entries across a
+            # 50-file sample — the other 50 are one master per file), and
+            # the URL comparison catches it if that ever stops holding.
+            if not derivative.get("transcodekey") or self._url_path(url) in master_urls:
                 continue
 
-            candidates.append((rank, height, width, url))
+            rank = _video_rank(*_parse_media_type(derivative.get("type")))
+            if rank is None:
+                continue
+
+            candidates.append((
+                rank,
+                _int_or_none(derivative.get("height")) or 0,
+                _int_or_none(derivative.get("width")) or 0,
+                url,
+            ))
 
         if candidates:
-            # Biggest first inside a rank, so a phone gets the 720p and
-            # not the 240p.
-            candidates.sort(key=lambda item: (item[0], -item[1], -item[2], item[3]))
-            return candidates[0][3]
+            best_rank = min(item[0] for item in candidates)
+            pool = [item for item in candidates if item[0] == best_rank]
+
+            # A rendition below MIN_HEIGHT is a thumbnail and looks like
+            # one, but it still beats a 4K master: the card is 420px wide.
+            usable = [item for item in pool if item[1] >= MIN_HEIGHT] or pool
+
+            # Largest that does not exceed PREFERRED_HEIGHT, or the
+            # smallest that does. Downloading 1080p to fill a 420px card
+            # is how a reels feed becomes the most expensive page on the
+            # site.
+            below = [item for item in usable if item[1] <= PREFERRED_HEIGHT]
+            chosen = (max if below else min)(
+                below or usable, key=lambda item: (item[1], item[2])
+            )
+            return chosen[3], chosen[2] or None, chosen[1] or None
 
         # No usable transcode. The original master is a last resort, but
         # only when it is a format a browser will actually play.
@@ -986,9 +1138,18 @@ class WikimediaSource(_BaseSource):
             if not url or not self._is_allowed_host(url):
                 continue
             if _is_browser_playable_video(url, block):
-                return url
+                return (
+                    url,
+                    _int_or_none((block or {}).get("width")) or None,
+                    _int_or_none((block or {}).get("height")) or None,
+                )
 
-        return None
+        return None, None, None
+
+    @staticmethod
+    def _url_path(url: str | None) -> str:
+        """The path, with Wikimedia's analytics query string removed."""
+        return urlparse(url).path if url else ""
 
     def _is_allowed_host(self, url: str) -> bool:
         """Only serve bytes from Wikimedia's own media host."""

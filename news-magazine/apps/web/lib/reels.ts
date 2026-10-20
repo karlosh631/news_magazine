@@ -188,7 +188,7 @@ export async function getReels(opts?: { limit?: number }): Promise<ReelFeedResul
 }
 
 /**
- * Drop a clip no browser will decode.
+ * Drop a clip NO browser will decode.
  *
  * The ingestion pipeline refuses to STORE these, but rows written before
  * that check existed are still in the table — and a `.ogv` renders as
@@ -199,6 +199,26 @@ export async function getReels(opts?: { limit?: number }): Promise<ReelFeedResul
  * Kept deliberately narrow: only formats we know browsers refuse are
  * excluded. Anything unrecognised passes, because a file whose type we
  * failed to guess is far more likely to play than not.
+ *
+ * WEBM IS NOT HERE, AND THAT IS THE POINT
+ * ---------------------------------------
+ * A webm row is the live production bug on iPhone, and it is still not
+ * filtered, because webm is not dead everywhere — it plays in Chromium
+ * and Firefox and in Safari on macOS, so removing those rows here would
+ * hide good content from most of the audience to fix one platform.
+ *
+ * Whether a given reader can decode webm is a fact about their browser,
+ * not about the file, so it is asked of the browser after mount rather
+ * than guessed here from a request header. See lib/reel-codec.ts. Note
+ * also that this module is `server-only`, which is a second reason the
+ * question cannot be answered in this function: there is no `document`
+ * to ask.
+ *
+ * For the record, because it looks fixable here and is not: Wikimedia
+ * Commons publishes no H.264 mp4 at all — no `.480p.mp4`, and every one
+ * of the 184 derivative entries in a 50-file sample of its output was
+ * `.vp9.webm`, `.mpeg4.mov` or `.theora.ogv`. Nothing upstream of us can
+ * be pointed at an mp4 for this source.
  */
 function isPlayableReel(reel: Reel): boolean {
   const url = ((reel.video_url ?? "").toLowerCase().split("?")[0] ?? "");

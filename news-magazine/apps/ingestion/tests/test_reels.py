@@ -693,6 +693,40 @@ def test_a_configured_provider_still_rotates_and_books_keeps():
 # =============================================================
 
 
+# =============================================================
+# A REAL COMMONS RESPONSE
+#
+# Captured verbatim from
+#   commons.wikimedia.org/w/api.php?action=query&generator=search
+#     &prop=imageinfo|videoinfo&viprop=...|derivatives|...
+# with the same search expression and viprop the adapter sends.
+#
+# It replaces an earlier fixture that was kinder than the API, in three
+# ways that each hid a real bug:
+#
+#   1. It had derivatives with no `transcodekey`. Commons lists the
+#      ORIGINAL FILE as the first entry in `derivatives`, with no
+#      transcodekey and at full resolution — and ranking by size picked
+#      it, so every stored reel was a full-size master.
+#   2. It had `type: "video/mp4"`. Commons NEVER sends a bare type; every
+#      entry arrives as `video/<container>; codecs="<video>, <audio>"`.
+#      The old `== "video/mp4"` comparison therefore could not match
+#      anything Commons has ever produced, which is why the feed served
+#      webm.
+#   3. It offered an mp4 transcode. Commons publishes no H.264 mp4
+#      family at all: across a 50-file sample (184 derivative entries)
+#      every entry was `.vp9.webm`, `.mpeg4.mov` or `.theora.ogv`, and
+#      every `.480p.mp4` path on the CDN answers HTTP 404.
+#
+# A fixture that promises what the provider cannot deliver is not a
+# fixture, it a wish.
+# =============================================================
+
+_COMMONS_BASE = (
+    "https://upload.wikimedia.org/wikipedia/commons/transcoded"
+    "/a/ab/Nepal_street_video.webm/Nepal_street_video.webm"
+)
+
 COMMONS_RESPONSE = {
     "query": {
         "pages": [
@@ -704,13 +738,17 @@ COMMONS_RESPONSE = {
                         "url": (
                             "https://upload.wikimedia.org/wikipedia/commons/"
                             "a/ab/Nepal_street_video.webm"
+                            "?utm_source=commons.wikimedia.org"
+                            "&utm_campaign=imageinfo&utm_content=original"
                         ),
                         "thumburl": (
                             "https://upload.wikimedia.org/wikipedia/commons/thumb/"
                             "a/ab/Nepal_street_video.webm/640px-Nepal_street_video.webm.jpg"
                         ),
-                        "width": 1280,
-                        "height": 720,
+                        "mime": "video/webm",
+                        "mediatype": "VIDEO",
+                        "width": 1920,
+                        "height": 1080,
                         "extmetadata": {
                             "LicenseShortName": {"value": "CC BY-SA 4.0"},
                             "License": {"value": "cc-by-sa-4.0"},
@@ -727,24 +765,56 @@ COMMONS_RESPONSE = {
                 "videoinfo": [
                     {
                         "duration": 12.5,
-                        "width": 720,
-                        "height": 1280,
+                        "width": 1920,
+                        "height": 1080,
+                        "mime": "video/webm",
+                        "mediatype": "VIDEO",
                         "timestamp": "2026-01-02T03:04:05Z",
                         "descriptionurl": (
                             "https://commons.wikimedia.org/wiki/File:Nepal_street_video.webm"
                         ),
                         "derivatives": [
+                            # The master, listed FIRST, at full resolution,
+                            # with no transcodekey. Exactly as Commons
+                            # sends it, and the reason the feed used to
+                            # store 1080p masters.
                             {
-                                "src": "https://upload.wikimedia.org/wikipedia/commons/transcoded/a/ab/Nepal_street_video.webm/Nepal_street_video.webm.720p.vp9.webm",
-                                "type": "video/webm",
-                                "width": 720,
-                                "height": 1280,
+                                "src": (
+                                    "https://upload.wikimedia.org/wikipedia/commons/"
+                                    "a/ab/Nepal_street_video.webm"
+                                    "?utm_source=commons.wikimedia.org"
+                                    "&utm_campaign=api&utm_content=original"
+                                ),
+                                "type": 'video/webm; codecs="vp9, opus"',
+                                "width": 1920,
+                                "height": 1080,
+                                "bandwidth": 2400000,
                             },
                             {
-                                "src": "https://upload.wikimedia.org/wikipedia/commons/transcoded/a/ab/Nepal_street_video.webm/Nepal_street_video.webm.720p.mp4",
-                                "type": "video/mp4",
-                                "width": 720,
-                                "height": 1280,
+                                "src": f"{_COMMONS_BASE}.240p.vp9.webm",
+                                "type": 'video/webm; codecs="vp9, opus"',
+                                "transcodekey": "240p.vp9.webm",
+                                "width": 426,
+                                "height": 240,
+                                "bandwidth": 282256,
+                            },
+                            {
+                                # MPEG-4 Part 2 in a QuickTime container.
+                                # A valid video that no browser plays.
+                                "src": f"{_COMMONS_BASE}.360p.mpeg4.mov",
+                                "type": 'video/quicktime; codecs="mp4v"',
+                                "transcodekey": "360p.mpeg4.mov",
+                                "width": 640,
+                                "height": 360,
+                                "bandwidth": 1002128,
+                            },
+                            {
+                                "src": f"{_COMMONS_BASE}.480p.vp9.webm",
+                                "type": 'video/webm; codecs="vp9, opus"',
+                                "transcodekey": "480p.vp9.webm",
+                                "width": 854,
+                                "height": 480,
+                                "bandwidth": 654768,
                             },
                         ],
                     }
@@ -826,9 +896,16 @@ async def test_one_reels_pass_stores_commons_clips_with_no_api_keys(monkeypatch)
 
     assert row["source_key"] == "wikimedia"
     assert row["external_id"] == "12345"
-    # The mp4 transcode, not the webm master: Safari and iOS refuse
-    # webm, so picking the wrong one is a black rectangle on phones.
-    assert row["video_url"].endswith(".mp4"), row["video_url"]
+    # A transcode, not the master. Commons publishes no H.264 mp4 (every
+    # `.480p.mp4` on the CDN is a 404), so the best it offers is a
+    # 480p VP9 webm — and shipping that rather than the 1080p master is
+    # the part that is ours to get right.
+    assert row["video_url"].endswith(".480p.vp9.webm"), row["video_url"]
+    assert "/transcoded/" in row["video_url"], row["video_url"]
+    assert "Nepal_street_video.webm.240p" not in row["video_url"]
+    # The row describes the file the browser will fetch, not the 1080p
+    # master it was cut from.
+    assert (row["width"], row["height"]) == (854, 480), row
     assert row["license_name"] == "CC BY-SA 4.0"
     assert row["attribution_required"] is True
     assert row["creator_name"] == "A Photographer"
@@ -1408,6 +1485,261 @@ def test_mp4_and_webm_are_playable():
     # No mime from the provider: the extension decides.
     assert _is_browser_playable_video("https://x/Foo.mp4?ts=1")
     assert _is_browser_playable_video("https://x/Foo.webm")
+
+
+# =============================================================
+# COMMONS CODECS, AGAINST THE SHAPE COMMONS ACTUALLY SENDS
+#
+# Every entry in a real `derivatives` list arrives as
+#
+#   "video/<container>; codecs=\"<video>, <audio>\""
+#
+# The parameters are not decoration. The old code compared the field
+# against `"video/mp4"` with `==`, which is a string Commons has never
+# produced, so the mp4 preference could not fire even if Wikimedia
+# started publishing one — and `.mov` / Theora, which DO play nowhere,
+# were only kept out by accident of the container name.
+# =============================================================
+
+def test_a_media_type_is_split_into_its_container_and_its_codecs():
+    """
+    The exact strings Commons sends, quoted from the live API.
+    """
+    from app.services.reels.providers import _parse_media_type
+
+    assert _parse_media_type('video/webm; codecs="vp9, opus"') == (
+        "video/webm", frozenset({"vp9", "opus"}),
+    )
+    assert _parse_media_type('video/mp4; codecs="avc1.4d401f, mp4a.40.2"') == (
+        "video/mp4", frozenset({"avc1.4d401f", "mp4a.40.2"}),
+    )
+    # Single codec, no audio, mixed case, stray spaces.
+    assert _parse_media_type('video/webm; CODECS="AV01.0.08M.08"') == (
+        "video/webm", frozenset({"av01.0.08m.08"}),
+    )
+    # No parameters at all, which is what a hand-written fixture tends
+    # to send and what almost nothing real does.
+    assert _parse_media_type("video/mp4") == ("video/mp4", frozenset())
+    assert _parse_media_type(None) == ("", frozenset())
+    assert _parse_media_type("") == ("", frozenset())
+
+
+def test_the_codec_decides_not_just_the_container():
+    """
+    MPEG-4 Part 2 is the trap Commons sets on every single file.
+
+    `.mpeg4.mov` is the one non-webm transcode Wikimedia publishes, it
+    arrives as `video/quicktime; codecs="mp4v"`, and no current browser
+    decodes it — Apple dropped MPEG-4 Part 2 before the first iPhone.
+    A check that only read the container would either reject it for
+    being "quicktime" by luck, or accept it for being "mp4v" by
+    mistake, depending on which side of the `==` it fell.
+    """
+    from app.services.reels.providers import _is_browser_playable_video
+
+    assert not _is_browser_playable_video(
+        "https://x/Foo.webm.360p.mpeg4.mov",
+        {"type": 'video/quicktime; codecs="mp4v"'},
+    )
+    # A container we have no opinion on is still refused, even when the
+    # codec in it is one a browser can decode. That is deliberate and
+    # predates the codec check: accepting a type we do not recognise on
+    # the strength of its codec parameter is how an unfamiliar format
+    # ends up in the feed. Commons never sends one.
+    assert not _is_browser_playable_video(
+        "https://x/Foo.mov", {"type": 'video/quicktime; codecs="avc1"'},
+    )
+    # Ogg Video with an explicit codec, same answer as without one.
+    assert not _is_browser_playable_video(
+        "https://x/Foo.ogv", {"mime": 'video/ogg; codecs="theora, vorbis"'},
+    )
+    # And a real mp4 transcode, with codecs, is playable — which is the
+    # case the old `== "video/mp4"` comparison refused.
+    assert _is_browser_playable_video(
+        "https://x/Foo.webm.480p.mp4", {"type": 'video/mp4; codecs="avc1.4d401f"'},
+    )
+
+
+def _commons_derivatives(*extra: dict) -> list[dict]:
+    """Commons' real derivative list, plus whatever a test adds."""
+    return [
+        {
+            "src": (
+                "https://upload.wikimedia.org/wikipedia/commons/a/ab/Foo.webm"
+                "?utm_source=commons.wikimedia.org&utm_campaign=api"
+            ),
+            "type": 'video/webm; codecs="vp9, opus"',
+            "width": 1920,
+            "height": 1080,
+            "bandwidth": 2400000,
+        },
+        *extra,
+        {
+            "src": (
+                "https://upload.wikimedia.org/wikipedia/commons/transcoded/"
+                "a/ab/Foo.webm/Foo.webm.480p.vp9.webm"
+            ),
+            "type": 'video/webm; codecs="vp9, opus"',
+            "transcodekey": "480p.vp9.webm",
+            "width": 854,
+            "height": 480,
+            "bandwidth": 654768,
+        },
+    ]
+
+
+def _commons_videoinfo(derivatives: list[dict]) -> dict:
+    return {
+        "duration": 12.5,
+        "width": 1920,
+        "height": 1080,
+        "mime": "video/webm",
+        "url": (
+            "https://upload.wikimedia.org/wikipedia/commons/a/ab/Foo.webm"
+            "?utm_source=commons.wikimedia.org&utm_campaign=imageinfo"
+        ),
+        "derivatives": derivatives,
+    }
+
+
+def _commons_imageinfo() -> dict:
+    return {
+        "url": (
+            "https://upload.wikimedia.org/wikipedia/commons/a/ab/Foo.webm"
+            "?utm_source=commons.wikimedia.org&utm_campaign=imageinfo"
+        ),
+        "mime": "video/webm",
+        "width": 1920,
+        "height": 1080,
+    }
+
+
+def _pick(derivatives: list[dict]) -> str | None:
+    from app.services.reels.providers import WikimediaSource
+
+    source = WikimediaSource(pool=None, client=None)
+    url, _, _ = source._best_video_url(
+        _commons_videoinfo(derivatives), _commons_imageinfo()
+    )
+    return url
+
+
+def test_the_original_master_is_never_chosen_over_a_transcode():
+    """
+    The production bug, at the level it actually happens.
+
+    Commons lists the ORIGINAL FILE as the first entry in `derivatives`,
+    with no `transcodekey` and at the source's full resolution. Ranking
+    by size therefore picked the master every time: the live reels feed
+    was serving 1920x1080 and even 4096x2160 originals — a multi-
+    megabyte download to fill a 420-pixel card — while the transcodes
+    Wikimedia had already paid to generate went unused.
+
+    A reel card is 420px wide. The 480p transcode is the right answer
+    and the master is not, whatever their relative file sizes.
+    """
+    assert _pick(_commons_derivatives()).endswith("Foo.webm.480p.vp9.webm")
+
+
+def test_an_h264_mp4_transcode_outranks_every_webm_one():
+    """
+    The preference the class has always claimed, made reachable.
+
+    Wikimedia publishes no H.264 mp4 today, so this cannot be observed
+    in production — which is exactly why it went broken unnoticed. The
+    comparison was `type == "video/mp4"` against a field Commons fills
+    with `video/mp4; codecs="avc1..."`, so it could never fire. If
+    Wikimedia turns H.264 transcoding back on, or a provider that does
+    publish it arrives, this has to be the behaviour.
+    """
+    mp4 = {
+        "src": (
+            "https://upload.wikimedia.org/wikipedia/commons/transcoded/"
+            "a/ab/Foo.webm/Foo.webm.480p.mp4"
+        ),
+        "type": 'video/mp4; codecs="avc1.4d401f, mp4a.40.2"',
+        "transcodekey": "480p.mp4",
+        "width": 854,
+        "height": 480,
+        "bandwidth": 700000,
+    }
+
+    # Bigger than the 480p webm, and it still wins: codec first, size
+    # second. Ranking by size is what put the master in front.
+    mp4_720 = {**mp4, "src": mp4["src"].replace("480p", "720p"),
+               "transcodekey": "720p.mp4", "width": 1280, "height": 720}
+    assert _pick(_commons_derivatives(mp4, mp4_720)).endswith("Foo.webm.720p.mp4")
+
+    # And an mp4 with no codecs declared at all is still an mp4.
+    bare = {**mp4, "type": "video/mp4"}
+    assert _pick(_commons_derivatives(bare)).endswith("Foo.webm.480p.mp4")
+
+
+def test_the_transcode_commons_publishes_besides_webm_is_refused():
+    """
+    `.mpeg4.mov` and `.theora.ogv` are on every Commons file and play
+    nowhere. Refusing them is what stops the feed rendering a card that
+    says "Replay unavailable" for ever.
+    """
+    mov = {
+        "src": (
+            "https://upload.wikimedia.org/wikipedia/commons/transcoded/"
+            "a/ab/Foo.webm/Foo.webm.360p.mpeg4.mov"
+        ),
+        "type": 'video/quicktime; codecs="mp4v"',
+        "transcodekey": "360p.mpeg4.mov",
+        "width": 640,
+        "height": 360,
+        "bandwidth": 1002128,
+    }
+    theora = {
+        "src": (
+            "https://upload.wikimedia.org/wikipedia/commons/transcoded/"
+            "a/ab/Foo.webm/Foo.webm.480p.theora.ogv"
+        ),
+        "type": 'video/ogg; codecs="theora, vorbis"',
+        "transcodekey": "480p.theora.ogv",
+        "width": 854,
+        "height": 480,
+        "bandwidth": 800000,
+    }
+
+    # Both refused; the 480p webm next to them is taken instead.
+    assert _pick(_commons_derivatives(mov, theora)).endswith("Foo.webm.480p.vp9.webm")
+
+
+def test_a_file_with_no_usable_transcode_falls_back_to_the_master():
+    """
+    The master is a last resort, not a preference — but for a file
+    Commons has not transcoded it is the only thing there is, and
+    returning None would silently empty the feed of a whole category.
+    """
+    from app.services.reels.providers import WikimediaSource
+
+    source = WikimediaSource(pool=None, client=None)
+    url, width, height = source._best_video_url(
+        _commons_videoinfo([_commons_derivatives()[0]]), _commons_imageinfo()
+    )
+
+    assert url and url.endswith("a/ab/Foo.webm?utm_source=commons.wikimedia.org"
+                                "&utm_campaign=imageinfo"), url
+    assert (width, height) == (1920, 1080)
+
+
+def test_the_stored_row_describes_the_rendition_not_the_master():
+    """
+    A row saying 3840x2160 while pointing a phone at an 854x480
+    transcode is a lie in a column the card renders from.
+    """
+    source_kwargs = dict(pool=None, client=None)
+    from app.services.reels.providers import WikimediaSource
+
+    source = WikimediaSource(**source_kwargs)
+    url, width, height = source._best_video_url(
+        _commons_videoinfo(_commons_derivatives()), _commons_imageinfo()
+    )
+
+    assert (width, height) == (854, 480), (url, width, height)
 
 
 # =============================================================

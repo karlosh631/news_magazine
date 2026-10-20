@@ -107,10 +107,22 @@ export function Header({ categories }: { categories: NavCategory[] }) {
    * is one too many.
    */
   const doRefresh = () => {
+    /*
+      A real reload, not router.refresh().
+
+      router.refresh() re-renders the server tree in place, which is
+      nicer when it works — no white flash, scroll position kept. But
+      the reader pressing this is asking a specific question: "is the
+      news newer than what I'm looking at?" An in-place re-render can
+      reuse client state that was already hydrated, and the answer is
+      then ambiguous. A navigation reload rebuilds every component from
+      the database, so the button is never arguable.
+
+      The Supabase reads are cache: "no-store" now, so this genuinely
+      costs one fresh render rather than re-reading a cached body.
+    */
     setReloading(true);
-    router.refresh();
-    window.dispatchEvent(new CustomEvent("news-refresh"));
-    window.setTimeout(() => setReloading(false), 700);
+    window.location.reload();
   };
 
   const closeSearch = () => {
@@ -124,13 +136,23 @@ export function Header({ categories }: { categories: NavCategory[] }) {
   };
 
   const toggleLanguage = () => {
-    setLanguage((current) => {
-      const next = current === "en" ? "ne" : "en";
-      localStorage.setItem("site-language", next);
-      document.documentElement.lang = next;
-      window.dispatchEvent(new CustomEvent("site-language-change", { detail: next }));
-      return next;
-    });
+    // Side effects belong OUTSIDE the state updater.
+    //
+    // These used to run inside the function passed to setLanguage, which
+    // React does not promise to call exactly once — it re-invokes
+    // updaters under StrictMode and may call them again on an interrupted
+    // render. Writing localStorage, mutating <html lang> and dispatching
+    // an event from there means those can happen twice, and dispatching
+    // synchronously during the render phase is what produced
+    // "Cannot update a component (ArticleTranslation) while rendering a
+    // different component (Header)". That error tears down the subtree,
+    // which is why the theme and refresh buttons beside it stopped
+    // responding.
+    const next = language === "en" ? "ne" : "en";
+    setLanguage(next);
+    localStorage.setItem("site-language", next);
+    document.documentElement.lang = next;
+    window.dispatchEvent(new CustomEvent("site-language-change", { detail: next }));
   };
 
   useEffect(() => {

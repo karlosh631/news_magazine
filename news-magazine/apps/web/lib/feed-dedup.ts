@@ -33,12 +33,53 @@
 const OUTLET_SUFFIX =
   /\s*[-–—|]\s*(?:onlinekhabar|online khabar|kathmandu post|the kathmandu post|myreplica|myreplica\.com|setopati|ratopati|nagarik news|nagariknews|nagarik times|ekantipur|kantipur|annapurna post|himal khabar|news|समाचार)\s*$/i;
 
-/** Everything that is not a letter or a number, including Devanagari danda. */
-const PUNCTUATION = /[^\p{L}\p{N}\s]+/gu;
+/**
+ * Everything that is not a letter, a digit or a combining mark.
+ *
+ * The `\p{M}` matters for the same reason it does in WORD, and it
+ * matters FIRST: this runs before tokenisation, so a matra treated as
+ * punctuation is replaced with a SPACE here, and the word it belonged
+ * to is split in two before the tokeniser ever sees it. Stripping
+ * "शेयर" down to "श यर" here is the same shredding as the tokeniser
+ * doing it, one step earlier.
+ *
+ * Python's dedup.py keeps the Devanagari block for the same reason
+ * (`[^\w\sऀ-ॿ]+`), and this file claimed to match it exactly.
+ */
+const PUNCTUATION = /[^\p{L}\p{N}\p{M}\s]+/gu;
 
 /** One word. Nepali has no capitalisation and no spaces inside compounds,
  *  so this splits on whitespace and strips punctuation, nothing more. */
-const WORD = /[\p{L}\p{N}]+/gu;
+/**
+ * A word is a run of letters, digits AND COMBINING MARKS.
+ *
+ * The `\p{M}` is not optional and its absence was the single worst bug
+ * in this file. Devanagari writes its vowel signs (matras) as
+ * COMBINING marks — category Mc — not as letters:
+ *
+ *     शेयर  =  श (Lo) + े (Mc) + य (Lo) + र (Lo)
+ *
+ * so `[\p{L}\p{N}]+` matched "श", stopped at the matra, and produced
+ * "श" and "यर" as two separate words. Every Nepali headline was
+ * shredded into fragments at each vowel sign.
+ *
+ * That is not a cosmetic difference. `contentTokens` drops tokens of
+ * length 1, so most fragments were discarded and a Nepali headline
+ * ended up with one or two usable tokens. The matcher needs three
+ * shared tokens to compare a pair at all, so it compared NOTHING and
+ * the feed dropped zero duplicates — the whole feature was inert on
+ * exactly the language this site is written in.
+ *
+ * It also made false positives worse, because the surviving fragments
+ * ("यर", "बज", "उक") overlap heavily between unrelated headlines:
+ * "शेयर बजार उकालोमा" and "शेयर बजार गिरावटमा" — the market rising
+ * versus the market falling — were measured as the same story.
+ *
+ * Python's dedup.py was already right: it tokenises with an explicit
+ * Devanagari range that covers the matras. This file claimed to
+ * "match dedup.py exactly" and did not.
+ */
+const WORD = /[\p{L}\p{N}\p{M}]+/gu;
 
 /**
  * Words that carry no discriminative power in a headline. The English
@@ -107,6 +148,35 @@ const CONTAINMENT_THRESHOLD = 0.85;
  * normalised-title check, which needs no minimum.
  */
 const MIN_SHARED_TOKENS = 3;
+
+/**
+ * Containment at which the string-similarity gate is skipped.
+ *
+ * The three gates are: enough shared tokens, enough of the shorter
+ * headline accounted for, and enough string similarity. The third
+ * exists to catch typos and re-orderings — "विरतण" for "वितरण",
+ * "shot at" for "shot in his car".
+ *
+ * But it misfires on the commonest case there is: ONE OUTLET ADDING A
+ * LOCATION PREFIX to a headline another outlet ran plain.
+ *
+ *     "शक्तिपीठमा भक्तजनको घुइँचो"                    (Nepal News)
+ *     "गुल्मीका शक्तिपीठमा भक्तजनको घुइँचो"        (OnlineKhabar)
+ *
+ * Every word of the shorter headline is in the longer, so containment
+ * is 1.00 and they are unambiguously the same story. But the string
+ * similarity is only ~80, because the extra words sit at the FRONT and
+ * Levenshtein charges the full length of them. The gate then rejects
+ * the pair on the one measure that is least meaningful for it.
+ *
+ * When containment reaches this level the third gate has nothing left
+ * to contribute: if every word of the shorter headline appears in the
+ * longer one, the only thing that distinguishes them is extra
+ * detail, and that is what a syndicated pair IS. Skipping it there
+ * cannot merge two different stories, because two different stories
+ * do not consist of the same words plus a prefix.
+ */
+const CONTAINMENT_EXEMPT = 0.95;
 
 /** Canonical form: outlet suffix off, lowercase, punctuation to spaces. */
 export function normalizeHeadline(headline: string | null | undefined): string {
@@ -226,12 +296,16 @@ function sameStory(a: Prepared, b: Prepared): boolean {
   for (const token of small) if (large.has(token)) shared += 1;
 
   if (shared < MIN_SHARED_TOKENS) return false;
-  if (
-    shared / Math.max(1, Math.min(a.tokens.size, b.tokens.size)) <
-    CONTAINMENT_THRESHOLD
-  ) {
+  const containment =
+    shared / Math.max(1, Math.min(a.tokens.size, b.tokens.size));
+  if (containment < CONTAINMENT_THRESHOLD) {
     return false;
   }
+
+  // A shorter headline whose every word appears in the longer one is the
+  // same story, whatever the raw strings look like. See
+  // CONTAINMENT_EXEMPT for why the similarity gate is skipped here.
+  if (containment >= CONTAINMENT_EXEMPT) return true;
 
   return headlineSimilarity(a, b) >= SIMILARITY_THRESHOLD;
 }

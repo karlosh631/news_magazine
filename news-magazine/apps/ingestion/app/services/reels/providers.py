@@ -92,6 +92,22 @@ MIN_HEIGHT = 360
 #: the transcode at the same visual quality is a fraction of that.
 PREFERRED_HEIGHT = 1080
 
+#: The height at which the ORIGINAL file beats the transcode ladder.
+#:
+#: 1440 is 4K-class in the vertical sense and is what a 3x phone screen
+#: can actually resolve in a 420-900px card. Below it, the master is
+#: just more bytes rather than more definition.
+MASTER_MIN_HEIGHT = 1440
+
+#: The largest original file we are willing to serve.
+#:
+#: Measured against the live API, ordinary Commons masters of Nepal
+#: clips are 159 MB, 164 MB and 806 MB. A 37 MB 4K master is a
+#: reasonable thing to stream; an 807 MB one is a page that never
+#: starts playing. The cap is what separates "high definition" from
+#: "high definition that does not work".
+MASTER_SIZE_LIMIT_BYTES = 40 * 1024 * 1024
+
 #: Wikimedia asks every API client to identify itself. Keep this in sync
 #: with the deployment's real contact details — an unidentifiable bot is
 #: exactly how a project gets its API access withdrawn.
@@ -1274,8 +1290,51 @@ class WikimediaSource(_BaseSource):
             )
             return chosen[3], chosen[2] or None, chosen[1] or None
 
-        # No usable transcode. The original master is a last resort, but
-        # only when it is a format a browser will actually play.
+        # No usable transcode, or the transcode ladder tops out below
+        # the quality we want. Consider the MASTER.
+        #
+        # The master is normally a trap: Commons files are enormous.
+        # Measured against the live API, the masters of ordinary Nepal
+        # clips are 159 MB, 164 MB, and — for one festival video —
+        # 806 MB, all of them 1920x1080. Serving an 807 MB file to
+        # fill a 420px card is not high definition, it is a broken feed.
+        #
+        # But some masters ARE genuinely higher than the transcode
+        # ladder: "Chandragiri Cable Car, Kathmandu, Nepal" is
+        # 3840x2160 at 37.5 MB, and the ladder only reaches 1080p. For
+        # those the master is the better file by a wide margin, and it
+        # is affordable.
+        #
+        # So the rule is: take the master when it is at least
+        # MASTER_MIN_HEIGHT tall AND no bigger than
+        # MASTER_SIZE_LIMIT_BYTES. Below that height it is not more
+        # definition, it is just more bytes. Above the size limit it is
+        # not high definition either, it is a download.
+        for block in (videoinfo, imageinfo):
+            url = _absolute((block or {}).get("url"))
+            if not url or not self._is_allowed_host(url):
+                continue
+            if not _is_browser_playable_video(url, block):
+                continue
+
+            height = _int_or_none((block or {}).get("height")) or 0
+            size = _int_or_none((block or {}).get("size")) or 0
+
+            if height >= MASTER_MIN_HEIGHT and 0 < size <= MASTER_SIZE_LIMIT_BYTES:
+                return (
+                    url,
+                    _int_or_none((block or {}).get("width")) or None,
+                    height or None,
+                )
+
+            # The master exists but is not worth it: too small to be an
+            # upgrade, or too large to serve. Fall through to the
+            # transcode path below.
+
+        # Last resort: the master, whatever it is, as long as a browser
+        # can actually play it. A file with no transcode has no
+        # alternative, and a large file that plays beats a card that
+        # does not.
         for block in (videoinfo, imageinfo):
             url = _absolute((block or {}).get("url"))
             if not url or not self._is_allowed_host(url):

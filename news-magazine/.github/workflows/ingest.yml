@@ -124,6 +124,13 @@ jobs:
           INGESTION_SECRET: ${{ secrets.INGESTION_SECRET }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # Optional. The reels category works without them — Wikimedia
+          # Commons needs no key — but these are what make it deep and
+          # genuinely always-new, and what make the clips playable on
+          # iPhone. Set them as repository secrets to enable.
+          PEXELS_API_KEYS: ${{ secrets.PEXELS_API_KEYS }}
+          PIXABAY_API_KEYS: ${{ secrets.PIXABAY_API_KEYS }}
+          YOUTUBE_API_KEYS: ${{ secrets.YOUTUBE_API_KEYS }}
           DEFAULT_REQUEST_TIMEOUT_SECONDS: "20"
         run: |
           set -euo pipefail
@@ -158,6 +165,24 @@ jobs:
             # four already-extracted points, at temperature 0.0, and
             # anything not verbatim in that list is discarded.
             echo "ENABLE_GEMINI_RANKING=true"
+            # Reels, on the same five-minute cron as the news.
+            #
+            # The reels category used to be fetched ONLY by the
+            # long-lived worker's scheduler, so when the worker was
+            # asleep or restarting the category froze while the news
+            # feed kept moving — which is exactly what it looked like
+            # from the outside: news minutes old, reels a day old.
+            # Commons needs no key at all, so this is safe to enable
+            # unconditionally; the keyed providers below simply log
+            # SKIPPED when their key is absent.
+            echo "ENABLE_REELS=true"
+            echo "REELS_POLL_SECONDS=300"
+            echo "REELS_PER_SOURCE=30"
+            # The optional stock providers. Empty is fine — the keyless
+            # one still fills the category.
+            echo "PEXELS_API_KEYS=${PEXELS_API_KEYS:-}"
+            echo "PIXABAY_API_KEYS=${PIXABAY_API_KEYS:-}"
+            echo "YOUTUBE_API_KEYS=${YOUTUBE_API_KEYS:-}"
             echo "LOG_LEVEL=INFO"
             echo "LOG_FORMAT=console"
           } > .env
@@ -187,3 +212,10 @@ jobs:
             exit 1
           fi
           grep -E "SOURCES_OK=" sync.log || true
+          # Reels are reported but never fatal: a reels failure must not
+          # turn a green news run red, and a green news run must not be
+          # read as "reels worked too". A warning is the honest middle.
+          if grep -q "REELS_OK=0" sync.log; then
+            echo "::warning::The reels pass failed this run. The news sync succeeded; /category/reels may be stale."
+          fi
+          grep -E "REELS_OK=" sync.log || true

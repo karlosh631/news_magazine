@@ -9,6 +9,22 @@ is what runs in production.
 Exits non-zero only when every source failed, which almost always means
 bad credentials rather than a flaky network. One dead outlet must not
 turn the whole job red.
+
+REELS
+-----
+The reels pass runs here too, and that is a correction rather than a
+feature. It used to run ONLY inside the long-lived worker's scheduler,
+which meant the two paths had different failure modes: if the worker
+was asleep, restarting, or simply down, the reels category stopped
+updating entirely while the news feed kept running on the cron. The
+user saw exactly that — news minutes old, reels frozen for a day — and
+the cause was not a bug in the reels pipeline at all but the reels
+pipeline simply not being in the unattended path.
+
+Running it here makes reels fetch on the same five-minute cron as
+news, so the category keeps moving even when the worker is down. The
+worker still runs its own pass, and the two are safe to overlap: the
+store upserts on (source_key, external_id).
 """
 
 from __future__ import annotations
@@ -119,7 +135,41 @@ async def main() -> int:
     )
     print(f"SOURCES_OK={ok}")
 
+    # ---- Reels ----
+    #
+    # A separate concern from the news sources, and deliberately
+    # non-fatal: a reels failure must not turn a green news run red,
+    # and a green news run must not be reported as if reels had also
+    # succeeded.
+    reels_ok = await sync_reels_once()
+
     return 0 if ok > 0 else 3
+
+
+async def sync_reels_once() -> bool:
+    """
+    One reels pass, using the same code the worker's scheduler runs.
+
+    Reuses `_sync_reels` rather than reimplementing it, so the two
+    paths cannot drift: the timeout that stops a hung provider from
+    holding the slot, the per-provider poll intervals, the key pools
+    and the health reporting are all the same.
+
+    Returns True when the pass ran, False when it did not. It never
+    raises: the reels category is optional, and a broken reels pass
+    must not take the news sync down with it.
+    """
+    try:
+        from app.workers.scheduler import _sync_reels
+
+        print("\nSyncing reels...\n")
+        await _sync_reels()
+        print("REELS_OK=1")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"::warning::Reels pass failed: {exc}")
+        print("REELS_OK=0")
+        return False
 
 
 if __name__ == "__main__":

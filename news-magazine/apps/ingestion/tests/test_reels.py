@@ -36,6 +36,7 @@ import asyncio
 import dataclasses
 import inspect
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -2919,3 +2920,104 @@ def test_the_preferred_rendition_is_high_definition():
     assert reels_providers.PREFERRED_HEIGHT >= 1080
     # And the floor is still a floor: a 180px rendition is a thumbnail.
     assert reels_providers.MIN_HEIGHT >= 360
+
+
+# =============================================================
+# THE UNATTENDED PATH MUST FETCH REELS
+# =============================================================
+#
+# The bug was not in the reels pipeline. It was that the reels pipeline
+# was not in the path that actually runs unattended.
+#
+# The reels pass lived ONLY inside the long-lived worker's APScheduler.
+# The scheduled GitHub Actions job ran `scripts/sync_once.py`, which
+# synced the 25 news sources and nothing else. So when the worker was
+# asleep, restarting, or simply down, the news feed kept moving on the
+# five-minute cron while the reels category froze — for a day, in the
+# observed case. The user saw "news is minutes old, reels are a day
+# old" and reasonably concluded the reels fetch was broken.
+#
+# These two tests are the guard against that coming back: the cron
+# path must fetch reels, and it must do so by reusing the worker's own
+# code rather than a second implementation that can drift.
+
+WORKFLOW_PATH = (
+    Path(__file__).resolve().parents[3] / ".github" / "workflows" / "ingest.yml"
+)
+
+
+def test_the_scheduled_run_fetches_reels_as_well_as_news():
+    """
+    The cron path must call the reels pass.
+
+    A copy of the assertion in prose, because a workflow file is not
+    importable and a comment is not a test.
+    """
+    assert WORKFLOW_PATH.exists(), WORKFLOW_PATH
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert "ENABLE_REELS=true" in workflow, (
+        "the scheduled run must enable the reels feature — it defaults "
+        "to false, so without this the pass is skipped entirely"
+    )
+    assert "REELS_POLL_SECONDS" in workflow, (
+        "the poll interval must be set explicitly in the cron environment"
+    )
+
+
+def test_the_cron_reels_pass_reuses_the_worker_implementation():
+    """
+    One implementation, two callers.
+
+    A second, cron-only reels implementation would drift from the
+    worker's — different key pools, different timeouts, a different
+    idea of what "done" means — and the two would then disagree about
+    what the category contains. `_sync_reels` is the worker's own
+    entry point, including the timeout that stops a hung provider from
+    holding the slot for the life of the process.
+    """
+    from scripts import sync_once
+
+    assert hasattr(sync_once, "sync_reels_once"), (
+        "the cron entry point must expose a reels pass"
+    )
+
+    source = Path(sync_once.__file__).read_text(encoding="utf-8")
+    assert "from app.workers.scheduler import _sync_reels" in source, (
+        "the cron reels pass must call the worker's own _sync_reels, not "
+        "a reimplementation"
+    )
+
+
+def test_a_failing_reels_pass_never_turns_a_green_news_run_red():
+    """
+    Reels are optional. A reels failure must not fail the job, and a
+    green job must not be read as "reels worked too" — which is why
+    the workflow reports REELS_OK separately and only warns.
+    """
+    import asyncio
+
+    from scripts import sync_once
+
+    async def boom() -> None:
+        raise RuntimeError("the reels provider exploded")
+
+    # A failure inside the pass is caught and reported, not raised.
+    assert asyncio.iscoroutinefunction(sync_once.sync_reels_once)
+
+    # And the function returns a bool rather than raising, so the
+    # caller can report it without unwinding the whole run.
+    async def run_with_failure(monkeypatch_target):
+        import app.workers.scheduler as sched
+
+        original = sched._sync_reels
+        sched._sync_reels = boom
+        try:
+            return await sync_once.sync_reels_once()
+        finally:
+            sched._sync_reels = original
+
+    assert asyncio.run(run_with_failure(None)) is False, (
+        "a failed reels pass must report False, not raise and take the "
+        "news sync down with it"
+    )

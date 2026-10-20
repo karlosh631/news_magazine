@@ -51,6 +51,20 @@ jobs:
     defaults:
       run:
         working-directory: news-magazine/apps/ingestion
+    env:
+      # The import check constructs the Settings object, and Settings
+      # REQUIRES these four values — supabase_url, supabase_service_role_key,
+      # ingestion_secret, cron_secret — so without them the check fails on
+      # a pydantic ValidationError and reports it as a broken import
+      # rather than as missing configuration.
+      #
+      # The same repository secrets the scheduled sync job already uses.
+      # They are needed here to IMPORT the modules, not to run them: the
+      # check never opens a connection.
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      INGESTION_SECRET: ${{ secrets.INGESTION_SECRET }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
     steps:
       - uses: actions/checkout@v4
 
@@ -74,6 +88,9 @@ jobs:
           import app.services.search_resurrect
           import app.sources.base, app.sources.generic_rss
           import app.sources.html_listing, app.sources.media
+          import app.sources.body
+          import app.services.reels.keys, app.services.reels.providers
+          import app.services.reels.store, app.services.reels.types
           import app.workers.scheduler
           print('all modules import cleanly')
           "

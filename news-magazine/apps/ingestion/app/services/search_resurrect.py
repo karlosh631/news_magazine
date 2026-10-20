@@ -390,7 +390,11 @@ class OnDemandSearcher:
                         candidates = candidate_images(
                             getattr(article, "thumbnail_url", None), extracted
                         )
-                        live_image = await resolve_live_image(candidates, validator)
+                        live_image = await resolve_live_image(
+                            candidates,
+                            validator,
+                            declared=getattr(extracted, "declared_images", None),
+                        )
                         if candidates and not live_image:
                             logger.info(
                                 "resurrect: no loadable image for %r; storing it bare",

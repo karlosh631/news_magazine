@@ -535,7 +535,12 @@ async def verify_media_images(
         return media, 0
 
     candidates = candidate_images(feed_media.get("image_url"), page)
-    live = await resolve_live_image(candidates, validator, limit=limit)
+    live = await resolve_live_image(
+        candidates,
+        validator,
+        limit=limit,
+        declared=page.declared_images if page else None,
+    )
 
     if not live:
         logger.info(
@@ -705,6 +710,7 @@ async def repair_missing_images(
                 candidate_images(None, page),
                 validator,
                 limit=IMAGE_PROBE_CANDIDATES,
+                declared=page.declared_images,
             )
             if not live:
                 continue

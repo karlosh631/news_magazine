@@ -142,6 +142,21 @@ export interface LatestArticle {
   audio_url: string | null;
   gif_url: string | null;
   published_at: string | null;
+  /**
+   * When WE first saw this story — not when the outlet published it.
+   *
+   * The two differ, and the difference is what the reader feels. A
+   * story published an hour ago whose publisher only just put it in
+   * their feed is NEW to this site, and it should appear as new. A
+   * story published two minutes ago that we fetched ten minutes ago
+   * has been on the homepage the whole time, and it should not keep
+   * jumping back to the top every time the feed polls.
+   *
+   * Sorting by this is therefore what "newest on top" means in
+   * practice: a story moves up once, when it arrives, and then stays
+   * where it is.
+   */
+  ingested_at: string | null;
   source_name_snapshot: string | null;
   source_article_url: string | null;
   source_count: number;

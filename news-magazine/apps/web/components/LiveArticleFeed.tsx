@@ -107,7 +107,26 @@ interface FeedCursor {
 }
 
 /** Newest first, with `source_count` breaking ties exactly as the server does. */
+/**
+ * Newest first — by when we ARRIVED at the story, not when it was
+ * published.
+ *
+ * This has to be the same order the server uses (`newestFirst` in
+ * lib/news.ts). If the server sorts one way and the client another,
+ * the list visibly reshuffles on the first poll after every page load,
+ * and the reader watches cards jump around for no reason.
+ *
+ * `ingested_at` first: a story moves up ONCE, when it arrives, and
+ * then stays where it is. A story published two minutes ago that we
+ * fetched ten minutes ago has been on the page the whole time and must
+ * not leap back to the top on every poll. Publication time breaks
+ * ties, and orders rows that have no arrival time at all.
+ */
 function byNewest(a: LatestArticle, b: LatestArticle): number {
+  const arrivedA = a.ingested_at ? Date.parse(a.ingested_at) : 0;
+  const arrivedB = b.ingested_at ? Date.parse(b.ingested_at) : 0;
+  if (arrivedB !== arrivedA) return arrivedB - arrivedA;
+
   const left = a.published_at ? Date.parse(a.published_at) : 0;
   const right = b.published_at ? Date.parse(b.published_at) : 0;
   if (right !== left) return right - left;

@@ -342,9 +342,34 @@ function applyCursor<T extends { or: (filter: string) => T }>(
  * source_count breaks ties, because `published_at` is only second
  * resolution and several outlets publish the same story in the same
  * second.
+ *
+ * ORDER OF ARRIVAL, NOT PUBLICATION TIME
+ * ---------------------------------------
+ * The primary key is `ingested_at` — when WE first saw the story — and
+ * `published_at` only breaks ties.
+ *
+ * The reader asked for the most recently FETCHED story on top, and the
+ * distinction is not cosmetic. A publisher can sit on a story for an
+ * hour before putting it in their feed; when it appears, it is new to
+ * this site and belongs at the top, even though its publication
+ * timestamp is older than stories already on the page. Sorting by
+ * publication time alone buried it.
+ *
+ * The reverse also matters. A story published two minutes ago that we
+ * fetched ten minutes ago has been on the homepage the whole time; it
+ * should not leap back to the top every time the feed polls, which is
+ * exactly what a publication-time sort does to it. Sorting by arrival
+ * means a story moves up ONCE, when it arrives, and then stays put.
  */
 function newestFirst(rows: LatestArticle[]): LatestArticle[] {
   return [...rows].sort((a, b) => {
+    const arrivedA = a.ingested_at ? Date.parse(a.ingested_at) : 0;
+    const arrivedB = b.ingested_at ? Date.parse(b.ingested_at) : 0;
+    if (arrivedB !== arrivedA) return arrivedB - arrivedA;
+
+    // A row with no arrival time — an older database that predates the
+    // column, or a resurrected row — falls back to publication time
+    // rather than sorting as if it were from 1970.
     const left = a.published_at ? Date.parse(a.published_at) : 0;
     const right = b.published_at ? Date.parse(b.published_at) : 0;
     if (right !== left) return right - left;
@@ -383,7 +408,7 @@ async function languageSelect({
     let query = supabase
       .from("articles")
       .select(
-        "id, slug, headline, excerpt, summary_points, language, featured_image_url, image_highres_url, video_url, video_embed_url, audio_url, gif_url, published_at, source_name_snapshot, source_article_url, source_count"
+        "id, slug, headline, excerpt, summary_points, language, featured_image_url, image_highres_url, video_url, video_embed_url, audio_url, gif_url, published_at, source_name_snapshot, source_article_url, source_count, ingested_at"
       )
       .eq("status", "published")
       .is("duplicate_of", null)
@@ -533,6 +558,7 @@ function mapArticleRow(row: unknown): LatestArticle {
     audio_url: (item.audio_url as string) ?? null,
     gif_url: (item.gif_url as string) ?? null,
     published_at: (item.published_at as string) ?? null,
+    ingested_at: (item.ingested_at as string) ?? null,
     source_name_snapshot: (item.source_name_snapshot as string) ?? null,
     source_article_url: (item.source_article_url as string) ?? null,
     source_count: Number(item.source_count ?? 1),
@@ -565,7 +591,7 @@ async function directSelect({
   let query = supabase
     .from("articles")
     .select(
-      "id, slug, headline, excerpt, summary_points, featured_image_url, image_highres_url, video_url, video_embed_url, audio_url, gif_url, published_at, source_name_snapshot, source_article_url, source_count, primary_category_id"
+      "id, slug, headline, excerpt, summary_points, featured_image_url, image_highres_url, video_url, video_embed_url, audio_url, gif_url, published_at, source_name_snapshot, source_article_url, source_count, ingested_at, primary_category_id"
     )
     .eq("status", "published")
     .is("duplicate_of", null)
@@ -611,6 +637,7 @@ async function directSelect({
       audio_url: (item.audio_url as string) ?? null,
       gif_url: (item.gif_url as string) ?? null,
       published_at: (item.published_at as string) ?? null,
+    ingested_at: (item.ingested_at as string) ?? null,
       source_name_snapshot: (item.source_name_snapshot as string) ?? null,
       source_article_url: (item.source_article_url as string) ?? null,
       source_count: Number(item.source_count ?? 1),
@@ -690,6 +717,9 @@ export function toCardArticle(
     audio_url: row.audio_url ?? null,
     gif_url: row.gif_url ?? null,
     published_at: row.published_at ?? null,
+    // The search RPC's row shape does not carry it, and the mapper
+    // serves both shapes — same guarded pattern as source_count below.
+    ingested_at: "ingested_at" in row ? (row.ingested_at ?? null) : null,
     source_name_snapshot: row.source_name_snapshot ?? null,
     source_article_url: row.source_article_url ?? null,
     source_count: "source_count" in row ? Number(row.source_count ?? 1) : 1,
@@ -762,7 +792,7 @@ export async function getRelatedArticles(
   const { data, error } = await supabase
     .from("articles")
     .select(
-      "id, slug, headline, excerpt, summary_points, featured_image_url, image_highres_url, video_url, video_embed_url, audio_url, gif_url, published_at, source_name_snapshot, source_article_url, source_count"
+      "id, slug, headline, excerpt, summary_points, featured_image_url, image_highres_url, video_url, video_embed_url, audio_url, gif_url, published_at, source_name_snapshot, source_article_url, source_count, ingested_at"
     )
     .eq("status", "published")
     .is("duplicate_of", null)
@@ -791,6 +821,7 @@ export async function getRelatedArticles(
       audio_url: (item.audio_url as string) ?? null,
       gif_url: (item.gif_url as string) ?? null,
       published_at: (item.published_at as string) ?? null,
+    ingested_at: (item.ingested_at as string) ?? null,
       source_name_snapshot: (item.source_name_snapshot as string) ?? null,
       source_article_url: (item.source_article_url as string) ?? null,
       source_count: Number(item.source_count ?? 1),
@@ -844,7 +875,7 @@ export async function getBreakingNews(limit = 10): Promise<LatestArticle[]> {
   const { data, error } = await supabase
     .from("articles")
     .select(
-      "id, slug, headline, excerpt, summary_points, featured_image_url, image_highres_url, video_url, video_embed_url, audio_url, gif_url, published_at, source_name_snapshot, source_article_url, source_count"
+      "id, slug, headline, excerpt, summary_points, featured_image_url, image_highres_url, video_url, video_embed_url, audio_url, gif_url, published_at, source_name_snapshot, source_article_url, source_count, ingested_at"
     )
     .eq("status", "published")
     .is("duplicate_of", null)
@@ -872,6 +903,7 @@ export async function getBreakingNews(limit = 10): Promise<LatestArticle[]> {
       audio_url: (item.audio_url as string) ?? null,
       gif_url: (item.gif_url as string) ?? null,
       published_at: (item.published_at as string) ?? null,
+    ingested_at: (item.ingested_at as string) ?? null,
       source_name_snapshot: (item.source_name_snapshot as string) ?? null,
       source_article_url: (item.source_article_url as string) ?? null,
       source_count: Number(item.source_count ?? 1),

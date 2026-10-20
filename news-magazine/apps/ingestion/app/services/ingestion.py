@@ -116,6 +116,7 @@ from app.services.summarizer import (
 from app.sources.media import (
     ExtractedMedia,
     ImageValidator,
+    _looks_like_junk_image,
     candidate_images,
     extract_from_article,
     media_client,
@@ -598,6 +599,16 @@ IMAGE_REPAIR_LIMIT = 5
 # `dropImageless` in apps/web/lib/feed-images.ts.
 IMAGE_REPAIR_WINDOW_HOURS = 48
 
+# How many stored rows one poll will re-resolve a MALFORMED image url
+# for. Bounded for the same reason IMAGE_REPAIR_LIMIT is: this is a
+# retry of work a previous poll already failed to do.
+#
+# The candidate query returns every row in the window that claims to
+# have an image, and the local shape check throws out the ones that do
+# not. Only the survivors cost a page fetch, so this number bounds the
+# fetches rather than the scan.
+BROKEN_IMAGE_REPAIR_LIMIT = 5
+
 # How many stored rows one poll will re-run the classifier over.
 #
 # Bounded for the same reason IMAGE_REPAIR_LIMIT is: this is a repair of
@@ -721,6 +732,144 @@ async def reclassify_recent(
         logger.info("Reclassified %d stored article(s) under today's rules.", changed)
 
     return changed
+
+
+async def repair_broken_image_urls(
+    db,
+    source_id: Any,
+    client: httpx.AsyncClient,
+    validator: ImageValidator,
+    limit: int = BROKEN_IMAGE_REPAIR_LIMIT,
+    window_hours: int = IMAGE_REPAIR_WINDOW_HOURS,
+) -> int:
+    """
+    Re-resolve rows whose stored image URL is malformed.
+
+    THE GAP THIS FILLS
+    ------------------
+    `repair_missing_images` only selects rows with NO artwork at all. A
+    row holding a MALFORMED url is invisible to it — the column is
+    populated, so the row looks repaired — and it stays broken for ever.
+
+    The malformed url seen in production was:
+
+        https://assets-cdn.kathmandupost.com/uploads/source/
+
+    A directory path with no filename. There is no file behind it at
+    any size, so no rendition fallback can rescue it, and the card
+    renders a broken image with the headline as its alt text. It is
+    exactly what `_looks_like_junk_image` now rejects — but that check
+    only runs when a row is FIRST stored, and this row was stored
+    before the check existed. Like the category, the image is
+    write-once: `dedup.check` matches the row and `continue`s long
+    before the media block, so the newer validation never re-examines
+    it.
+
+    WHY THE CHECK IS FREE
+    ---------------------
+    A url that does not end in an image filename is detectably broken
+    WITHOUT a request. No HEAD, no GET, no bandwidth — just the shape
+    of the string. Only the rows that pass that local test cost a page
+    fetch, and only those cost a probe.
+
+    That is what makes this affordable to run every poll. Validating
+    every stored url against the CDN would mean thousands of requests
+    per day against 25 publishers; checking the string costs nothing.
+
+    WHY IT DOES NOT CATCH EVERY BROKEN IMAGE
+    -----------------------------------------
+    A url that ends in `.jpg` and answers 404 is broken too, and only a
+    request would know. Catching those means probing every stored url,
+    which is a request per row per poll — the kind of load that gets a
+    publisher to block us. This pass deliberately does the free check
+    and leaves the expensive one alone.
+    """
+    since = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+
+    try:
+        response = await db_call(
+            lambda: db.table("articles")
+            .select("id, slug, headline, source_article_url, canonical_url, featured_image_url")
+            .eq("status", "published")
+            .is_("duplicate_of", None)
+            .eq("source_id", source_id)
+            # Only rows that CLAIM to have an image. A null one is
+            # `repair_missing_images`' job, and this pass would redo it
+            # for nothing.
+            .not_("featured_image_url", "is", None)
+            .gte("ingested_at", since.isoformat())
+            .order("ingested_at", desc=False)
+            .limit(max(limit, 0))
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001 — a repair must not fail a poll
+        logger.warning("broken-image repair could not read candidate rows: %s", exc)
+        return 0
+
+    rows = response.data or []
+    if not rows:
+        return 0
+
+    # The free check first: only a malformed url is worth a page fetch.
+    broken = [row for row in rows if _looks_like_junk_image(row.get("featured_image_url") or "")]
+    if not broken:
+        return 0
+
+    logger.info(
+        "Found %d stored article(s) with a malformed image url; re-resolving.",
+        len(broken),
+    )
+
+    repaired = 0
+
+    for row in broken:
+        url = row.get("canonical_url") or row.get("source_article_url")
+        if not url:
+            continue
+
+        try:
+            page = await extract_from_article(url, client)
+            if page.is_empty():
+                continue
+
+            live = await resolve_live_image(
+                candidate_images(None, page),
+                validator,
+                limit=IMAGE_PROBE_CANDIDATES,
+                declared=page.declared_images,
+            )
+            if not live:
+                continue
+
+            await db_call(
+                lambda live=live, row=row: db.table("articles")
+                .update(
+                    {
+                        "featured_image_url": live,
+                        "image_highres_url": live,
+                        "last_seen_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                .eq("id", row["id"])
+                .execute()
+            )
+            repaired += 1
+            logger.info(
+                "Re-resolved the image for %r: %s",
+                (row.get("headline") or "?")[:80],
+                live,
+            )
+        except Exception as exc:  # noqa: BLE001 — one bad row, not the sweep
+            logger.debug(
+                "broken-image repair failed for %r: %s",
+                (row.get("headline") or "?")[:80],
+                exc,
+            )
+
+    if repaired:
+        logger.info("Re-resolved %d malformed image url(s).", repaired)
+
+    return repaired
 
 
 async def repair_missing_images(
@@ -1813,6 +1962,21 @@ async def run_source_sync(
             )
         except Exception:
             logger.exception("Artwork repair pass failed; rows stay as they are")
+
+        # Rows that HAVE an image but whose url is malformed — a
+        # directory path with no filename, which renders as a broken
+        # card. The pass above cannot see them, because their column is
+        # populated.
+        try:
+            result.images_repaired += await repair_broken_image_urls(
+                db,
+                source_id,
+                media_http,
+                validator,
+                limit=BROKEN_IMAGE_REPAIR_LIMIT,
+            )
+        except Exception:
+            logger.exception("Broken-image repair pass failed; rows stay as they are")
 
     result.dedup_detail = dedup.summary()
 

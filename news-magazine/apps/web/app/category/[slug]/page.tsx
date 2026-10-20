@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 
 import { EmptyState } from "@/components/EmptyState";
-import { NewsCard } from "@/components/NewsCard";
+import { ImagelessGrid } from "@/components/ImagelessGrid";
 import { ReelsFeed } from "@/components/ReelsFeed";
 import { getCategories, getLatestArticles } from "@/lib/news";
 import { getReels } from "@/lib/reels";
@@ -157,11 +157,13 @@ export default async function CategoryPage({ params }: Props) {
             }
           />
         ) : (
-          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
-            {feed.articles.map((article) => (
-              <NewsCard key={article.id} article={article} />
-            ))}
-          </div>
+          // ImagelessGrid, not a bare map over NewsCard. A plain
+          // <NewsCard article={article} /> passes no
+          // onImageUnavailable, so a story whose stored image 404s had no
+          // way to ask to be replaced and rendered "No image available"
+          // for good. Same markup as before — the grid classes are
+          // inside the component.
+          <ImagelessGrid articles={feed.articles} />
         )}
       </section>
     </main>

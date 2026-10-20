@@ -13,7 +13,7 @@
 import "server-only";
 
 import { dropDuplicateStories } from "@/lib/feed-dedup";
-import { dropRepeatedImages } from "@/lib/feed-images";
+import { dropImageless, dropRepeatedImages } from "@/lib/feed-images";
 import { createPublicSupabaseClient } from "@/lib/supabase/server";
 import type { LatestArticle, SearchResult } from "@/types/database";
 
@@ -30,14 +30,24 @@ export const PAGE_SIZE = 24;
  * is still the database's, and nothing is promoted — the extra rows are
  * only used to backfill slots the duplicates vacated.
  *
- * Two passes can now vacate a slot before the slice, not one: the story
- * pass (dropDuplicateStories) and the picture pass (dropRepeatedImages,
- * for the case where two different stories arrive wearing the same
- * photograph — see lib/feed-images.ts). Neither reorders, so a survivor
- * always keeps its own position and the only thing the headroom has to
- * cover is the row count.
+ * Three passes can now vacate a slot before the slice, not one: the story
+ * pass (dropDuplicateStories), the picture pass (dropRepeatedImages, for
+ * the case where two different stories arrive wearing the same
+ * photograph) and the artwork pass (dropImageless, for a story that has
+ * no picture at all and would otherwise render the "No image available"
+ * panel). None of them reorders, so a survivor always keeps its own
+ * position and the only thing the headroom has to cover is the row count.
+ *
+ * It was 2 for a long time, and 2 is not enough now. Measured against the
+ * live feed at the time of writing, 7 of the newest 60 articles carried
+ * no image in any media column, so roughly one row in nine is removed by
+ * the artwork pass alone — a headroom of 2 hands back a 24-card page that
+ * is 23 cards and starts showing gaps as soon as the ratio drifts. Three
+ * covers the common case; the floor in `dropImageless` keeps the page from
+ * ever going empty, and the client filter removes anything that still
+ * slips through.
  */
-const DEDUP_HEADROOM = 2;
+const DEDUP_HEADROOM = 3;
 
 /**
  * True when Supabase is not configured.
@@ -135,6 +145,14 @@ function emptyFeed(
  * under one photograph, because outlets reuse pictures. See
  * lib/feed-images.ts — including what that pass deliberately does not
  * catch.
+ *
+ * A fourth, `dropImageless`, removes stories with no artwork at all. That
+ * is the pass behind the "NO IMAGE AVAILABLE" tiles readers were seeing:
+ * the card's honest placeholder used to be the only handling such a row
+ * ever got, and on every surface that does not poll the archive the
+ * placeholder was simply permanent. Like the other three it is a filter,
+ * not a reordering, and like them it falls back to showing the rows when
+ * dropping them would empty the page.
  */
 export async function getLatestArticles(options?: {
   limit?: number;
@@ -428,8 +446,13 @@ async function languageSelect({
   // preferIllustrated is asked to find pictures for, and it will not
   // reorder either, so the two cannot disagree about which story holds
   // which slot.
+  //
+  // The artwork pass runs first of all, because it is the only one of the
+  // three that can remove a card the reader would otherwise see as
+  // broken. It is a filter, not a reordering, so putting it here changes
+  // which rows survive and nothing about their order.
   const articles = preferIllustrated(
-    dropRepeatedImages(dropDuplicateStories(newestFirst(rows))),
+    dropImageless(dropRepeatedImages(dropDuplicateStories(newestFirst(rows)))),
     limit
   );
 
@@ -612,7 +635,17 @@ async function directSelect({
   // the story pass means the story pass has already chosen which copy of
   // a story survives, so the picture it contributes is the one the reader
   // would actually see.
-  const articles = dropRepeatedImages(dropDuplicateStories(mapped)).slice(0, limit);
+  //
+  // The fourth is the artwork pass. This is the path the homepage and
+  // every category page read, so it is the one that mattered most: a row
+  // with no picture at all was handed straight to NewsCard, which renders
+  // its "No image available" panel. The client-side `imageless` set in
+  // components/LiveArticleFeed.tsx could not have saved this — it is
+  // populated by an onError that only fires after the browser has tried
+  // the image, and only on surfaces that pass the callback at all.
+  const articles = dropImageless(
+    dropRepeatedImages(dropDuplicateStories(mapped))
+  ).slice(0, limit);
 
   return {
     articles,
@@ -776,7 +809,14 @@ export async function getRelatedArticles(
   // The rail shows four and fetches eight, so a repeat costs a card and
   // the reader still gets four distinct stories whenever the category
   // has them.
-  return dropRepeatedImages(dropDuplicateStories(related)).slice(0, limit);
+  //
+  // A blank tile is worse here than on the grid, not better: the rail is
+  // four cards, so one placeholder is a quarter of it, and there is no
+  // surrounding grid for the eye to read it against.
+  return dropImageless(dropRepeatedImages(dropDuplicateStories(related))).slice(
+    0,
+    limit
+  );
 }
 
 export async function getCategories() {

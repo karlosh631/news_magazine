@@ -66,7 +66,7 @@ import re
 import socket
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -288,6 +288,10 @@ class IngestionResult:
     # outcome — but worth watching: a source climbing here is an outlet
     # whose CDN has started refusing us.
     images_dropped: int = 0
+    # Rows that were previously stored with no artwork and have since had
+    # one found for them by repair_missing_images. The counterpart to
+    # images_dropped: without it, a dropped image is permanent.
+    images_repaired: int = 0
     dedup_detail: str = ""
     error_details: list[dict] = field(default_factory=list)
 
@@ -302,6 +306,7 @@ class IngestionResult:
             "pruned": self.pruned,
             "links_skipped": self.links_skipped,
             "images_dropped": self.images_dropped,
+            "images_repaired": self.images_repaired,
             "dedup_detail": self.dedup_detail,
         }
 
@@ -561,6 +566,176 @@ async def verify_media_images(
         media["gif_url"] = None
 
     return media, 0
+
+
+# How many candidates `repair_missing_images` probes per row. Matches the
+# poll's own budget (max_image_candidates_per_article) so a repaired row
+# is held to exactly the standard a freshly stored one is.
+IMAGE_PROBE_CANDIDATES = 3
+
+# How many imageless rows one poll will try to repair. Small on purpose:
+# this is a retry of work a previous poll already failed to do, so it must
+# not become a second crawl of the outlet. Five rows at one page fetch and
+# a bounded number of image probes each is a handful of requests per
+# source poll, and every candidate URL is answered from the shared
+# validator cache whenever two of them share a photograph.
+IMAGE_REPAIR_LIMIT = 5
+
+# Only look this far back. An older imageless row is not a transient
+# failure any more, it is a story from an outlet that genuinely publishes
+# without artwork, and re-probing it every poll forever would buy nothing.
+# The rows this misses are already hidden from every feed by
+# `dropImageless` in apps/web/lib/feed-images.ts.
+IMAGE_REPAIR_WINDOW_HOURS = 48
+
+
+async def repair_missing_images(
+    db,
+    source_id: Any,
+    client: httpx.AsyncClient,
+    validator: ImageValidator,
+    limit: int = IMAGE_REPAIR_LIMIT,
+    window_hours: int = IMAGE_REPAIR_WINDOW_HOURS,
+) -> int:
+    """
+    Give stored articles that have no artwork another chance to get some.
+
+    WHY THIS HAS TO EXIST
+    ---------------------
+    The poll's per-article pipeline computes an article's media exactly
+    ONCE, on the poll that first stores it. Every later sighting of the
+    same story hits `dedup.check` above, matches the stored row on
+    content_hash or canonical_url, and `continue`s — before the media
+    block ever runs. Nothing re-runs enrichment, ever.
+
+    That makes `verify_media_images` effectively write-once. The one time
+    it nulls a row's artwork is the only time it gets to, and it does so
+    on any transient failure: the page 429s, the CDN answers 403 to a
+    probe it answered 200 to a minute ago, the request times out on a
+    flaky connection. `assets-cdn.kathmandupost.com` is named in
+    ImageValidator's own docstring as refusing referrers it does not
+    recognise, so this is a real and recurring failure, not a theoretical
+    one.
+
+    The result is a row that is permanently, and wrongly, imageless —
+    which is exactly what the web renders as "NO IMAGE AVAILABLE". Checked
+    against the live feed while this was written: all seven of the
+    imageless articles in the newest sixty rows had a live, provable
+    og:image on their own page. The image was always there. Nothing ever
+    went back and looked for it.
+
+    WHAT IT DOES
+    ------------
+    Re-runs exactly the enrichment the poll would have run, on the rows
+    that need it and nothing else, and writes the result back under the
+    same rule the poll uses: an image is stored only once
+    `ImageValidator` has seen it return one.
+
+    Bounded three ways, because this runs on the critical path of every
+    source poll:
+      - `limit` rows per call (5), newest first;
+      - only rows inside `window_hours` (48h), so an outlet that
+        genuinely never publishes artwork is not re-probed forever;
+      - one page fetch and at most IMAGE_PROBE_CANDIDATES probes each.
+
+    Scoped to `source_id` — the source whose poll is calling. That is the
+    correct unit on the merits (a row's artwork is that outlet's own CDN,
+    so that outlet's poll is who should go back for it) and it is what
+    keeps the cost flat: with ~27 sources polling independently, a global
+    scan would have every one of them retry the same five rows, which is
+    the opposite of bounded. Scoped, the work is spread across the pollers
+    and each source only ever revisits its own.
+
+    A row this pass cannot fix is left exactly as it was. It stays hidden
+    from the feeds by the read-side pass, which is the honest outcome for
+    a story with no picture anywhere, rather than an error.
+    """
+    since = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+
+    try:
+        response = await db_call(
+            lambda: db.table("articles")
+            .select(
+                "id, slug, headline, source_article_url, canonical_url"
+            )
+            .eq("status", "published")
+            .is_("duplicate_of", None)
+            # See above: this pass is the polling source's, not everyone's.
+            .eq("source_id", source_id)
+            # The same set NewsCard's `pickImages` would render nothing
+            # for: no photograph at all AND no video to stand in for one.
+            # A row that still has a video URL is not this pass's problem —
+            # the card puts the player in the same slot.
+            .is_("featured_image_url", None)
+            .is_("image_highres_url", None)
+            .is_("gif_url", None)
+            .is_("video_embed_url", None)
+            .is_("video_url", None)
+            .gte("ingested_at", since.isoformat())
+            .order("ingested_at", desc=True)
+            .limit(max(limit, 0))
+            .execute()
+        )
+    except Exception as exc:
+        # A repair sweep that fails must not take the poll down with it.
+        # The rows it would have fixed are still hidden by the read pass.
+        logger.warning("image repair could not read candidate rows: %s", exc)
+        return 0
+
+    rows = response.data or []
+    if not rows:
+        return 0
+
+    repaired = 0
+
+    for row in rows:
+        url = row.get("canonical_url") or row.get("source_article_url")
+        if not url:
+            continue
+
+        try:
+            page = await extract_from_article(url, client)
+            if page.is_empty():
+                continue
+
+            # No feed thumbnail to fold in — this re-derives from the
+            # page, which is where the original poll would have found the
+            # image that then failed to prove itself.
+            live = await resolve_live_image(
+                candidate_images(None, page),
+                validator,
+                limit=IMAGE_PROBE_CANDIDATES,
+            )
+            if not live:
+                continue
+
+            await db_call(
+                lambda live=live, row=row: db.table("articles")
+                .update(
+                    {
+                        "featured_image_url": live,
+                        "image_highres_url": live,
+                        "last_seen_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                .eq("id", row["id"])
+                .execute()
+            )
+            repaired += 1
+            logger.info(
+                "Repaired artwork for %r: %s",
+                (row.get("headline") or "?")[:80],
+                live,
+            )
+
+        except Exception as exc:  # noqa: BLE001 — one bad row, not the sweep
+            logger.debug(
+                "image repair failed for %r: %s",
+                (row.get("headline") or "?")[:80],
+                exc,
+            )
+
+    return repaired
 
 
 # =============================================================
@@ -1457,6 +1632,32 @@ async def run_source_sync(
                         "source_url": getattr(article, "source_article_url", None),
                     },
                 )
+
+    # ---- Retry the artwork of rows that were stored without any ----
+    #
+    # Deliberately last, after the poll's own work: this is a retry of
+    # something a previous poll failed to do, and it must never compete
+    # with, or delay, the fetch-and-store run the reader is waiting on.
+    # It shares the poll's validator and media client, so a photograph
+    # already proven live above costs no extra request here.
+    #
+    # It exists because the loop above never revisits an article it has
+    # already stored: `dedup.check` matches the row and `continue`s long
+    # before the media block. Without this pass, one transient probe
+    # failure at store time leaves the story permanently imageless, which
+    # is what the web renders as "NO IMAGE AVAILABLE". See
+    # repair_missing_images for the full account.
+    if enrich_media and settings.validate_images:
+        try:
+            result.images_repaired = await repair_missing_images(
+                db,
+                source_id,
+                media_http,
+                validator,
+                limit=IMAGE_REPAIR_LIMIT,
+            )
+        except Exception:
+            logger.exception("Artwork repair pass failed; rows stay as they are")
 
     result.dedup_detail = dedup.summary()
 

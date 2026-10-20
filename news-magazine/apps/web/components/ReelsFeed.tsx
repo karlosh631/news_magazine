@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 
+import { useImagelessFilter } from "@/components/ImagelessGrid";
 import { NewsCard } from "@/components/NewsCard";
 import { ReelCard } from "@/components/ReelCard";
 import type { Reel } from "@/lib/reels";
@@ -124,6 +125,30 @@ function AutoScrollColumn({
   const hoverRef = useRef(false);
   const [copies, setCopies] = useState(2);
 
+  /*
+    The one place the "no image available" placeholder was most visible on
+    the site. These columns used to render a bare <NewsCard article={...} />,
+    so a story whose artwork was dead had nothing to ask to be replaced and
+    the placeholder just stayed — and because the drift loop repeats this
+    list 2-10 times, one such story was painted up to twenty times across
+    the two columns.
+
+    Filtering the source list ONCE, above the copies, is what makes this
+    correct: drop inside `cardList` instead and each copy would report the
+    same id back, and a dropped card would keep painting in every copy
+    that had already been measured.
+
+    Declared before the measurement effect below rather than next to the
+    render, because that effect needs `visible` in its dependency list —
+    dropping a card shortens the column, and the copy count has to be
+    worked out again against the new height. It also has to sit above any
+    early return, since the number of hooks a component calls must not
+    change between renders; `sideArticles` is a server prop and normally
+    never changes, but "normally" is not a guarantee and React throws
+    rather than paper over it.
+  */
+  const { visible, markImageless } = useImagelessFilter(articles);
+
   /**
    * How many copies are needed to cover roughly two viewports.
    *
@@ -145,7 +170,7 @@ function AutoScrollColumn({
     measure();
     window.addEventListener("resize", measure);
     return () => window.removeEventListener("resize", measure);
-  }, [articles, reduceMotion]);
+  }, [visible, reduceMotion]);
 
   // The drift itself.
   useEffect(() => {
@@ -207,14 +232,15 @@ function AutoScrollColumn({
     };
   }, [paused, reduceMotion]);
 
-  if (articles.length === 0) return null;
+  if (visible.length === 0) return null;
 
   const cardList = (duplicate: boolean) => (
     <div className="space-y-4">
-      {articles.map((article) => (
+      {visible.map((article) => (
         <NewsCard
           key={`${duplicate ? "copy" : "live"}-${article.id}`}
           article={article}
+          onImageUnavailable={markImageless}
         />
       ))}
     </div>

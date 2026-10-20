@@ -902,3 +902,216 @@ def test_real_images_are_not_caught_by_the_new_filters():
         "https://example.com/a/b/photo.avif",
     ):
         assert not _looks_like_junk_image(url), url
+
+
+# =============================================================
+# Repairing a row that was stored without artwork
+#
+# The bug this covers: the poll's per-article pipeline runs media
+# enrichment ONCE, on the poll that first stores an article. Every later
+# sighting hits dedup.check, matches the stored row on content_hash or
+# canonical_url, and continues before the media block ever runs. So a
+# single transient probe failure — a 429, a 403 from a CDN that
+# answered 200 a minute earlier, a timed-out connection — left the row
+# permanently imageless, and the web renders that as "NO IMAGE
+# AVAILABLE". Checked against the live feed: every one of the seven
+# imageless articles in the newest sixty rows had a live og:image on
+# its own page. The picture was always there; nothing went back for it.
+#
+# repair_missing_images is that going back.
+# =============================================================
+
+# The source whose poll is calling the repair pass.
+SOURCE_ID = "22222222-2222-2222-2222-222222222222"
+
+ARTICLE_PAGE = (
+    "<html><head>"
+    '<meta property="og:image" content="https://cdn.test/recovered.jpg" />'
+    "<meta property='og:title' content='A story' />"
+    f"<body><p>{'Real prose about the story. ' * 8}</p></body></html>"
+)
+
+
+class FakeQuery:
+    """
+    The slice of supabase-postgrest's builder these tests drive.
+
+    Records every `.update()` so a test can assert on the columns the
+    repair pass actually wrote, which is the whole point of the pass.
+    """
+
+    def __init__(self, rows, updates, log):
+        self._rows = rows
+        self._updates = updates
+        self._log = log
+
+    def select(self, *a, **k):
+        return self
+
+    def eq(self, column, value=None):
+        self._log.append(("eq", column, value))
+        return self
+
+    def is_(self, *a, **k):
+        return self
+
+    def gte(self, *a, **k):
+        return self
+
+    def order(self, *a, **k):
+        return self
+
+    def limit(self, n):
+        self._log.append(("limit", n))
+        return self
+
+    def execute(self):
+        return type("Response", (), {"data": self._rows})()
+
+    def update(self, values):
+        self._updates.append(values)
+        return self
+
+
+class FakeDb:
+    def __init__(self, rows):
+        self._rows = rows
+        self.updates = []
+        self.log = []
+
+    def table(self, name):
+        return FakeQuery(self._rows, self.updates, self.log)
+
+
+ROWS = [
+    {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "slug": "a-story",
+        "headline": "A story",
+        "source_article_url": "https://site.test/a-story",
+        "canonical_url": None,
+    }
+]
+
+
+async def test_a_stored_row_with_no_image_is_given_one_on_the_next_pass():
+    """
+    The repair itself. The row is stored and imageless; the article page
+    now offers an og:image and it loads; the pass must write both image
+    columns.
+    """
+    from app.services.ingestion import repair_missing_images
+
+    db = FakeDb(ROWS)
+    routes = {
+        "/a-story": build(content_type="text/html", body=ARTICLE_PAGE.encode()),
+        "/recovered.jpg": build(),
+    }
+
+    async with httpx.AsyncClient(transport=transport(routes)) as client:
+        repaired = await repair_missing_images(
+            db, SOURCE_ID, client, ImageValidator(client), limit=5
+        )
+
+    assert repaired == 1
+    assert len(db.updates) == 1
+    assert db.updates[0]["featured_image_url"] == "https://cdn.test/recovered.jpg"
+    # Both columns, not just featured: the card reads image_highres_url
+    # first, so a row repaired into only one column would still render
+    # from whichever was left.
+    assert db.updates[0]["image_highres_url"] == "https://cdn.test/recovered.jpg"
+
+
+async def test_repair_leaves_a_row_alone_when_the_image_is_still_dead():
+    """
+    The pass must not write a URL it could not prove. An outage that
+    lasted longer than one poll leaves the row as it was, and the
+    read-side filter keeps it out of the feeds.
+    """
+    from app.services.ingestion import repair_missing_images
+
+    db = FakeDb(ROWS)
+    routes = {
+        "/a-story": build(content_type="text/html", body=ARTICLE_PAGE.encode()),
+        "/recovered.jpg": build(status=403, content_type="text/html", body=b"<html>"),
+    }
+
+    async with httpx.AsyncClient(transport=transport(routes)) as client:
+        repaired = await repair_missing_images(
+            db, SOURCE_ID, client, ImageValidator(client), limit=5
+        )
+
+    assert repaired == 0
+    assert db.updates == []
+
+
+async def test_repair_does_nothing_when_there_is_nothing_to_repair():
+    """The overwhelmingly common case: no imageless rows, no requests."""
+    from app.services.ingestion import repair_missing_images
+
+    db = FakeDb([])
+    seen: list = []
+
+    async with httpx.AsyncClient(transport=transport({}, seen)) as client:
+        repaired = await repair_missing_images(
+            db, SOURCE_ID, client, ImageValidator(client), limit=5
+        )
+
+    assert repaired == 0
+    assert seen == []
+
+
+async def test_repair_is_bounded_by_the_limit_it_is_given():
+    """
+    This runs on the critical path of every source poll, so it must not
+    become a crawl of the outlet.
+    """
+    from app.services.ingestion import repair_missing_images
+
+    db = FakeDb(ROWS)
+
+    async with httpx.AsyncClient(transport=transport({})) as client:
+        await repair_missing_images(
+            db, SOURCE_ID, client, ImageValidator(client), limit=2
+        )
+
+    assert ("limit", 2) in db.log
+
+
+async def test_repair_survives_a_database_failure():
+    """
+    A sweep that cannot read its candidates must report zero and let the
+    poll carry on. The rows it would have fixed are still hidden from the
+    feeds by the read-side pass, so failing loudly buys nothing.
+    """
+    from app.services.ingestion import repair_missing_images
+
+    class BrokenDb:
+        def table(self, name):
+            raise RuntimeError("connection reset")
+
+    async with httpx.AsyncClient(transport=transport({})) as client:
+        repaired = await repair_missing_images(
+            BrokenDb(), SOURCE_ID, client, ImageValidator(client), limit=5
+        )
+
+    assert repaired == 0
+
+
+async def test_repair_only_ever_looks_at_its_own_sources_rows():
+    """
+    With ~27 sources polling independently, a global scan would have every
+    one of them retry the same handful of rows — the opposite of bounded,
+    and the wrong unit anyway, since a row's artwork is that outlet's own
+    CDN. Scoped, the work spreads across the pollers.
+    """
+    from app.services.ingestion import repair_missing_images
+
+    db = FakeDb(ROWS)
+
+    async with httpx.AsyncClient(transport=transport({})) as client:
+        await repair_missing_images(
+            db, SOURCE_ID, client, ImageValidator(client), limit=5
+        )
+
+    assert ("eq", "source_id", SOURCE_ID) in db.log

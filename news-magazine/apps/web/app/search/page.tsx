@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 
 import { EmptyState } from "@/components/EmptyState";
-import { NewsCard } from "@/components/NewsCard";
+import { ImagelessGrid } from "@/components/ImagelessGrid";
 import { ResurrectionNotice } from "@/components/ResurrectionNotice";
 import { searchArticles, toCardArticle } from "@/lib/news";
 import { triggerResurrection } from "@/lib/resurrection";
@@ -126,11 +126,10 @@ export default async function SearchPage({ searchParams }: { searchParams: Searc
         />
       ) : (
         <>
-          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
-            {pageItems.map((article) => (
-              <NewsCard key={article.id} article={article} />
-            ))}
-          </div>
+          {/* As on the category pages: this passes onImageUnavailable, so
+              a result whose image 404s is replaced rather than left
+              showing "No image available". */}
+          <ImagelessGrid articles={pageItems} />
 
           {totalPages > 1 && (
             <nav className="mt-10 flex items-center justify-center gap-2" aria-label="Pagination">

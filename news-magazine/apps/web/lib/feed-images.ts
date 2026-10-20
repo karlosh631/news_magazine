@@ -125,3 +125,77 @@ export function dropRepeatedImages<T extends ImageRow>(rows: T[]): T[] {
 
   return rows.filter((row) => !dropped.has(row.id));
 }
+
+/**
+ * The media NewsCard would put in the picture slot for this row.
+ *
+ * Deliberately the SAME list the card builds in `pickImages`
+ * (components/NewsCard.tsx), media columns included: a story whose only
+ * "artwork" is a gif renders a real <img> in the tile, so it is not
+ * imageless, and a story with an embeddable video renders a player there
+ * instead. Judging "does this row have a picture" by `featured_image_url`
+ * alone would demote rows the reader will see perfectly illustrated, which
+ * is the same class of mistake as comparing something other than what the
+ * card renders.
+ *
+ * Kept here rather than exported from NewsCard because NewsCard is a
+ * client component: importing it into lib/news.ts would drag React and
+ * the DOM-facing module into the server bundle. This file is imported by
+ * both sides already, which is why it is the right home for a rule the
+ * two of them must agree on.
+ */
+export function hasRenderableArtwork(row: {
+  featured_image_url?: string | null;
+  image_highres_url?: string | null;
+  gif_url?: string | null;
+  video_url?: string | null;
+  video_embed_url?: string | null;
+}): boolean {
+  return Boolean(
+    row.featured_image_url ||
+      row.image_highres_url ||
+      row.gif_url ||
+      row.video_url ||
+      row.video_embed_url
+  );
+}
+
+/**
+ * Drop the stories that would render the "No image available" panel.
+ *
+ * The brief was explicit: never show a card with no picture, show a
+ * different story instead. This is that rule, applied on the SERVER,
+ * before the row is ever handed to a card — which is what makes it
+ * effective on the three surfaces where the client-side `imageless` set
+ * cannot help at all:
+ *
+ *   - app/category/[slug]/page.tsx and app/search/page.tsx render
+ *     <NewsCard> without an onImageUnavailable prop, so nothing was ever
+ *     going to remove the row;
+ *   - components/ReelsFeed.tsx renders its side columns the same way, and
+ *     repeats each list 2-10 times for the seamless drift loop, so one
+ *     imageless story was painted up to twenty times on /category/reels;
+ *   - every one of those is a server-rendered first paint, where the
+ *     placeholder is what the reader sees before any JavaScript runs.
+ *
+ * This is also the only layer that can see a row whose artwork is a dead
+ * URL the CDN will 403. `hasRenderableArtwork` answers "is there a URL",
+ * not "does it load" — that half stays client-side, in the onError path.
+ * The two are complementary: this removes the rows we can know about
+ * without a request, and the card removes the ones only a browser can
+ * disprove.
+ *
+ * Order is never changed, for the reason every other pass here gives:
+ * "newest first" is the promise the page rests on. A dropped card's slot
+ * is filled by the next story DOWN, so every caller over-fetches first
+ * (IMAGE_HEADROOM in lib/news.ts).
+ *
+ * The floor is not negotiable: if EVERY row is imageless this returns the
+ * input unchanged. An honest panel on a text-only feed is a bad card; an
+ * empty page because the site decided pictures matter more than news is a
+ * worse one. Same guard LiveArticleFeed applies to its client-side pass.
+ */
+export function dropImageless<T extends ImageRow>(rows: T[]): T[] {
+  const kept = rows.filter(hasRenderableArtwork);
+  return kept.length > 0 ? kept : rows;
+}

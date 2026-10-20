@@ -73,7 +73,24 @@ MAX_SECONDS = 180.0
 #: Floor for a "playable" rendition. Picking a 180px variant is how you
 #: get a card that renders beautifully and looks like garbage.
 MIN_HEIGHT = 360
-PREFERRED_HEIGHT = 720
+
+#: Ceiling on the rendition we prefer to store.
+#:
+#: This was 720, which quietly made the feed WORSE than it was before
+#: the master-file bug was fixed: Commons offers 240p / 480p / 1080p
+#: transcodes plus a 1080p-or-4K master, and a 720 ceiling meant the
+#: largest usable transcode was 480p. The card is rendered around
+#: 420-900 CSS pixels wide and on a 3x phone screen that is 1260-2700
+#: device pixels — a 480p source is visibly soft on exactly the
+#: devices that can afford the bytes.
+#:
+#: 1080 is the ceiling because that is where Commons stops: the
+#: transcode ladder tops out there, so raising it further would change
+#: nothing except to make the code look like it had a higher limit
+#: than it does. It also keeps the master out of the picture, which is
+#: the whole point — a 4096x2160 original is tens of megabytes, and
+#: the transcode at the same visual quality is a fraction of that.
+PREFERRED_HEIGHT = 1080
 
 #: Wikimedia asks every API client to identify itself. Keep this in sync
 #: with the deployment's real contact details — an unidentifiable bot is
@@ -859,38 +876,67 @@ class WikimediaSource(_BaseSource):
         # requesting exactly `limit` would return a short feed.
         wanted = min(50, max(limit, 10) * 3)
 
-        params = {
-            "action": "query",
-            "format": "json",
-            "formatversion": "2",
-            "generator": "search",
-            "gsrsearch": self._search_expression(),
-            "gsrnamespace": "6",  # File:
-            "gsrlimit": str(wanted),
-            # Newest uploads first, so a repeated run actually finds new
-            # material instead of returning the same top-relevance files
-            # until someone renames them.
-            #
-            # "indexed" and "indexed_desc" are NOT accepted by Commons —
-            # CirrusSearch does not offer them for this generator — and a
-            # bad sort answers HTTP 200 with an `error` object in the
-            # body rather than a 4xx. create_timestamp_desc is the
-            # "newest first" ordering and is supported.
-            "gsrsort": "create_timestamp_desc",
-            # imageinfo gives us the JPEG poster; videoinfo gives us the
-            # mp4 transcodes and the running time. Neither alone is
-            # enough, so both are requested for the same titles.
-            "prop": "imageinfo|videoinfo",
-            "iiprop": "url|size|mime|mediatype|extmetadata",
-            "iiurlwidth": "720",
-            "viprop": "url|size|mime|mediatype|derivatives|extmetadata",
-        }
+        # One query per configured term, then the union.
+        #
+        # A single query can only ever reach so far down Commons'
+        # catalogue, and each term names a different corner of it. Twelve
+        # terms searched one per hour meant the feed rotated through
+        # twelve small sets instead of holding the union of them.
+        #
+        # Commons is a free API with no quota, so the number of requests
+        # is bounded by the configured term list rather than by a budget.
+        # The cap keeps a misconfigured list of 200 terms from turning
+        # one poll into 200 requests.
+        terms = self._search_terms()
+        if not terms:
+            terms = [""]
 
-        payload = await self._get_json(params)
+        pages: list[dict] = []
+        seen_titles: set[str] = set()
 
-        pages = (payload.get("query") or {}).get("pages") or []
-        if not isinstance(pages, list):
-            pages = []
+        for term in terms:
+            params = {
+                "action": "query",
+                "format": "json",
+                "formatversion": "2",
+                "generator": "search",
+                "gsrsearch": self._search_expression(term),
+                "gsrnamespace": "6",  # File:
+                "gsrlimit": str(wanted),
+                # Newest uploads first, so a repeated run actually finds new
+                # material instead of returning the same top-relevance files
+                # until someone renames them.
+                #
+                # "indexed" and "indexed_desc" are NOT accepted by Commons —
+                # CirrusSearch does not offer them for this generator — and a
+                # bad sort answers HTTP 200 with an `error` object in the
+                # body rather than a 4xx. create_timestamp_desc is the
+                # "newest first" ordering and is supported.
+                "gsrsort": "create_timestamp_desc",
+                # imageinfo gives us the JPEG poster; videoinfo gives us the
+                # mp4 transcodes and the running time. Neither alone is
+                # enough, so both are requested for the same titles.
+                "prop": "imageinfo|videoinfo",
+                "iiprop": "url|size|mime|mediatype|extmetadata",
+                "iiurlwidth": "720",
+                "viprop": "url|size|mime|mediatype|derivatives|extmetadata",
+            }
+
+            payload = await self._get_json(params)
+
+            found = (payload.get("query") or {}).get("pages") or []
+            if not isinstance(found, list):
+                continue
+
+            for page in found:
+                if not isinstance(page, dict):
+                    continue
+                title = str(page.get("title") or "")
+                if title and title in seen_titles:
+                    continue
+                if title:
+                    seen_titles.add(title)
+                pages.append(page)
 
         reels: list[Reel] = []
         skipped_no_licence = 0
@@ -917,11 +963,68 @@ class WikimediaSource(_BaseSource):
 
         return _sorted_by_timestamp(reels)
 
+    def _search_terms(self) -> list[str]:
+        """
+        The configured terms, cleaned and bounded.
+
+        A term has to be a plain word for `intitle:` to mean anything,
+        and a term that is not plain is a search expression in its own
+        right — interpolating operator syntax from configuration is how a
+        search term turns into a query rewrite.
+
+        Only two shapes are allowed, and both are ones
+        `_search_expression` can actually turn into a constraint:
+
+          - a single alphanumeric word: `nepal`
+          - a space-separated phrase: `mount everest`
+
+        Everything else is DROPPED rather than sanitised, and that
+        strictness matters more than it looks. A term this method
+        returns but `_search_expression` cannot use produces a query
+        with no hint at all — which is the loose OR-matching search
+        that put European Space Agency stock in a Nepali news feed.
+        Silently widening the search is worse than not searching at all.
+        """
+        raw = (self.hint or "").replace("\n", ",")
+        terms: list[str] = []
+        seen: set[str] = set()
+
+        for candidate in raw.split(","):
+            term = candidate.strip()
+            if not term:
+                continue
+
+            if term.isalnum():
+                if len(term) < 3:
+                    continue
+            elif " " in term:
+                # A phrase. Every word must be alphanumeric, so no
+                # operator, wildcard or parenthesis can ride along.
+                words = term.split()
+                if len(words) < 2 or not all(w.isalnum() for w in words):
+                    continue
+                if len(term) > 60:
+                    continue
+            else:
+                # Punctuation, or a single non-alphanumeric word.
+                continue
+
+            key = term.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            terms.append(term)
+
+            if len(terms) >= 12:
+                break
+
+        return terms
+
     # -------------------------------------------------
     # Search
     # -------------------------------------------------
 
-    def _search_expression(self) -> str:
+    def _search_expression(self, term: str = "") -> str:
         """
         A CirrusSearch expression, not a bag of words.
 
@@ -929,11 +1032,51 @@ class WikimediaSource(_BaseSource):
         non-free category is negated explicitly: those files are on
         Commons under fair-use claims, which is precisely the material
         we must never put in our own feed.
+
+        WHY THE TERM IS SCOPED WITH `intitle:`
+        ---------------------------------------
+        CirrusSearch OR-matches. A bare term in the expression does not
+        constrain the result set — it just adds one more way for a file
+        to match, alongside `filetype:video` which matches everything.
+        Measured against the live API:
+
+          ... nepal              -> Fagu Purnima (Holi),
+                                     Panche Baja (a BENGALI wedding),
+                                     Landing a Lukla Airport
+          ... intitle:nepal     -> Chandragiri Cable Car, Kathmandu, Nepal
+                                     Dattatreya Square in the rain, Bhaktapur
+                                     Nepal flood 2026 before after
+                                     Trishuli River at Pida Village
+
+        The loose search returns a Bengali wedding and a Spanish
+        baseball match, because those files carry a Nepal tag somewhere
+        invisible — a category, a caption, a uploader's edit. `intitle:`
+        requires the term to be in the file's TITLE, which is the only
+        place it reliably means "this video is about Nepal". The feed
+        went from a mix of Nepali footage and European Space Agency
+        stock to actually Nepali footage.
+
+        Two `intitle:` terms in one expression AND together and match
+        almost nothing, so exactly one is used per query — and the
+        caller issues one query per configured term, unioning the
+        results.
         """
         parts = ["filetype:video", '-incategory:"Non-free files"']
 
-        if self.hint:
-            parts.append(self.hint)
+        cleaned = (term or "").strip()
+        if cleaned:
+            if cleaned.isalnum() and len(cleaned) > 2:
+                parts.append(f"intitle:{cleaned}")
+            elif " " in cleaned and all(w.isalnum() for w in cleaned.split()):
+                # A multi-word phrase. Quoted, because unquoted words in
+                # CirrusSearch are OR'd and a phrase would match a file
+                # with only one of them.
+                parts.append(f'intitle:"{cleaned}"')
+            # Anything else adds NO constraint, and a constraint-free
+            # query is the loose search that started this. `_search_terms`
+            # is what guarantees a term never reaches here in that
+            # shape, but the belt is kept on: a term that cannot be
+            # expressed must not widen the search.
 
         return " ".join(parts)
 

@@ -567,20 +567,34 @@ async def _sync_reels_body() -> None:
             if t.strip()
         ]
 
-        # Rotate the hint per pass rather than always sending the first
-        # one. A single fixed term means every poll after the first
-        # re-requests the same query and finds nothing new, so the feed
-        # stalls on whatever that one term happened to surface. Walking
-        # the list spreads the passes across topics and lets the feed
-        # grow.
+        # Every configured term, comma-joined, rather than one per pass.
+        #
+        # This used to rotate a single term per pass, so with twelve
+        # terms a full cycle took an hour — and each pass REPLACED what
+        # the feed showed rather than adding to it. The category page
+        # therefore showed whatever the last pass happened to find, and
+        # the reader saw the same handful of clips over and over.
+        #
+        # Passing the whole list lets a provider search each term in one
+        # pass. WikimediaSource scopes each one with `intitle:` and
+        # unions the results, so the feed accumulates every term's
+        # material in one go instead of one term's per hour.
+        #
+        # The rotation counter is kept, because a provider that takes a
+        # single hint (Pexels, Pixabay) still benefits from seeing a
+        # different term each pass rather than the same one for ever.
         hint = ""
         if terms:
             # `global` is required, not decorative: the += below makes
             # this name local to the function for the whole of it, so the
             # read above would raise UnboundLocalError without it.
             global _reels_pass
-            hint = terms[_reels_pass % len(terms)]
+            rotated = terms[_reels_pass % len(terms)]
             _reels_pass += 1
+            # The rotated term first, so a provider that reads only the
+            # first one still rotates; the rest follow for the providers
+            # that can use them all.
+            hint = ",".join([rotated] + [t for t in terms if t != rotated])
 
         # Pools are built — and cleared — once per pass, before any
         # provider runs. Resetting here is what lets a quota that

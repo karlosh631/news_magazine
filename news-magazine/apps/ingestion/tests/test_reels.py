@@ -2783,3 +2783,139 @@ async def test_a_provider_that_never_declared_an_interval_is_never_skipped(monke
     assert [call["url"] for call in sent] == [PROVIDERS["wikimedia"].endpoint], (
         "a provider with no declared interval runs on every pass"
     )
+
+
+# =============================================================
+# COMMONS SEARCH: WHY intitle:
+# =============================================================
+#
+# The reels page was serving European Space Agency stock footage and a
+# Spanish baseball match. The search expression was:
+#
+#     filetype:video -incategory:"Non-free files" nepal
+#
+# and CirrusSearch OR-matches. `filetype:video` matches every video on
+# Commons, so the bare `nepal` was one more way in, not a filter. Those
+# files carry a Nepal tag somewhere invisible — a category, a caption,
+# an uploader's edit — and CirrusSearch had no way to be asked for
+# "actually about Nepal".
+#
+# Measured against the live API:
+#
+#   ... nepal           -> Fagu Purnima (Holi), Panche Baja (a BENGALI
+#                           wedding), Landing a Lukla Airport
+#   ... intitle:nepal  -> Chandragiri Cable Car, Kathmandu, Nepal
+#                          Dattatreya Square in the rain, Bhaktapur, Nepal
+#                          Nepal flood 2026 before after
+#                          Trishuli River at Pida Village, Dhading
+#
+# `intitle:` requires the term to be in the file's title, which is the
+# only place it reliably means "this video is about Nepal".
+
+COMMONS_SOURCE = PROVIDERS["wikimedia"]
+
+
+def _commons(hint: str):
+    return build_source(
+        "wikimedia", pool=build_pool("wikimedia", None), client=None, hint=hint
+    )
+
+
+def test_a_search_term_is_scoped_to_the_title():
+    """
+    The whole fix in one assertion.
+
+    Without `intitle:`, the expression is a bag of OR'd terms and the
+    hint does not filter anything.
+    """
+    source = _commons("nepal")
+    expression = source._search_expression("nepal")
+
+    assert "intitle:nepal" in expression, expression
+    # The loose form must not be there as well, or the title constraint
+    # is defeated by the very term it replaced.
+    assert " nepal" not in expression.replace("intitle:nepal", ""), expression
+
+
+def test_the_non_free_exclusion_survives():
+    """
+    Commons holds fair-use files under that category. They are exactly
+    the material that must never appear in our own feed, so the
+    exclusion is not optional and not affected by the search change.
+    """
+    expression = _commons("nepal")._search_expression("nepal")
+    assert '-incategory:"Non-free files"' in expression, expression
+    assert "filetype:video" in expression, expression
+
+
+def test_a_multi_word_term_is_quoted():
+    """
+    CirrusSearch ORs unquoted words, so `mount everest` would match a
+    file with only "everest" in its title. Quoting makes it a phrase.
+    """
+    expression = _commons("mount everest")._search_expression("mount everest")
+    assert 'intitle:"mount everest"' in expression, expression
+
+
+def test_a_term_with_query_operators_is_dropped():
+    """
+    A term that is itself a search expression must not be interpolated
+    into one. That is how a configuration value turns into a query
+    rewrite — `*` and `~` and parentheses are all operator syntax in
+    CirrusSearch.
+    """
+    terms = _commons("nepal,intitle:*,evil) OR (x")._search_terms()
+
+    assert "nepal" in terms
+    assert not any("*" in t for t in terms), terms
+    assert not any("(" in t or ")" in t for t in terms), terms
+
+
+def test_every_configured_term_is_searched_not_just_the_first():
+    """
+    One query per term, unioned.
+
+    A single query can only reach so far down Commons' catalogue, and
+    each term names a different corner of it. Searching one term per
+    pass meant the feed rotated through twelve small sets instead of
+    holding the union of them — which is what a reader sees as "the
+    reels never change".
+    """
+    source = _commons("nepal,kathmandu,everest,pokhara")
+    terms = source._search_terms()
+
+    assert terms == ["nepal", "kathmandu", "everest", "pokhara"], terms
+
+
+def test_the_term_list_is_bounded():
+    """
+    A misconfigured list of 200 terms must not turn one poll into 200
+    requests against a free API.
+    """
+    many = ",".join(f"term{i}" for i in range(200))
+    terms = _commons(many)._search_terms()
+
+    assert len(terms) <= 12, len(terms)
+
+
+def test_duplicate_terms_are_collapsed():
+    """The scheduler rotates and re-sends terms; the same one twice is
+    one query, not two."""
+    terms = _commons("nepal,Nepal,NEPAL,kathmandu")._search_terms()
+    assert len([t for t in terms if t.lower() == "nepal"]) == 1, terms
+
+
+def test_the_preferred_rendition_is_high_definition():
+    """
+    The ceiling was 720, which meant the largest usable transcode was
+    480p for most Commons files. On a 3x phone screen a 420px card is
+    ~1260 device pixels, so 480p is visibly soft on exactly the
+    devices that can afford the bytes.
+
+    1080 is the ceiling because that is where Commons' transcode ladder
+    tops out — the transcode at the same visual quality as a 4K master
+    is a fraction of its size, which is the point of avoiding masters.
+    """
+    assert reels_providers.PREFERRED_HEIGHT >= 1080
+    # And the floor is still a floor: a 180px rendition is a thumbnail.
+    assert reels_providers.MIN_HEIGHT >= 360

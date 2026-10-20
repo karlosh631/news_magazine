@@ -152,11 +152,20 @@ FB_RE = re.compile(r"facebook\.com/[^/]+/videos/[^/]+/(\d+)", re.IGNORECASE)
 # Image URLs that are tracking pixels, spacers, logos, sprites, or
 # otherwise useless as article artwork.
 _JUNK_IMAGE_RE = re.compile(
-    r"(?:^|[/_.-])(?:pixel|spacer|blank|transparent|1x1|avatar|logo|"
+    r"(?:^|[/_.-])(?:pixel|spacer|blank|transparent|1x1|avatar|author|logo|"
     r"icon|sprite|favicon|placeholder|loader|lazy[-_.]?|lazyload|"
     r"default[-_]?image|no[-_]?image|dummy|mock|grey|gray|loading|"
     r"preload|skeleton|shimmer|lightbox|thumb[-_]?small)[/_.-]",
     re.IGNORECASE,
+)
+
+# An image URL must end in a filename. A path that stops at a directory
+# — `.../uploads/source/` — is a base URL the scraper truncated, and the
+# CDN answers it 403. It is not a rendition that happened to fail: there
+# is no file behind it at any size, so no rendition fallback can rescue
+# it and the card is dead from the moment it is stored.
+_IMAGE_FILE_RE = re.compile(
+    r"\.(?:jpe?g|png|webp|gif|avif|bmp|svg)(?:$|[?#])", re.IGNORECASE
 )
 
 # Common image-URL size tokens. When several candidates exist we prefer
@@ -287,7 +296,16 @@ def _clean_url(value: str | None, base_url: str) -> str | None:
 
 
 def _looks_like_junk_image(url: str) -> bool:
-    return bool(_JUNK_IMAGE_RE.search(url))
+    if _JUNK_IMAGE_RE.search(url):
+        return True
+
+    # No filename means no file. This is the one failure a rendition
+    # fallback cannot fix, so it is judged before anything is stored
+    # rather than discovered by a reader on a dead card.
+    stripped = url.split("?")[0].split("#")[0].rstrip("/")
+    if not stripped or "/" not in stripped.split("://", 1)[-1]:
+        return True
+    return not _IMAGE_FILE_RE.search(stripped)
 
 
 # Proxies and resizers. These are disqualifying, not merely penalised.

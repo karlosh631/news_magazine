@@ -858,3 +858,47 @@ async def test_a_article_with_no_image_at_all_is_left_untouched():
     assert dropped == 0
     assert verified == media
     assert validator.requests == 0
+
+
+# =============================================================
+# Image URLs that are not images
+#
+# Two shapes reached the feed from Kathmandu Post: a base URL the
+# scraper truncated at a directory (the CDN answers 403), and the
+# AUTHOR avatar path, which loads fine and is the wrong picture. The
+# second reads as a duplicate-photo bug; the first reads as a dead card
+# no rendition fallback can rescue.
+# =============================================================
+
+def test_a_url_with_no_filename_is_junk():
+    from app.sources.media import _looks_like_junk_image
+
+    # A truncated path — there is no file behind it at any size.
+    assert _looks_like_junk_image(
+        "https://assets-cdn.kathmandupost.com/uploads/source/"
+    )
+    assert _looks_like_junk_image("https://example.com/media")
+    assert _looks_like_junk_image("")
+
+
+def test_an_author_avatar_is_not_the_article_image():
+    from app.sources.media import _looks_like_junk_image
+
+    # Loads 200, so no network probe would call it broken — but it is a
+    # byline portrait, not the story's photograph.
+    assert _looks_like_junk_image(
+        "https://assets-cdn.kathmandupost.com/uploads/source/author/s/OVqEAY57400x400-1784694175.jpg"
+    )
+
+
+def test_real_images_are_not_caught_by_the_new_filters():
+    from app.sources.media import _looks_like_junk_image
+
+    for url in (
+        "https://npcdn.ratopati.com/media/news/netanyu-and-trump_6s7Qyt02JI.jpg",
+        "https://cdn.kathmandupost.com/pics/2026/10/story-1200x675.jpg",
+        "https://example.com/a/b/photo.webp",
+        "https://example.com/a/b/photo.jpg?v=2",
+        "https://example.com/a/b/photo.avif",
+    ):
+        assert not _looks_like_junk_image(url), url

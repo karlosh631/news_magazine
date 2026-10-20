@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useRouter } from "next/navigation";
 
 import { useImagelessFilter } from "@/components/ImagelessGrid";
 import { NewsCard } from "@/components/NewsCard";
@@ -319,6 +320,40 @@ export function ReelsFeed({
     each one.
   */
   const [muted, setMuted] = useState(true);
+
+  const router = useRouter();
+
+  /*
+    Re-render when the header's poll says the world moved on.
+
+    This is the whole reason the reels page ever changes. `ReelsFeed`
+    receives its reels as props from a server component, so it renders
+    whatever was in the database when the page was requested — and it
+    previously never asked again. The header already broadcasts a
+    `news-refresh` CustomEvent every 15 seconds (and immediately on a
+    manual refresh); LiveArticleFeed listens for it and merges the newest
+    page into what it already has, but ReelsFeed did not, so /category/reels
+    showed the same 24 clips for as long as the tab stayed open no matter
+    how much the worker had ingested.
+
+    `router.refresh()` rather than a fetch of our own: the reels are read
+    server-side in `getReels()` and there is no reels API endpoint to poll.
+    Re-rendering the server tree is the only way to see a new row, and it
+    is the same mechanism the refresh button already uses.
+
+    Scroll position is preserved across a refresh, so a reader who is
+    three reels down is not thrown back to the top when a new clip lands.
+
+    The reels list only ever GROWS by ingestion — `ingest_reels` upserts
+    on (source_key, external_id) rather than deleting — so there is no
+    case where the reader's place in the feed is invalidated underneath
+    them and a reset would be warranted.
+  */
+  useEffect(() => {
+    const refresh = () => router.refresh();
+    window.addEventListener("news-refresh", refresh);
+    return () => window.removeEventListener("news-refresh", refresh);
+  }, [router]);
 
   /**
    * Every rendered reel item — both copies of it.

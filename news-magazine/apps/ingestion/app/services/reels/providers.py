@@ -450,6 +450,24 @@ class _BaseSource:
     #: Where `fetch` goes.
     endpoint: str = ""
 
+    #: Shortest interval this provider wants between passes, in seconds.
+    #: Zero means "every pass".
+    #:
+    #: This exists because providers do not cost the same. Wikimedia and
+    #: Pixabay answer cheaply and are cached on our side anyway. YouTube's
+    #: search.list costs 100 units against a 10,000/day default, so a
+    #: source polled on the reels cadence spends a key inside half an
+    #: hour — not an outage, but a provider that silently contributes
+    #: nothing after the first pass while looking configured.
+    #:
+    #: Declaring the cost here rather than telling the operator to raise
+    #: REELS_POLL_SECONDS is the difference between a setting that has to
+    #: be right and one that cannot be wrong: an expensive source is
+    #: polled at its own affordable rate and the cheap ones keep the
+    #: feed moving at the cadence the operator chose. The scheduler
+    #: honours this.
+    min_poll_seconds: int = 0
+
     def __init__(self, *, pool: KeyPool | None, client: httpx.AsyncClient, hint: str = "") -> None:
         self._pool = pool
         self._client = client
@@ -1536,6 +1554,20 @@ class YouTubeShortsSource(_BaseSource):
     #: search.list and videos.list are one host and one key but two
     #: paths, so the second call goes through _get_json(endpoint=...).
     videos_endpoint = "https://www.googleapis.com/youtube/v3/videos"
+
+    # search.list is 100 units and the default daily allowance is
+    # 10,000. One pass is 100, so 100 passes is the whole day's budget
+    # — and at the reels cadence of every five minutes there are 288.
+    #
+    # The provider used to be told about this in a docstring and left to
+    # waste its key. Declaring it here instead means a deployment that
+    # adds YOUTUBE_API_KEYS and nothing else gets a working feed: the
+    # scheduler polls this hourly, spends ~2,400 units a day, and the
+    # other providers keep their five-minute cadence. Raising
+    # REELS_POLL_SECONDS globally is the other way to solve it, and it
+    # is the worse one — it also slows down the sources that cost
+    # nothing.
+    min_poll_seconds = 3600
 
     #: The official embed player. `video_url` and `embed_url` are both
     #: this, which is why a bare <video src> cannot play it.

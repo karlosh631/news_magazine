@@ -2289,3 +2289,165 @@ def test_a_pixabay_response_is_cached_even_when_it_is_worthless():
         "an empty answer is cached like any other; see the docstring "
         "above for why that is the intended trade"
     )
+
+
+# =============================================================
+# PER-PROVIDER POLL INTERVALS
+# =============================================================
+
+def test_a_provider_that_declares_a_cost_declares_one_the_scheduler_knows_about():
+    """
+    If the scheduler cannot see `min_poll_seconds`, the attribute is
+    documentation with no enforcement behind it — and a YouTube key
+    would still be spent inside half an hour. This is the cheapest
+    possible guard against that regression: the field exists, and the
+    scheduler reads it by that exact name.
+    """
+    source = inspect.getsource(
+        __import__("app.workers.scheduler", fromlist=["_sync_reels_body"])
+    )
+
+    assert "min_poll_seconds" in source, (
+        "the scheduler must read the provider's declared interval"
+    )
+
+    # YouTube's search.list is 100 units against 10,000/day.
+    assert PROVIDERS["youtube"].min_poll_seconds >= 3600, (
+        "hourly is the cheapest interval that keeps a single key inside "
+        "its daily allowance"
+    )
+
+    # The cheap sources must NOT be throttled. Slowing them down to
+    # serve one expensive provider would make the feed worse everywhere
+    # to fix a problem in one place.
+    assert PROVIDERS["wikimedia"].min_poll_seconds == 0
+    assert PROVIDERS["pixabay"].min_poll_seconds == 0
+
+
+async def test_a_costly_provider_is_polled_at_its_own_rate_not_the_jobs(monkeypatch):
+    """
+    The failure this prevents is silent, which is why it needs a test.
+
+    YouTube's search.list costs 100 units against a 10,000/day default,
+    so polling it on the reels cadence spends a key in roughly 30
+    minutes. Nothing raises. Every health report still says the source
+    is configured and healthy. The feed simply stops gaining YouTube
+    clips for the remaining 23.5 hours of the day, and the operator has
+    no signal saying why.
+
+    Two passes back to back: the first must call YouTube, the second
+    must not.
+    """
+    import httpx
+
+    from app.workers import scheduler as sched
+
+    sent: list[dict] = []
+    db = FakeDB(rows=[{"id": GOOD_UUID}])
+    client = FakeAsyncClient(COMMONS_RESPONSE, sent)
+
+    monkeypatch.setattr(
+        sched,
+        "get_settings",
+        lambda: _reels_settings(youtube_api_keys="yt-key-one"),
+    )
+    monkeypatch.setattr(sched, "get_db", lambda: db)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+
+    sched._reels_last_run.clear()
+
+    # Pass one: everything runs.
+    await sched._sync_reels()
+    first_pass = [call["url"] for call in sent]
+
+    # Pass two, moments later: YouTube is inside its own interval.
+    sent.clear()
+    await sched._sync_reels()
+    second_pass = [call["url"] for call in sent]
+
+    search = PROVIDERS["youtube"].endpoint
+
+    assert search in first_pass, "the first pass must actually call YouTube"
+    assert search not in second_pass, (
+        "YouTube was polled again inside its declared hourly interval, "
+        "which spends the day's quota in half an hour"
+    )
+
+    # And the cheap provider kept its cadence, or the fix would have
+    # cost more than it saved.
+    assert PROVIDERS["wikimedia"].endpoint in second_pass, (
+        "throttling the expensive source must not slow the free ones"
+    )
+
+
+async def test_the_interval_expires_so_a_costly_provider_eventually_runs(monkeypatch):
+    """
+    The other half. A skip that never un-skips is a provider that ran
+    once at start-up and never again, which is exactly as broken as
+    never running — and looks identical in the logs.
+
+    `_reels_last_run` is set to an hour ago rather than the clock being
+    faked, so this tests the real comparison and not a stubbed one.
+    """
+    import httpx
+
+    from app.workers import scheduler as sched
+
+    sent: list[dict] = []
+    db = FakeDB(rows=[{"id": GOOD_UUID}])
+    client = FakeAsyncClient(COMMONS_RESPONSE, sent)
+
+    monkeypatch.setattr(
+        sched,
+        "get_settings",
+        lambda: _reels_settings(youtube_api_keys="yt-key-one"),
+    )
+    monkeypatch.setattr(sched, "get_db", lambda: db)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+
+    sched._reels_last_run.clear()
+
+    await sched._sync_reels()
+
+    # Pretend the last YouTube pass happened an hour and a half ago.
+    sched._reels_last_run["youtube"] = time.monotonic() - 5400
+
+    sent.clear()
+    await sched._sync_reels()
+
+    assert PROVIDERS["youtube"].endpoint in [call["url"] for call in sent], (
+        "the interval must lapse; a provider throttled for ever is a "
+        "provider that ran once"
+    )
+
+
+async def test_a_provider_that_never_declared_an_interval_is_never_skipped(monkeypatch):
+    """
+    The default must be "run every pass".
+
+    `getattr(source, "min_poll_seconds", 0)` is what keeps this true for
+    a custom adapter that subclasses nothing, and a scheduler that
+    dropped the getattr would break every provider that has not been
+    updated yet — silently, as a category that just stops updating.
+    """
+    import httpx
+
+    from app.workers import scheduler as sched
+
+    sent: list[dict] = []
+    db = FakeDB(rows=[{"id": GOOD_UUID}])
+    client = FakeAsyncClient(COMMONS_RESPONSE, sent)
+
+    monkeypatch.setattr(sched, "get_settings", lambda: _reels_settings())
+    monkeypatch.setattr(sched, "get_db", lambda: db)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+
+    sched._reels_last_run.clear()
+
+    await sched._sync_reels()
+    sent.clear()
+    await sched._sync_reels()
+
+    assert [call["url"] for call in sent] == [PROVIDERS["wikimedia"].endpoint], (
+        "a provider with no declared interval runs on every pass"
+    )

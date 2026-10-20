@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -441,6 +442,14 @@ REELS_JOB_ID = "ingest-reels"
 # one step per pass so a single term cannot monopolise the feed.
 _reels_pass = 0
 
+#: source_key -> monotonic timestamp of its last completed pass.
+#:
+#: Module-level for the same reason `_reels_pass` is: the scheduler is a
+#: long-lived object and this has to outlive any single pass. Reset only
+#: on restart, which is the correct semantics — a provider that was just
+#: polled should not be polled again on the other side of a redeploy.
+_reels_last_run: dict[str, float] = {}
+
 # (source_key, the Settings field holding its comma-separated keys).
 # A None field means the provider needs no key at all, which is what
 # keeps /category/reels alive on a fresh deploy with nothing set.
@@ -456,9 +465,10 @@ REEL_PROVIDERS: tuple[tuple[str, str | None], ...] = (
     # YouTube's own player and never decodes a media stream. It is also
     # by far the most expensive key here — search.list is 100 units a call
     # against a 10,000/day default — so on the default 5-minute cadence
-    # one key is spent inside half an hour. Harmless (the pool cools it
-    # and the providers above carry on), but it means YouTube adds little
-    # without several keys or a longer REELS_POLL_SECONDS.
+    # one key would be spent inside half an hour. The adapter declares
+    # `min_poll_seconds = 3600` and the loop below honours it, so the key
+    # works correctly as soon as it is set and this cadence can stay where
+    # the operator wants it.
     ("youtube", "youtube_api_keys"),
 )
 
@@ -619,6 +629,35 @@ async def _sync_reels_body() -> None:
                         hint=hint,
                     )
 
+                    # Respect the source's own cost, if it declared one.
+                    #
+                    # Some APIs are priced in quota units and one poll
+                    # can cost a hundred of them (YouTube's search.list is
+                    # the case in this codebase). Polling those on the
+                    # same cadence as the free ones does not fail loudly
+                    # — it spends the day's quota in half an hour and
+                    # then quietly returns nothing for the other 23.5,
+                    # while every health report still says the source is
+                    # fine. The provider knows its own price, so it
+                    # declares it and this enforces it.
+                    #
+                    # The skip is recorded as info, not warning: it is
+                    # the system working, and a warning here every pass
+                    # would train the operator to ignore this line.
+                    min_interval = getattr(source, "min_poll_seconds", 0)
+                    if min_interval:
+                        last = _reels_last_run.get(source_key)
+                        elapsed = time.monotonic() - last if last else None
+                        if elapsed is not None and elapsed < min_interval:
+                            logger.info(
+                                "Reels: %s SKIPPED, %.0fmin of its %.0fmin "
+                                "interval not yet elapsed.",
+                                source_key,
+                                elapsed / 60,
+                                min_interval / 60,
+                            )
+                            continue
+
                     # ingest_reels is written around a whole pass, so one
                     # source at a time still goes in as a one-entry map
                     # and comes back as a one-entry list. That keeps the
@@ -630,6 +669,7 @@ async def _sync_reels_body() -> None:
                         per_source=limit,
                     )
                     health = results[0]
+                    _reels_last_run[source_key] = time.monotonic()
                 except asyncio.CancelledError:
                     # Teardown, not a provider failure. See _sync_one: a
                     # swallowed cancellation breaks structured concurrency.

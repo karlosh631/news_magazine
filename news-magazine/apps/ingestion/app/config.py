@@ -189,11 +189,17 @@ class Settings(BaseSettings):
     #
     # This one is an EMBEDDING source, not a redistributable one — the
     # adapter embeds YouTube's own player and never touches the media
-    # stream. Note also that search.list costs 100 quota units a call
-    # against a default daily budget of 10,000, so YouTube contributes
-    # almost nothing at REELS_POLL_SECONDS=300 unless several keys are
-    # configured or the poll interval is raised. See
-    # YouTubeShortsSource for the full arithmetic.
+    # stream.
+    #
+    # It is also priced an order of magnitude above the other two:
+    # search.list costs 100 quota units a call against a default daily
+    # budget of 10,000, so on the reels cadence a key would be gone in
+    # half an hour. Rather than make the operator raise
+    # REELS_POLL_SECONDS — which would also slow the sources that cost
+    # nothing — the adapter declares `min_poll_seconds = 3600` and the
+    # scheduler honours it, so this key works correctly the moment it is
+    # set and REELS_POLL_SECONDS can stay where the operator wants it.
+    # See YouTubeShortsSource for the arithmetic.
     youtube_api_keys: str | None = None     # comma-separated
     # Comma-separated hints, rotated one per pass.
     #

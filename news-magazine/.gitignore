@@ -11,3 +11,4 @@ apps/ingestion/**/__pycache__/
 .DS_Store
 *.log
 *.tsbuildinfo.live-monitor/
+apps/web/_sound_probe.js

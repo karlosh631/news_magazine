@@ -485,6 +485,40 @@ def _reels_summary(health: Any) -> str:
 
 async def _sync_reels() -> None:
     """
+    One reels pass, hard-bounded.
+
+    APScheduler runs this on `max_instances=1`. A pass that never
+    RETURNS therefore never runs again — and a provider that accepts
+    the connection then hangs holds the slot for the life of the
+    process. That is not hypothetical: reels stopped ingesting for 23
+    hours while this endpoint still reported healthy, with every
+    exception swallowed by the body's own handler.
+
+    A timeout converts the only failure that is otherwise permanent
+    into an ordinary one. The next pass runs exactly as it would have
+    if this one had thrown.
+    """
+    settings = get_settings()
+    budget = max(int(settings.reels_pass_timeout_seconds or 0), 30)
+
+    try:
+        await asyncio.wait_for(_sync_reels_body(), timeout=budget)
+    except asyncio.TimeoutError:
+        # Deliberately NOT re-raised as CancelledError — wait_for
+        # cancels the inner task, and the pass is abandoned, not the
+        # process. The scheduler must keep running.
+        logger.warning(
+            "Reels: pass exceeded %ss and was abandoned; the next pass "
+            "will run normally.", budget,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Reels: pass aborted; the scheduler keeps running.")
+
+
+async def _sync_reels_body() -> None:
+    """
     One reels pass: every provider once, reported one by one.
 
     Providers run sequentially rather than concurrently. Each is one

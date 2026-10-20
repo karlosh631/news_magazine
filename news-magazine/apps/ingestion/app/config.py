@@ -173,7 +173,16 @@ class Settings(BaseSettings):
     # ---------------------------------------------------------
     enable_reels: bool = False
     reels_per_source: int = 30
-    reels_poll_seconds: int = 900
+    reels_poll_seconds: int = 300
+    # Every five minutes, so the Reels tab moves at a glance rather than
+    # every quarter-hour.
+    #
+    # Deliberately NOT matched to the article cadence. Outlets are
+    # polled every 90-180s because each is a separate site with separate
+    # terms; Wikimedia Commons is a single shared API whose policy asks
+    # clients to poll politely and withdraws access when they do not.
+    # One reels pass is a handful of requests, so five minutes is ~50 an
+    # hour — frequent enough to read as live, courteous enough to keep.
     pexels_api_keys: str | None = None      # comma-separated
     pixabay_api_keys: str | None = None     # comma-separated
     # Comma-separated hints, rotated one per pass.
@@ -189,6 +198,14 @@ class Settings(BaseSettings):
         "bhaktapur,mount everest,sagarmatha,india nepal,new deli nepal"
     )
     reels_http_timeout: float = 20.0
+    # Hard ceiling on one whole reels pass.
+    #
+    # The job runs at max_instances=1, so a pass that never returns
+    # never runs again and the category goes silent with no error
+    # anywhere. This bounds it. Generous enough for several slow
+    # providers in sequence, short enough that one hung socket cannot
+    # hold the slot past the next few intervals.
+    reels_pass_timeout_seconds: int = 180
     # Wikimedia's API policy asks every client to identify itself and
     # says anonymous traffic is what gets access withdrawn. This is a
     # contact address that reaches a human, not a version string.

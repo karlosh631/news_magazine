@@ -785,6 +785,7 @@ def _reels_settings(**overrides):
         pixabay_api_keys=None,
         reels_search_terms="nepal",
         reels_http_timeout=20.0,
+        reels_pass_timeout_seconds=180,
         reels_user_agent="TestReels/1.0 (+https://example.test)",
     )
     defaults.update(overrides)

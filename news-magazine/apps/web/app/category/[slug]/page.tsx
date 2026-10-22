@@ -5,7 +5,12 @@ import { EmptyState } from "@/components/EmptyState";
 import { LiveArticleFeed } from "@/components/LiveArticleFeed";
 import { PanchangPanel } from "@/components/PanchangPanel";
 import { ReelsFeed } from "@/components/ReelsFeed";
-import { getPanchangFor, getRashifalFor, kathmanduToday } from "@/lib/daily-info";
+import {
+  getPanchangDays,
+  getPanchangFor,
+  getRashifalFor,
+  kathmanduToday,
+} from "@/lib/daily-info";
 import { getCategories, getLatestArticles } from "@/lib/news";
 import { getReels } from "@/lib/reels";
 import { SITE_NAME, SITE_URL } from "@/lib/site";
@@ -14,6 +19,8 @@ export const dynamic = "force-dynamic";
 
 interface Props {
   params: Promise<{ slug: string }>;
+  /** The day being asked for, on the Rashifal page. */
+  searchParams?: Promise<{ date?: string }>;
 }
 
 export async function generateStaticParams() {
@@ -70,7 +77,7 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
  * Now it reads the categories table for the slug and queries the
  * deduplicated articles for that category.
  */
-export default async function CategoryPage({ params }: Props) {
+export default async function CategoryPage({ params, searchParams }: Props) {
   const { slug: rawSlug } = await params;
   const slug = rawSlug?.toLowerCase();
 
@@ -102,10 +109,35 @@ export default async function CategoryPage({ params }: Props) {
     // a day by the worker, stored, and read here - so the page shows
     // what the almanac actually says, not something computed on the
     // spot.
+    //
+    // AND THE DAYS AHEAD
+    // ------------------
+    // "Today's tithi" is one question and "tomorrow's tithi" is
+    // another, and only the first of them has a row in the table
+    // unless the worker keeps the week ahead. So the worker does,
+    // and the page offers the days it has: today by default, and
+    // the days after it as a row of buttons.
+    //
+    // The day is in the URL (`?date=2026-10-23`), so a reader can
+    // send tomorrow's horoscope to somebody and they will see the
+    // same day rather than today's.
     const today = kathmanduToday();
+    const requested = (await searchParams)?.date;
+
+    // The days that really are stored. The list is the truth about
+    // what can be shown, so a day that is not in it is not offered.
+    const days = await getPanchangDays(today, 14);
+
+    // A day is only shown if it is one the worker stored. Asking for
+    // a day that is not there falls back to today rather than
+    // showing an empty page: a reader who typed a wrong date gets
+    // the almanac, not a blank.
+    const known = days.some((day) => day.date === requested);
+    const date = known ? (requested as string) : today;
+
     const [panchang, signs] = await Promise.all([
-      getPanchangFor(today),
-      getRashifalFor(today),
+      getPanchangFor(date),
+      getRashifalFor(date),
     ]);
 
     return (
@@ -114,7 +146,10 @@ export default async function CategoryPage({ params }: Props) {
           <PanchangPanel
             panchang={panchang}
             signs={signs}
-            weekday={new Date(`${kathmanduToday()}T00:00:00Z`).toLocaleDateString(
+            days={days}
+            selectedDate={date}
+            today={today}
+            weekday={new Date(`${date}T00:00:00Z`).toLocaleDateString(
               "en-GB",
               { weekday: "long", timeZone: "UTC" }
             )}

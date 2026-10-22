@@ -1,4 +1,6 @@
-import type { Panchang, RashifalSign } from "@/lib/daily-info";
+import Link from "next/link";
+
+import type { Panchang, PanchangDay, RashifalSign } from "@/lib/daily-info";
 
 /**
  * The day's almanac, in full.
@@ -14,26 +16,48 @@ import type { Panchang, RashifalSign } from "@/lib/daily-info";
  * current day, on a page the reader can check against their own
  * almanac.
  *
+ * THE DAYS AHEAD
+ * --------------
+ * A reader who asks for "tomorrow's tithi" is asking a real
+ * question, and only today has a row in the table unless the worker
+ * keeps the week ahead. So the worker does, and the row of buttons
+ * under the heading is the days that really are there.
+ *
+ * The buttons are links, not a script: the day is in the URL, so
+ * the reader can send tomorrow's horoscope to somebody and they
+ * will see the same day rather than today's.
+ *
  * NOTHING IN IT IS INVENTED
  * --------------------------
  * Every value here was fetched by the ingestion worker from the
  * source that publishes the almanac, and stored. If the worker has
  * not run, the panel says so rather than showing a blank where a
- * date should be — a panel with an empty field is honest, and a panel
- * with a computed-from-nothing date is a lie.
+ * date should be — a panel with an empty field is honest, and a
+ * panel with a computed-from-nothing date is a lie.
  */
 export function PanchangPanel({
   panchang,
   signs = [],
+  days = [],
+  selectedDate,
+  today,
   weekday,
   weekdayNe,
 }: {
   panchang: Panchang | null;
   /** The twelve horoscopes for the day. */
   signs?: RashifalSign[];
+  /** The days the almanac is stored for, oldest first. */
+  days?: PanchangDay[];
+  /** The day being shown, `YYYY-MM-DD`. */
+  selectedDate?: string;
+  /** Today in Kathmandu, `YYYY-MM-DD`. */
+  today?: string;
   weekday: string;
   weekdayNe: string;
 }) {
+  const isToday = !selectedDate || !today || selectedDate === today;
+
   if (!panchang) {
     return (
       <div className="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-900">
@@ -45,6 +69,7 @@ export function PanchangPanel({
           a day and stored, so this page fills itself the next time the
           worker runs.
         </p>
+        {days.length ? <DayPicker days={days} selectedDate={selectedDate} today={today} /> : null}
       </div>
     );
   }
@@ -54,7 +79,7 @@ export function PanchangPanel({
       {/* ---- The day ---- */}
       <section className="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-900">
         <p className="text-xs font-semibold uppercase tracking-widest text-gray-400 dark:text-gray-500">
-          आजको पञ्चाङ
+          {isToday ? "आजको पञ्चाङ" : "पञ्चाङ"}
         </p>
         <h2 className="mt-1 font-headline text-2xl font-bold text-gray-900 dark:text-gray-100">
           {panchang.bsLabel ?? panchang.date}
@@ -63,6 +88,11 @@ export function PanchangPanel({
           {panchang.weekdayNe ?? weekdayNe}
           {panchang.weekday ? ` · ${panchang.weekday}` : ""}
         </p>
+
+        {/* The days that can be picked. */}
+        {days.length ? (
+          <DayPicker days={days} selectedDate={selectedDate} today={today} />
+        ) : null}
 
         {/* The five limbs. */}
         <dl className="mt-5 grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3">
@@ -100,40 +130,45 @@ export function PanchangPanel({
       {signs.length ? (
         <section className="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-900">
           <h3 className="text-sm font-bold text-gray-900 dark:text-gray-100">
-            आजको राशिफल
+            {isToday ? "आजको राशिफल" : "राशिफल"}
           </h3>
           <p className="text-[11px] text-gray-400 dark:text-gray-500">
-            today&rsquo;s horoscope, for every sign
+            the horoscope, for every sign
           </p>
-          <ul className="mt-4 grid gap-4 sm:grid-cols-2">
+          <ul className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {signs.map((sign) => (
               <li
                 key={sign.sign}
                 className="rounded-lg border border-gray-200 p-4 dark:border-gray-700"
               >
-                <div className="flex items-baseline gap-2">
-                  {sign.emoji ? (
-                    <span aria-hidden="true" className="text-lg">
-                      {sign.emoji}
+                {/* The name, in the source's own arrangement: the
+                    symbol and the Nepali name on one line, the
+                    English name at the far end of it. */}
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-baseline gap-2">
+                    {sign.emoji ? (
+                      <span aria-hidden="true" className="text-lg">
+                        {sign.emoji}
+                      </span>
+                    ) : null}
+                    <span className="text-base font-bold text-red-700 dark:text-red-400">
+                      {sign.nameNe ?? sign.name ?? sign.slug ?? `Sign ${sign.sign}`}
                     </span>
-                  ) : null}
-                  <span className="text-sm font-bold text-gray-900 dark:text-gray-100">
-                    {sign.nameNe ?? sign.name ?? sign.slug ?? `Sign ${sign.sign}`}
-                  </span>
+                  </div>
                   {sign.name ? (
                     <span className="text-[11px] text-gray-400 dark:text-gray-500">
                       {sign.name}
                     </span>
                   ) : null}
-                  {sign.initials ? (
-                    <span className="text-[11px] text-gray-400 dark:text-gray-500">
-                      {sign.initials}
-                    </span>
-                  ) : null}
                 </div>
+                {sign.initials ? (
+                  <p className="mt-1 text-[11px] text-gray-400 dark:text-gray-500">
+                    {sign.initials}
+                  </p>
+                ) : null}
                 {sign.advice ? (
                   <p className="mt-2 text-xs leading-relaxed text-gray-600 dark:text-gray-300">
-                    {sign.advice}
+                    {withoutLuckySentence(sign.advice)}
                   </p>
                 ) : null}
                 {sign.luckyColour || sign.luckyNumber ? (
@@ -176,6 +211,86 @@ export function PanchangPanel({
       </div>
     </div>
   );
+}
+
+/**
+ * The row of days the reader can pick.
+ *
+ * The days are links rather than buttons, and the day is in the
+ * URL. A reader who sends somebody tomorrow's horoscope sends them
+ * the URL, and they see the same day.
+ *
+ * The row scrolls sideways rather than wrapping: a week of days
+ * wraps into two ragged lines on a phone, and a horizontal strip is
+ * what a calendar of days looks like on a phone anyway.
+ */
+function DayPicker({
+  days,
+  selectedDate,
+  today,
+}: {
+  days: PanchangDay[];
+  selectedDate?: string;
+  today?: string;
+}) {
+  return (
+    <nav
+      aria-label="दिन छान्नुहोस्"
+      className="-mx-1 mt-4 flex gap-2 overflow-x-auto pb-2"
+    >
+      {days.map((day) => {
+        const active = day.date === selectedDate;
+        const isToday = day.date === today;
+        const dayNumber = day.date.slice(-2);
+
+        return (
+          <Link
+            key={day.date}
+            href={`/category/rashifal?date=${day.date}`}
+            scroll={false}
+            aria-current={active ? "date" : undefined}
+            className={`shrink-0 rounded-lg border px-3 py-2 text-center transition-colors ${
+              active
+                ? "border-red-600 bg-red-600 text-white"
+                : "border-gray-200 bg-white text-gray-700 hover:border-gray-400 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:border-gray-500"
+            }`}
+          >
+            <span className="block text-xs font-semibold">
+              {isToday ? "आज" : dayNumber}
+            </span>
+            <span
+              className={`mt-0.5 block text-[10px] ${
+                active
+                  ? "text-red-50"
+                  : "text-gray-400 dark:text-gray-500"
+              }`}
+            >
+              {day.bsLabel ?? day.date}
+            </span>
+          </Link>
+        );
+      })}
+    </nav>
+  );
+}
+
+/**
+ * The advice without the lucky sentence at its end.
+ *
+ * The source publishes the advice and then, in the same paragraph, the
+ * lucky colour and the lucky number:
+ *
+ *   "...। आजको शुभ रंग गुलाबी हो भने शुभ अंक ७ रहेको छ।"
+ *
+ * The row keeps that sentence, because the words are the source's and
+ * the extraction of the colour and the number reads out of them. But
+ * the card shows the colour and the number as their own line, so the
+ * sentence has to come off the advice or the reader sees it twice.
+ *
+ * The stored text is untouched; this is a display decision.
+ */
+function withoutLuckySentence(advice: string): string {
+  return advice.replace(/\s*आजको\s*शुभ\s*रंग[\s\S]*$/u, "").trim();
 }
 
 function Limb({ label, value }: { label: string; value: string | null }) {

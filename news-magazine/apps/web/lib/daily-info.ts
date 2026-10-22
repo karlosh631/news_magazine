@@ -234,6 +234,94 @@ export async function getPanchangFor(
   return readCachedPanchang(date);
 }
 
+/**
+ * A day the almanac is stored for.
+ *
+ * The short form, for the row of day buttons a reader picks a day
+ * from: which day it is, what the source calls it, and what the
+ * almanac says about it.
+ */
+export type PanchangDay = {
+  /** The Gregorian day, `YYYY-MM-DD`. */
+  date: string;
+  /** The date as the source writes it, e.g. "कार्तिक ५, २०८३". */
+  bsLabel: string | null;
+  /** The weekday, in English and in Nepali. */
+  weekday: string | null;
+  weekdayNe: string | null;
+  /** The tithi, for the tooltip and for the summary line. */
+  tithi: string | null;
+};
+
+/**
+ * The days the almanac is stored for, from `from` onwards.
+ *
+ * WHY THE DAYS ARE LISTED RATHER THAN GUESSED
+ * -------------------------------------------
+ * A reader who asks for "tomorrow" has to be given a day that
+ * actually exists. The Bikram Sambat calendar's month lengths are
+ * not regular — 29 to 32 days, and a month that occasionally
+ * repeats — so the seventh day from today cannot be worked out by
+ * adding seven to anything. The worker walks the source's own
+ * day-to-day links and stores what it finds, and this list is the
+ * result: the days that really are there.
+ *
+ * The list is therefore the truth about what the page can show. A
+ * day that is not in it is a day the page must not offer.
+ */
+async function readPanchangDays(
+  from: string,
+  limit: number
+): Promise<PanchangDay[]> {
+  try {
+    const supabase = createPublicSupabaseClient();
+    const { data, error } = await supabase
+      .from("daily_panchang")
+      .select(
+        "panchang_date, bikram_sambat_label, weekday, weekday_np, tithi"
+      )
+      .gte("panchang_date", from)
+      .order("panchang_date", { ascending: true })
+      .limit(limit);
+
+    if (error || !data) return [];
+
+    return ((data ?? []) as unknown[]).map((raw) => {
+      const row = raw as Record<string, unknown>;
+      return {
+        date: asString(row.panchang_date) ?? "",
+        bsLabel: asString(row.bikram_sambat_label),
+        weekday: asString(row.weekday),
+        weekdayNe: asString(row.weekday_np),
+        tithi: asString(row.tithi),
+      };
+    }).filter((day) => day.date.length > 0);
+  } catch {
+    // The table is not there yet. Not an error.
+    return [];
+  }
+}
+
+const readCachedPanchangDays = unstable_cache(
+  async (from: string, limit: number) => readPanchangDays(from, limit),
+  ["daily-panchang-days"],
+  { revalidate: 3600 }
+);
+
+/**
+ * The days the almanac is stored for, from `from` onwards.
+ *
+ * Empty when the table is not there or the worker has not run. Both
+ * are ordinary states, and neither is a reason to fail a page.
+ */
+export async function getPanchangDays(
+  from: string,
+  limit = 14
+): Promise<PanchangDay[]> {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) return [];
+  return readCachedPanchangDays(from, limit);
+}
+
 export type RashifalSign = {
   /** The sign, 1 to 12: 1 is मेष (Aries), 12 is मीन (Pisces). */
   sign: number;

@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date, time
+from datetime import date, datetime, time, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -757,17 +757,66 @@ def test_the_row_always_writes_every_column():
 # =============================================================
 
 
+class FakeData:
+    """A supabase-py response, with the rows the fake kept."""
+
+    def __init__(self, data):
+        self.data = data
+
+
 class FakeQuery:
     def __init__(self, recorder, table):
         self._recorder = recorder
         self._table = table
+        self._filters: list[tuple[str, str, str]] = []
+        self._mode = "write"
 
     def upsert(self, row, on_conflict=None):
         self._recorder["rows"].append((self._table, row, on_conflict))
+        # A real upsert leaves the row in the table, and the pass
+        # reads the table back to decide whether it needs to fetch
+        # anything. So the fake keeps it too.
+        self._recorder.setdefault("stored", {}).setdefault(
+            self._table, []
+        ).append(row)
+        return self
+
+    def select(self, columns):
+        self._mode = "read"
+        return self
+
+    def gte(self, column, value):
+        self._filters.append(("gte", column, str(value)))
+        return self
+
+    def eq(self, column, value):
+        self._filters.append(("eq", column, str(value)))
+        return self
+
+    def maybe_single(self):
+        self._mode = "single"
         return self
 
     def execute(self):
-        return self._recorder
+        if self._mode == "write":
+            return self._recorder
+
+        rows = list(self._recorder.get("stored", {}).get(self._table, []))
+        for kind, column, value in self._filters:
+            if kind == "gte":
+                rows = [
+                    row for row in rows
+                    if str(row.get(column, "")) >= value
+                ]
+            else:
+                rows = [
+                    row for row in rows
+                    if str(row.get(column, "")) == value
+                ]
+
+        if self._mode == "single":
+            return FakeData(rows[0] if rows else None)
+        return FakeData(rows)
 
 
 class FakeDB:
@@ -775,7 +824,8 @@ class FakeDB:
 
     def __init__(self):
         self.rows: list[tuple] = []
-        self.recorder = {"rows": self.rows}
+        self.stored: dict[str, list[dict]] = {}
+        self.recorder = {"rows": self.rows, "stored": self.stored}
 
     def table(self, name):
         return FakeQuery(self.recorder, name)
@@ -871,8 +921,12 @@ def test_the_pass_fetches_the_day_page_for_the_date_it_resolved():
 def test_the_pass_does_not_refetch_a_day_it_has_already_stored():
     """
     The per-day page is a large one and the almanac does not change
-    within a day, so a job that runs hourly resolves today's date
-    from the small page every hour and downloads the big page once.
+    within a day, so the pass asks the DATABASE whether today's row
+    is there and fresh — and when it is, it downloads nothing at all.
+
+    This is what lets the five-minute cron run the pass. Without the
+    check, the cron would re-download the same large page three
+    hundred times a day, and the small page with it.
     """
     forget_last_stored_bs()
     client = RecordingClient(
@@ -892,14 +946,47 @@ def test_the_pass_does_not_refetch_a_day_it_has_already_stored():
     second = run(sync_panchang(db, client=client))
 
     assert second is None
-    # The small page is asked again - it is how the pass learns that
-    # the day has not rolled over - and the large one is not.
+    # Nothing is fetched at all: today's row is less than an hour old.
+    assert client.calls == [
+        "https://hamropatro.com/rashifal",
+        "https://hamropatro.com/date/2083-7-5",
+    ]
+    assert len(db.rows) == 1
+
+
+def test_the_pass_refetches_once_the_day_is_old_enough():
+    """
+    The almanac for a day does not change, but the source does
+    occasionally correct one, and a correction that is never picked
+    up is a correction that never reaches the reader. So an old row
+    is refreshed.
+    """
+    forget_last_stored_bs()
+    client = RecordingClient(
+        {
+            "https://hamropatro.com/rashifal": NORMAL_DAY_HTML,
+            "https://hamropatro.com/date/2083-7-5": NORMAL_DAY_HTML,
+        }
+    )
+    db = FakeDB()
+
+    run(sync_panchang(db, client=client))
+
+    # Age the stored row past the freshness window.
+    stale = (
+        datetime.now(timezone.utc) - timedelta(hours=2)
+    ).isoformat()
+    for row in db.stored.get("daily_panchang", []):
+        row["fetched_at"] = stale
+
+    run(sync_panchang(db, client=client))
+
     assert client.calls == [
         "https://hamropatro.com/rashifal",
         "https://hamropatro.com/date/2083-7-5",
         "https://hamropatro.com/rashifal",
+        "https://hamropatro.com/date/2083-7-5",
     ]
-    assert len(db.rows) == 1
 
 
 def test_the_pass_does_not_raise_when_the_source_is_down():

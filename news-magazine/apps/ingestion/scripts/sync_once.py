@@ -25,6 +25,15 @@ Running it here makes reels fetch on the same five-minute cron as
 news, so the category keeps moving even when the worker is down. The
 worker still runs its own pass, and the two are safe to overlap: the
 store upserts on (source_key, external_id).
+
+THE ALMANAC RUNS HERE TOO
+-------------------------
+For the same reason and one more time. The panchang and the twelve
+horoscopes were fetched only by the long-lived worker, so they
+depended on a service that sleeps — and the Rashifal page said
+"Today's almanac has not been fetched yet" on the days the worker
+was suspended. The pass is here now as well, and it asks the
+database first, so on most runs it costs one query and no requests.
 """
 
 from __future__ import annotations
@@ -149,7 +158,58 @@ async def main() -> int:
     # succeeded.
     reels_ok = await sync_reels_once()
 
+    # ---- The almanac ----
+    #
+    # The same correction, for the same reason, one more time.
+    #
+    # The panchang was fetched ONLY by the long-lived worker's
+    # scheduler. The GitHub Actions cron — the path that is
+    # guaranteed to run, because GitHub does not suspend free accounts
+    # the way Render suspends a free instance — never fetched it. So
+    # the almanac depended on a service that sleeps, and when it
+    # slept the Rashifal page said "Today's almanac has not been
+    # fetched yet" for no reason the reader could understand.
+    #
+    # The pass is now in the cron too. It asks the database whether
+    # today's row is there and fresh, so a five-minute cron costs one
+    # query and no requests on most runs.
+    panchang_ok = await sync_panchang_once()
+
     return 0 if ok > 0 else 3
+
+
+async def sync_panchang_once() -> bool:
+    """
+    One almanac pass — today's panchang, today's horoscopes and the
+    week ahead of both.
+
+    Returns True when the pass ran, False when it did not. It never
+    raises: the almanac is a missing line in a header, and a missing
+    line must not take the news sync down with it.
+    """
+    try:
+        from app.services.panchang import sync_panchang
+
+        if not get_settings().enable_panchang:
+            print("\nThe almanac is switched off (ENABLE_PANCHANG=false).\n")
+            print("PANCHANG_OK=1")
+            return True
+
+        print("\nSyncing the almanac...\n")
+        panchang = await sync_panchang(get_db())
+        if panchang is not None:
+            print(
+                f"  stored {panchang.bs_label} — {panchang.tithi}, "
+                f"{panchang.nakshatra}"
+            )
+        else:
+            print("  already fresh; nothing to do.")
+        print("PANCHANG_OK=1")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"::warning::Almanac pass failed: {exc}")
+        print("PANCHANG_OK=0")
+        return False
 
 
 async def sync_reels_once() -> bool:

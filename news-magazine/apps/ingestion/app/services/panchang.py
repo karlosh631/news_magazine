@@ -38,7 +38,8 @@ THE TWO PAGES, AND WHY THERE ARE TWO
 ------------------------------------
 1. `/rashifal` — the twelve-sign rashifal. It carries the site's
    "today" block, which is where the current Bikram Sambat date comes
-   from. It is a small page and it is fetched on every pass.
+   from, AND the twelve horoscopes themselves. It is a small page and
+   it is fetched on every pass.
 
 2. `/date/{bs-year}-{bs-month}-{bs-day}` — the per-day page, and the
    one that actually carries the panchang: tithi, nakshatra, yoga,
@@ -57,6 +58,15 @@ The second page is a big one, and it is fetched only when the day has
 actually rolled over. `_last_stored_bs` remembers the BS date this
 process last wrote, so a job that runs hourly fetches the small page
 every hour and the large page once a day.
+
+THE TWELVE HOROSCOPES RIDE ALONG
+--------------------------------
+The first request carries the twelve signs as well as the date, so
+the horoscopes cost NO extra request at all: they are parsed out of
+a page this module was fetching anyway. They are stored in their own
+table (`daily_rashifal`, twelve rows a day) and their write is
+guarded separately, so a failure in one cannot stop the other. See
+app/services/rashifal.py.
 
 `/date/` IS ALSO THE ARCHIVE
 ----------------------------
@@ -708,12 +718,25 @@ async def _get_html(client: httpx.AsyncClient, url: str) -> str:
     return response.text
 
 
+async def fetch_today_html(client: httpx.AsyncClient) -> str:
+    """
+    The rashifal page, which is also where the site says what day it
+    is.
+
+    This is the page the pass fetches on every run: it carries the
+    "today" block, so it is how the current Bikram Sambat date is
+    resolved. It is also the page the twelve horoscopes live on, so
+    the horoscopes cost no extra request - see app/services/rashifal.py.
+    """
+    return await _get_html(client, f"{PANCHANG_SOURCE}{RASHIFAL_PATH}")
+
+
 async def fetch_today(client: httpx.AsyncClient | None = None) -> NepaliDay:
     """The current Bikram Sambat date. Raises `PanchangError`."""
     owned = client is None
     client = client or _build_client()
     try:
-        html = await _get_html(client, f"{PANCHANG_SOURCE}{RASHIFAL_PATH}")
+        html = await fetch_today_html(client)
         return parse_today(html)
     except httpx.HTTPError as exc:
         raise PanchangError(f"could not fetch {RASHIFAL_PATH}: {exc}") from exc
@@ -746,6 +769,168 @@ async def fetch_panchang(
     finally:
         if owned:
             await client.aclose()
+
+
+# =============================================================
+# THE UPCOMING DAYS
+# =============================================================
+
+#: How many days AHEAD of today the almanac is kept.
+#:
+#: A Nepali reader asks two kinds of question about the panchang:
+#: "what is today" and "what is tomorrow" — tomorrow's tithi when
+#: picking a muhurat, tomorrow's sunrise when planning a trip, the
+#: horoscope for the day after a festival. Today alone answers none
+#: of the second kind.
+#:
+#: Seven is a week: it covers "the rest of this week" for a reader
+#: planning something, and it is a bounded number of requests on a
+#: source that is not ours.
+UPCOMING_DAYS = 7
+
+
+def next_day_href(html: str) -> str | None:
+    """
+    The path of the day AFTER this one, as the site spells it.
+
+    Every per-day page carries a `nextHref` in its JSON island: the
+    path of the following day. That link is the site's OWN conversion
+    of one day into the next, so following it is the only way to walk
+    forward across a month boundary without reimplementing the
+    Bikram Sambat calendar here — and the BS calendar's month lengths
+    are exactly the kind of thing that is wrong in a hand-rolled
+    table.
+
+    Returns None when the page carries no such link, which is the end
+    of the walk.
+    """
+    try:
+        bootstrap = extract_bootstrap(html)
+    except PanchangParseError:
+        return None
+
+    data = bootstrap.get("data")
+    href = data.get("nextHref") if isinstance(data, dict) else None
+
+    if not isinstance(href, str):
+        return None
+
+    href = href.strip()
+    if not href.startswith("/date/"):
+        return None
+
+    return href
+
+
+def _day_number(href: str) -> int | None:
+    """The day number in a `/date/{year}-{month}-{day}` path."""
+    match = re.match(r"^/date/(\d+)-(\d+)-(\d+)/?$", href or "")
+    return int(match.group(3)) if match else None
+
+
+# =============================================================
+# WHAT IS ALREADY STORED
+# =============================================================
+
+def nepal_today(now: datetime | None = None) -> date:
+    """
+    Today, in Nepal.
+
+    The almanac is a Nepali publication and its days are Nepali days.
+    The worker runs in UTC, so its own calendar day is wrong for five
+    hours and forty-five minutes of every day — and the almanac row
+    keyed on the wrong day is a row nobody will ever read.
+    """
+    moment = now or datetime.now(timezone.utc)
+    return (moment + NEPAL_UTC_OFFSET).date()
+
+
+async def stored_panchang_days(
+    db, since: date
+) -> list[tuple[date, datetime | None]]:
+    """
+    The days already stored, from `since` onwards, and when each was
+    last written.
+
+    Used to decide whether the week ahead still needs fetching, and
+    how recently the last attempt was made — so the walk is not
+    repeated on every pass, and a walk that keeps failing is retried
+    hourly rather than every five minutes.
+    """
+    try:
+        response = await db_call(
+            lambda: db.table("daily_panchang")
+            .select("panchang_date, fetched_at")
+            .gte("panchang_date", since.isoformat())
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001 - a missing row is not a crash
+        logger.warning("panchang: could not read the stored days: %s", exc)
+        return []
+
+    rows = response.data or []
+    found: list[tuple[date, datetime | None]] = []
+    for row in rows:
+        value = (row or {}).get("panchang_date")
+        if not value:
+            continue
+        try:
+            day = date.fromisoformat(str(value)[:10])
+        except ValueError:
+            continue
+
+        stamp = (row or {}).get("fetched_at")
+        fetched: datetime | None = None
+        if stamp:
+            try:
+                fetched = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+            except ValueError:
+                fetched = None
+
+        found.append((day, fetched))
+
+    return found
+
+
+async def panchang_fetched_at(db, day: date) -> datetime | None:
+    """When the row for `day` was last written, if it is there."""
+    try:
+        response = await db_call(
+            lambda: db.table("daily_panchang")
+            .select("fetched_at")
+            .eq("panchang_date", day.isoformat())
+            .maybe_single()
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("panchang: could not read the fetched_at stamp: %s", exc)
+        return None
+
+    row = response.data
+    if not row:
+        return None
+
+    value = (row or {}).get("fetched_at")
+    if not value:
+        return None
+
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+#: How old a stored almanac may be before the day is fetched again.
+#:
+#: The almanac for a day does not change — the tithi, the nakshatra
+#: and the sun's times are settled before the day begins. But the
+#: source does occasionally correct a day, and a correction that is
+#: never picked up is a correction that never reaches the reader.
+#:
+#: An hour is frequent enough to catch a correction and rare enough
+#: that the source sees one request an hour for the day it is on.
+PANCHANG_MAX_AGE_SECONDS = 3600
+
 
 
 # =============================================================
@@ -842,16 +1027,36 @@ async def store_panchang(db, panchang: Panchang) -> bool:
 #: then goes quiet again.
 _last_stored_bs: str | None = None
 
+#: The Bikram Sambat date whose twelve horoscopes this process last
+#: stored.
+#:
+#: A SEPARATE marker from `_last_stored_bs`, on purpose, and the
+#: reason is a missing table. The two are written by the same pass
+#: and normally move together, but they must not be ONE marker: if
+#: `daily_rashifal` has not been created yet, every write of the
+#: horoscopes fails, and a shared marker would then either be never
+#: set — which would make the pass re-download the large per-day page
+#: every hour for ever — or be set anyway, which would mean the
+#: horoscopes were never retried. Two markers, two independent
+#: failures, one of which cannot affect the other.
+_last_stored_signs_bs: str | None = None
+
 
 def last_stored_bs() -> str | None:
     """The BS date this process last stored, for tests and logs."""
     return _last_stored_bs
 
 
+def last_stored_signs_bs() -> str | None:
+    """The BS date whose horoscopes this process last stored."""
+    return _last_stored_signs_bs
+
+
 def forget_last_stored_bs() -> None:
     """Forget the last stored BS date, so the next pass refetches."""
-    global _last_stored_bs
+    global _last_stored_bs, _last_stored_signs_bs
     _last_stored_bs = None
+    _last_stored_signs_bs = None
 
 
 async def sync_panchang(
@@ -859,6 +1064,7 @@ async def sync_panchang(
     *,
     client: httpx.AsyncClient | None = None,
     force: bool = False,
+    ahead_days: int = UPCOMING_DAYS,
 ) -> Panchang | None:
     """
     One panchang pass: fetch today's almanac and store it.
@@ -868,38 +1074,217 @@ async def sync_panchang(
     panchang this pass", because a day without an almanac is a
     missing line in a header and not a reason to stop the worker.
 
-    The per-day page is only fetched when the day has rolled over.
-    The job can then run as often as the operator likes without
-    re-downloading a large page every time.
+    THE PER-DAY PAGE IS ONLY FETCHED WHEN IT IS WORTH FETCHING
+    ------------------------------------------------------------
+    The almanac for a day does not change once the day has begun, so
+    the pass first asks the DATABASE whether today's row is there
+    and fresh. If it is, and the week ahead is whole, the pass
+    costs one query and no requests at all.
+
+    That matters because this pass runs from two places: the
+    long-lived worker's hourly scheduler, and the five-minute cron
+    in CI. Without the check, the cron would re-download the same
+    large page every five minutes for ever, which is a hundred and
+    forty-four downloads a day of a page that says the same thing.
+
+    THE WEEK AHEAD
+    --------------
+    A reader asking "what is tomorrow's tithi" is asking a real
+    question, and today alone cannot answer it. So the pass also
+    walks the week ahead: each per-day page carries a link to the
+    day after it, and following that link is the site's OWN
+    conversion of one day into the next — the Bikram Sambat month
+    lengths are exactly the sort of thing that goes wrong in a
+    hand-rolled table, and this way the site does the arithmetic.
+
+    The walk is skipped when the week ahead is already whole, so it
+    runs once a day — when the day rolls over — and not on every
+    pass.
+
+    THE TWELVE HOROSCOPES GO OUT WITH IT
+    ------------------------------------
+    The rashifal page is the page this pass already fetches to learn
+    what day it is, and the twelve signs are in that same response.
+    So today's horoscopes cost NO extra request: they are parsed out
+    of a page that was being fetched anyway.
+
+    The days ahead carry their horoscopes too, on their own per-day
+    pages, so the week ahead comes with a week of horoscope.
+
+    They are stored separately, in `daily_rashifal` — twelve rows for
+    the day rather than one — and their write is guarded separately
+    too, so a failure in one cannot stop the other.
     """
-    global _last_stored_bs
+    global _last_stored_bs, _last_stored_signs_bs
+
+    # Imported here rather than at module scope: app.services.rashifal
+    # imports extract_bootstrap from this module, and a module-level
+    # import in the other direction would be a cycle.
+    from app.services.rashifal import (
+        RashifalParseError,
+        parse_rashifal,
+        parse_rashifal_day,
+        store_rashifal,
+    )
 
     owned = client is None
     client = client or _build_client()
 
     try:
-        try:
-            today = await fetch_today(client)
-        except PanchangError as exc:
-            logger.warning("panchang: could not resolve today's date: %s", exc)
-            return None
+        # ---- Is there anything to do? ----
+        #
+        # TWO GUARDS, INDEPENDENT OF EACH OTHER
+        # --------------------------------------
+        # Today's almanac and the week ahead are separate jobs, and
+        # they are guarded separately:
+        #
+        #   1. Today's almanac is refreshed when the stored row is
+        #      missing or older than an hour. The almanac for a day
+        #      does not change, so an hour-old row is still right; it
+        #      is only fetched again so that a correction the source
+        #      publishes is picked up.
+        #
+        #   2. The week ahead is walked when the horizon is short AND
+        #      the last walk was at least an hour ago. The "at least
+        #      an hour ago" is what stops a source that is down from
+        #      being asked eight times every five minutes for ever.
+        #
+        # The local Nepal day is the key today's row is stored under,
+        # so it is what the checks are made against. If the server's
+        # clock were wrong the worst case is a redundant fetch, which
+        # is harmless.
+        local_today = nepal_today()
+        now = datetime.now(timezone.utc)
 
-        if not force and today.bs_key == _last_stored_bs:
+        stored = await stored_panchang_days(db, local_today)
+        newest = None
+        for _, stamp in stored:
+            if stamp is not None and (newest is None or stamp > newest):
+                newest = stamp
+
+        horizon_short = len(stored) < ahead_days + 1
+        walk_due = horizon_short and (
+            newest is None
+            or (now - newest).total_seconds() >= PANCHANG_MAX_AGE_SECONDS
+        )
+
+        today_fetched_at = await panchang_fetched_at(db, local_today)
+        today_fresh = today_fetched_at is not None and (
+            (now - today_fetched_at).total_seconds() < PANCHANG_MAX_AGE_SECONDS
+        )
+
+        if not force and today_fresh and not walk_due:
             logger.debug(
-                "panchang: %s is already stored; nothing to do.", today.bs_key
+                "panchang: %s is fresh and the week ahead is whole; "
+                "nothing to do.",
+                local_today,
             )
             return None
 
-        try:
-            panchang = await fetch_panchang(today, client=client)
-        except PanchangError as exc:
-            logger.warning("panchang: could not fetch %s: %s", today.bs_key, exc)
-            return None
+        # ---- Today ----
+        #
+        # The rashifal page says what day it is, and carries today's
+        # twelve horoscopes. It is the small page, and it is only
+        # fetched when today's almanac is due.
+        today: NepaliDay | None = None
+        today_page: str | None = None
+        panchang: Panchang | None = None
 
-        if not await store_panchang(db, panchang):
-            return None
+        if force or not today_fresh:
+            try:
+                today_html = await fetch_today_html(client)
+            except httpx.HTTPError as exc:
+                logger.warning(
+                    "panchang: could not fetch %s: %s", RASHIFAL_PATH, exc
+                )
+                return None
 
-        _last_stored_bs = panchang.bs_key
+            try:
+                today = parse_today(today_html)
+            except PanchangParseError as exc:
+                logger.warning("panchang: could not resolve today's date: %s", exc)
+                return None
+
+            # The twelve horoscopes, out of the response we already
+            # have. A page that has lost its signs is not a reason to
+            # refuse the almanac, which is the other half of this pass.
+            signs = []
+            try:
+                signs = parse_rashifal(today_html)
+            except RashifalParseError as exc:
+                logger.warning("rashifal: could not read the horoscopes: %s", exc)
+
+            if signs and (force or today.bs_key != _last_stored_signs_bs):
+                if await store_rashifal(
+                    db, signs, today.ad_date, f"{PANCHANG_SOURCE}{RASHIFAL_PATH}"
+                ):
+                    _last_stored_signs_bs = today.bs_key
+
+            # Today's almanac. The per-day page is also the first step
+            # of the walk, so it is kept.
+            try:
+                today_page = await _get_html(
+                    client, f"{PANCHANG_SOURCE}{today.path}"
+                )
+                panchang = parse_panchang(
+                    today_page, source_url=f"{PANCHANG_SOURCE}{today.path}"
+                )
+            except httpx.HTTPError as exc:
+                logger.warning(
+                    "panchang: could not fetch %s: %s", today.bs_key, exc
+                )
+                return None
+            except PanchangParseError as exc:
+                logger.warning("panchang: could not read %s: %s", today.bs_key, exc)
+                return None
+
+            if not await store_panchang(db, panchang):
+                return None
+
+            _last_stored_bs = panchang.bs_key
+
+        # ---- The week ahead ----
+        #
+        # The walk needs today's page to start from, because today's
+        # page is what links to tomorrow's. If today's almanac was
+        # fresh and the page was not fetched, the walk fetches it.
+        if walk_due:
+            if today_page is None:
+                if today is None:
+                    # The day was never resolved, so the walk cannot
+                    # start. Resolve it and try again below.
+                    try:
+                        today_html = await fetch_today_html(client)
+                        today = parse_today(today_html)
+                    except (httpx.HTTPError, PanchangParseError) as exc:
+                        logger.warning(
+                            "panchang: could not resolve today for the week "
+                            "ahead: %s",
+                            exc,
+                        )
+                        return panchang
+
+                try:
+                    today_page = await _get_html(
+                        client, f"{PANCHANG_SOURCE}{today.path}"
+                    )
+                except httpx.HTTPError as exc:
+                    logger.warning(
+                        "panchang: could not fetch %s for the week ahead: %s",
+                        today.bs_key,
+                        exc,
+                    )
+                    return panchang
+
+            await _walk_the_days_ahead(
+                db,
+                client,
+                first_page=today_page,
+                ahead_days=ahead_days,
+                parse_signs=parse_rashifal_day,
+                store_signs=store_rashifal,
+            )
+
         return panchang
     except asyncio.CancelledError:
         raise
@@ -909,3 +1294,86 @@ async def sync_panchang(
     finally:
         if owned:
             await client.aclose()
+
+
+async def _walk_the_days_ahead(
+    db,
+    client: httpx.AsyncClient,
+    *,
+    first_page: str,
+    ahead_days: int,
+    parse_signs,
+    store_signs,
+) -> list[date]:
+    """
+    Fetch and store the days after today.
+
+    Each per-day page carries a link to the day after it, and the
+    link is followed until the week ahead is whole. Every day that
+    is fetched is stored: the almanac in `daily_panchang` and the
+    twelve horoscopes in `daily_rashifal`, because the per-day page
+    carries both.
+
+    Returns the days it stored. Never raises: a day that cannot be
+    fetched is a gap in the week ahead, not a reason to stop the
+    worker.
+    """
+    stored: list[date] = []
+
+    # Start at TOMORROW. Today's own almanac was already fetched and
+    # stored by the caller, and storing it a second time would be a
+    # wasted write and a second row in the log for the same day.
+    href = next_day_href(first_page)
+    if not href:
+        logger.debug("panchang: today has no next day; the week ahead is empty.")
+        return stored
+
+    for _ in range(ahead_days):
+        try:
+            html = await _get_html(client, f"{PANCHANG_SOURCE}{href}")
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "panchang: could not fetch %s for the week ahead: %s",
+                href,
+                exc,
+            )
+            break
+
+        try:
+            panchang = parse_panchang(
+                html, source_url=f"{PANCHANG_SOURCE}{href}"
+            )
+        except PanchangParseError as exc:
+            logger.warning("panchang: could not read %s: %s", href, exc)
+            break
+
+        if await store_panchang(db, panchang):
+            stored.append(panchang.ad_date)
+
+        # The horoscopes for that day, off the same page.
+        try:
+            signs = parse_signs(html)
+        except Exception as exc:  # noqa: BLE001 - one day without signs
+            logger.debug("rashifal: no horoscopes on %s: %s", href, exc)
+            signs = []
+
+        if signs:
+            await store_signs(db, signs, panchang.ad_date, f"{PANCHANG_SOURCE}{href}")
+
+        following = next_day_href(html)
+        if not following:
+            logger.debug("panchang: %s has no next day; the week ahead ends.", href)
+            break
+
+        href = following
+
+    if stored:
+        logger.info(
+            "panchang: stored %d day(s) of the week ahead (%s .. %s).",
+            len(stored),
+            stored[0].isoformat(),
+            stored[-1].isoformat(),
+        )
+
+    return stored
+

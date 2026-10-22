@@ -78,6 +78,25 @@ _DEFAULT_EXCLUDE = (
 _ANCHOR_RE = re.compile(r'<a\b[^>]*href\s*=\s*["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL)
 _TAG_RE = re.compile(r"<[^>]+>")
 
+#: Does this page name the story it is about?
+#:
+#: `<h1>` is where a headline usually lives, but it is not the only
+#: place. An outlet whose article pages carry the headline in an
+#: `<h2>`, or only in the Open Graph metadata, was rejected in its
+#: entirety - every candidate link raised "did not resolve to an
+#: article page", which reads exactly like a broken selector and is
+#: not one.
+#:
+#: All three are the same question asked three ways, and any one of
+#: them answering it is enough.
+_HAS_HEADLINE_RE = re.compile(
+    r"<h1\b"          # a heading
+    r"|<h2\b"         # a subheading, used as the headline
+    r"|<meta[^>]+property\s*=\s*[\"']og:title[\"']"   # Open Graph
+    r"|<meta[^>]+name\s*=\s*[\"']twitter:title[\"']",  # X / Twitter
+    re.IGNORECASE,
+)
+
 _HEADLINE_MIN_CHARS = 18
 _HEADLINE_MAX_CHARS = 300
 
@@ -275,14 +294,33 @@ class HtmlListingAdapter(SourceAdapter):
             return None
 
         image = None
-        if config.get("image", "img"):
-            img_tag = card.select_one(config["image"])
+        # The same resolution as the date selector below, and for the
+        # same reason: `config.get("image", "img")` returns "img" when
+        # the key is ABSENT, so the guard was always true and
+        # `config["image"]` raised `KeyError` on the first card of any
+        # listing whose selector_config had no `image` key.
+        image_selector = config.get("image", "img")
+        if image_selector:
+            img_tag = card.select_one(image_selector)
             if img_tag:
                 image = self._image_from_tag(img_tag, config.get("image_attr"), base_url)
 
         published = None
-        if config.get("date", "time"):
-            date_tag = card.select_one(config["date"])
+        # The selector is RESOLVED once and then used. This used to be
+        #
+        #     if config.get("date", "time"):
+        #         date_tag = card.select_one(config["date"])
+        #
+        # which reads like "the date selector is optional" and is not:
+        # `config.get("date", "time")` returns "time" when the key is
+        # ABSENT, so the guard is always true and the line below raises
+        # `KeyError: 'date'` on the first card of any listing whose
+        # selector_config has no `date` key. The `date` key is
+        # documented as optional, and a documented optional key that
+        # crashes the adapter is worse than a required one.
+        date_selector = config.get("date", "time")
+        if date_selector:
+            date_tag = card.select_one(date_selector)
             if date_tag:
                 published = date_tag.get("datetime") or _plain_text(date_tag.get_text(" "))
 
@@ -413,8 +451,16 @@ class HtmlListingAdapter(SourceAdapter):
                     text = response.text
                     if len(text) < 500:
                         return False
-                    # A page with no headings is not an article.
-                    if not re.search(r"<h1\b", text, re.IGNORECASE):
+                    # A page with no headline is not an article.
+                    #
+                    # `<h1>` is the usual place for one, but it is not
+                    # the only one, and insisting on it rejected a
+                    # whole outlet whose article pages carry the
+                    # headline in an `<h2>` and in the Open Graph
+                    # metadata instead. The check is "does this page
+                    # name the story", and there are three ways to
+                    # answer that.
+                    if not _HAS_HEADLINE_RE.search(text):
                         return False
                     return True
                 except Exception:

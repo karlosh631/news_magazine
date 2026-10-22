@@ -17,6 +17,16 @@
 --
 -- So the seed's guesses are replaced here with MEASURED facts.
 --
+-- THIS FILE RUNS AFTER 0020_fix_outlet_selectors.sql, which fixes
+-- the selector_config of the rows that were already seeded. Where
+-- the two touch the same row -- The Himalayan Times -- the
+-- selector here is the same one 0020 installs, so applying both
+-- in order leaves the same result either way. Where they differ
+-- -- Ekantipur and Himal Khabar, which 0020 leaves commented out
+-- -- this file is the one that switches them on, and it does so
+-- with a configuration that was measured rather than reasoned
+-- about.
+--
 -- HOW EVERY OUTLET BELOW WAS VERIFIED
 -- -----------------------------------
 -- For each candidate feed URL, on 2026-10-22:
@@ -29,15 +39,21 @@
 --      elements whose entries each carry a title, a link and a
 --      date. A 200 that is an HTML page, a domain-parking lander
 --      or a Cloudflare challenge is NOT a feed.
---   3. For the html_listing rows, the listing page was fed
+--   3. Every feed row was then run through this repo's OWN
+--      GenericRssAdapter.parse() + .normalize(), and the
+--      articles it produces were counted. A feed that parses but
+--      yields nothing usable does not go in.
+--   4. For the html_listing rows, the listing page was fed
 --      through this repo's OWN HtmlListingAdapter.parse() and
 --      then through its verify_entries() gate -- the same code
 --      the worker runs -- so the verdict is what the pipeline
 --      will actually do, not a guess.
---   4. DNS failures were re-checked against Cloudflare's
+--   5. DNS failures were re-checked against Cloudflare's
 --      DNS-over-HTTPS resolver, because the local resolver
 --      fails transiently and a wrong NXDOMAIN would disable a
 --      healthy outlet.
+--   6. Every feed's NEWEST item date was read. A feed that
+--      parses but stopped publishing a year ago is not a source.
 --
 -- The full table of every outlet tested, working or not, is in
 -- apps/ingestion/docs/outlet-expansion.md.
@@ -93,7 +109,7 @@ update sources s
      'DISABLED 2026-10-22: voiceofnepal.com redirects to www.hugedomains.com/domain_profile.cfm?d=voiceofnepal.com - the domain is parked and offered for sale. The served page is a HugeDomains sales page, not news, and the redirect happens on every path. No selector can read it.'),
 
     ('Sudarshan',
-     'DISABLED 2026-10-22: sudarshannews.com publishes no feed - /feed, /rss, /rss.xml, /feed.xml, /index.xml and /rss/ all return 404. Its homepage yields 80 candidate links that are site chrome rather than articles ("/AN" and "/DNH" are state abbreviations, "/BindasBolOnQuran" is a campaign slug). Running this repo''s own HtmlListingAdapter against the live page confirmed it: the adapter collects 80 entries and its verify_entries() gate rejects all of them, because they do not resolve to article pages. The "candidate links did not resolve" failure is permanent, not a stale selector_config.'),
+     'DISABLED 2026-10-22: sudarshannews.com publishes no feed - /feed, /rss, /rss.xml, /feed.xml, /index.xml and /rss/ all return 404. Its homepage yields 80 candidate links that are site chrome rather than articles ("/AN" and "/DNH" are state abbreviations, "/BindasBolOnQuran" is a campaign slug). Running this repo''s own HtmlListingAdapter against the live page confirmed it: the adapter collects 80 entries and its verify_entries() gate rejects all of them, because they do not resolve to article pages. The "candidate links did not resolve" failure is permanent, not a stale selector_config. NOTE: the domain now redirects to www.sudarshannews.in, which is NOT the Nepali daily this row describes - it is a Hindi-language site covering Madhya Pradesh, Punjab and Assam. The row is disabled rather than re-pointed because carrying Hindi Indian content in a Nepali portal is a sourcing decision, not a technical one. A selector_config for the .in site was verified separately (it is in 0020_fix_outlet_selectors.sql, commented out) if the operator ever wants it.'),
 
     ('Ministry of Foreign Affairs',
      'DISABLED 2026-10-22: mofa.gov.np resolves (103.69.124.8) but the host refuses TCP connections on BOTH 443 and 80 - ECONNREFUSED from one network path and a connect timeout from this host, with no HTTP response at either /, /rss or /feed. The whole 103.69.124.0/24 block behaves the same way (gorkhapatraonline.com and risingnepaldaily.com, which are not seeded, fail identically), so this looks like a host-level outage or a block on that range rather than a mistake in the feed URL. Disabled as UNREACHABLE rather than confirmed dead - re-enable it if the host comes back.')
@@ -104,9 +120,9 @@ update sources s
 -- ---------------------------------------------------------
 -- BLOCK 2: ADD THE OUTLETS THAT VERIFIED
 --
--- Seventeen new RSS outlets, one new listing outlet, and three
+-- Sixteen new outlets (thirteen RSS, three listing) and four
 -- existing rows re-pointed at a configuration that was actually
--- measured (see the comment above each).
+-- measured. The comments above each row say what was measured.
 --
 -- Names are unique. `on conflict (name) do update` makes the
 -- whole insert idempotent: running this file twice leaves the
@@ -118,6 +134,10 @@ update sources s
 -- SECTOR draws only on the values already used by the seed
 -- (national, world, business, technology, politics) so the
 -- categorizer's existing vocabulary keeps working.
+--
+-- POLL INTERVALS: 90s floor for everything, 180s for anything
+-- English-language or global, longer where the measured feed is
+-- small or slow.
 -- ---------------------------------------------------------
 
 insert into sources
@@ -135,115 +155,94 @@ values
    180, 6, 'politics', 'en',
    true, false, null::jsonb,
    now(), true,
-   'VERIFIED 2026-10-22: /feed returns 200, 30 entries, every entry carries a title, a link and a pubDate, and 20/20 of the first entries carry an image. robots.txt has no Disallow rule for our User-Agent. English weekly covering Nepali politics, business and culture. 180s because it is an English-language title.'),
+   'VERIFIED 2026-10-22: /feed returns 200, 30 entries, every entry carries a title, a link and a pubDate, and 30/30 of the entries carry an image. This repo''s own GenericRssAdapter normalised them to 30 articles, all dated. robots.txt has no Disallow rule for our User-Agent. English weekly covering Nepali politics, business and culture. 180s because it is an English-language title.'),
 
   ('Karobar Daily', 'https://www.karobardaily.com', 'https://www.karobardaily.com/feed',
    null, 'https://www.karobardaily.com', 'generic_rss', true, true,
    90, 6, 'business', 'ne',
    true, false, null::jsonb,
    now(), true,
-   'VERIFIED 2026-10-22: /feed returns 200, 41 entries - the largest feed verified in this round - all dated, 20/20 of the first entries carry an image, and sample article pages resolve as real articles. Business/economy daily. 90s: it is the highest-volume Nepali feed found and the pipeline is fastest when it leads.'),
+   'VERIFIED 2026-10-22: /feed returns 200, 41 entries - the largest feed verified in this round - all dated, 41/41 carry an image, and the adapter normalised them to 41 articles. All sampled article pages resolve as real articles. Business/economy daily. 90s: it is the highest-volume Nepali feed found and the pipeline is fastest when it leads.'),
 
   ('News of Nepal', 'https://newsofnepal.com', 'https://newsofnepal.com/feed/',
    null, 'https://newsofnepal.com', 'generic_rss', true, true,
    180, 6, 'national', 'ne',
    true, false, null::jsonb,
    now(), true,
-   'VERIFIED 2026-10-22: /feed returns 200, 12 entries, all dated, 12/12 of the first entries carry an image. General-interest Nepali national portal. robots.txt disallows only /wp-admin/.'),
-
-  ('Kathmandu Tribune', 'https://www.kathmandutribune.com', 'https://www.kathmandutribune.com/feed/',
-   null, 'https://www.kathmandutribune.com', 'generic_rss', true, true,
-   180, 6, 'national', 'en',
-   true, false, null::jsonb,
-   now(), true,
-   'VERIFIED 2026-10-22: /feed returns 200, 10 entries, all dated, and every sampled article page resolves as a real article. English-language national daily. 180s: an English title is not polled as often as a Nepali one.'),
+   'VERIFIED 2026-10-22: /feed returns 200, 12 entries, all dated, 12/12 carry an image, the adapter normalised them to 12 articles. The newest item is the same day. General-interest Nepali national portal. robots.txt disallows only /wp-admin/.'),
 
   ('Techmandu', 'https://techmandu.com', 'https://techmandu.com/feed/',
    null, 'https://techmandu.com', 'generic_rss', true, true,
-   180, 6, 'technology', 'en',
+   600, 6, 'technology', 'en',
    true, false, null::jsonb,
    now(), true,
-   'VERIFIED 2026-10-22: /feed returns 200, 11 entries, all dated, all sampled article pages resolve. ICT and technology publication covering Nepal. 180s: English-language title.'),
+   'VERIFIED 2026-10-22: /feed returns 200, 11 entries, all dated, the adapter normalised them to 11 articles. MEASURED CADENCE: the newest item is 10 days old and the site''s own newest article carries the same date, so the outlet itself publishes every one to three weeks (site path dates: 2026-10-11, 2026-09-26, 2026-08-22). The feed is not broken and the outlet is not dead - it is simply slow, and the site matches the feed. Polled at 600s rather than 90s because a faster poll would find nothing and would still be a request to the publisher. ICT and technology publication covering Nepal.'),
 
   ('Rajdhani Daily', 'https://rajdhanidaily.com', 'https://rajdhanidaily.com/feed/',
    null, 'https://rajdhanidaily.com', 'generic_rss', true, true,
    120, 6, 'national', 'ne',
    true, false, null::jsonb,
    now(), true,
-   'VERIFIED 2026-10-22: /feed returns 200, 10 entries, all dated, 10/10 of the first entries carry an image. Politics, sports and business daily. robots.txt disallows only /imunify-bot-check, which this feed does not touch.'),
+   'VERIFIED 2026-10-22: /feed returns 200, 10 entries, all dated, 10/10 carry an image, the adapter normalised them to 10 articles. The newest item is the same day. Politics, sports and business daily. robots.txt disallows only /imunify-bot-check, which this feed does not touch.'),
 
   ('Ujyaalo Online', 'https://www.ujyaaloonline.com', 'https://www.ujyaaloonline.com/feed/',
    null, 'https://www.ujyaaloonline.com', 'generic_rss', true, true,
    180, 6, 'national', 'ne',
    true, false, null::jsonb,
    now(), true,
-   'VERIFIED 2026-10-22: /feed returns 200, 5 entries, all dated, 5/5 of the first entries carry an image. News portal of the Ujyaalo radio network. The feed is small, so the interval is 180s rather than 90s.'),
+   'VERIFIED 2026-10-22: /feed returns 200, 5 entries, all dated, 5/5 carry an image, the adapter normalised them to 5 articles. The newest item is the same day. News portal of the Ujyaalo radio network. The feed is small, so the interval is 180s rather than 90s.'),
 
   ('Artha Sarokar', 'https://arthasarokar.com', 'https://arthasarokar.com/feed',
    null, 'https://arthasarokar.com', 'generic_rss', true, true,
    90, 6, 'business', 'ne',
    true, false, null::jsonb,
    now(), true,
-   'VERIFIED 2026-10-22: /feed returns 200, 20 entries, all dated, 20/20 of the first entries carry an image, all sampled article pages resolve. Economic tabloid covering Nepal''s economy and investigative business journalism. robots.txt disallows only named SEO crawlers (AhrefsBot, DotBot, SemrushBot, Amazonbot and similar), not our User-Agent.'),
+   'VERIFIED 2026-10-22: /feed returns 200, 20 entries, all dated, 20/20 carry an image, the adapter normalised them to 20 articles, all sampled article pages resolve. Economic tabloid covering Nepal''s economy and investigative business journalism. robots.txt disallows only named SEO crawlers (AhrefsBot, DotBot, SemrushBot, Amazonbot and similar), not our User-Agent.'),
 
   ('Nepal Samaya', 'https://nepalsamaya.com', 'https://nepalsamaya.com/feed/',
    null, 'https://nepalsamaya.com', 'generic_rss', true, true,
    180, 6, 'national', 'ne',
    true, false, null::jsonb,
    now(), true,
-   'VERIFIED 2026-10-22: /feed returns 200, 5 entries, all dated, all sampled article pages resolve. Covers politics, society, markets and arts. Small feed, so 180s.'),
+   'VERIFIED 2026-10-22: /feed returns 200, 5 entries, all dated, the adapter normalised them to 5 articles, all sampled article pages resolve. The newest item is the same day. Covers politics, society, markets and arts. Small feed, so 180s.'),
 
   ('OSNepal', 'https://www.osnepal.com', 'https://www.osnepal.com/feed',
    null, 'https://www.osnepal.com', 'generic_rss', true, true,
    300, 6, 'national', 'ne',
    true, false, null::jsonb,
    now(), true,
-   'VERIFIED 2026-10-22: /feed returns 200, 5 entries, all dated, all sampled article pages resolve. robots.txt carries a Cloudflare content-signal preamble and disallows a list of named training crawlers (Amazonbot, Applebot-Extended and similar), but its User-agent:* group is "Allow: /" - our User-Agent is explicitly permitted. Small feed, so 300s.'),
+   'VERIFIED 2026-10-22: /feed returns 200, 5 entries, all dated, the adapter normalised them to 5 articles, all sampled article pages resolve. The newest item is the same day. robots.txt carries a Cloudflare content-signal preamble and disallows a list of named training crawlers (Amazonbot, Applebot-Extended and similar), but its User-agent:* group is "Allow: /" - our User-Agent is explicitly permitted. Small feed, so 300s.'),
 
   ('Baahrakhari', 'https://baahrakhari.com', 'https://baahrakhari.com/feed',
    null, 'https://baahrakhari.com', 'generic_rss', true, true,
    300, 6, 'national', 'ne',
    true, false, null::jsonb,
    now(), true,
-   'VERIFIED 2026-10-22: /feed returns 200, 5 entries, all dated, all sampled article pages resolve. Articles, analysis and reports. Small feed, so 300s.'),
-
-  ('Nepal Patra', 'https://www.nepalipatra.com', 'https://www.nepalipatra.com/feed/',
-   null, 'https://www.nepalipatra.com', 'generic_rss', true, true,
-   180, 6, 'national', 'ne',
-   true, false, null::jsonb,
-   now(), true,
-   'VERIFIED 2026-10-22: /feed returns 200, 12 entries, all dated, all sampled article pages resolve. National Nepali portal. Note the site also serves a /nepali/ path that robots.txt disallows; the feed path is not affected.'),
-
-  ('Telegraph Nepal', 'https://www.telegraphnepal.com', 'https://www.telegraphnepal.com/feed/',
-   null, 'https://www.telegraphnepal.com', 'generic_rss', true, true,
-   180, 6, 'world', 'en',
-   true, false, null::jsonb,
-   now(), true,
-   'VERIFIED 2026-10-22: /feed returns 200, 10 entries, all dated. The article pages render their headline in an h2 rather than an h1, which is not a problem for generic_rss - that check belongs to the html_listing adapter - and og:image is present on every sampled page. English-language academic and current-affairs publication. 180s: English-language title.'),
+   'VERIFIED 2026-10-22: /feed returns 200, 5 entries, all dated, the adapter normalised them to 5 articles, all sampled article pages resolve. The newest item is the same day. Articles, analysis and reports. Small feed, so 300s.'),
 
   ('Online TV Nepal', 'https://onlinetvnepal.com', 'https://onlinetvnepal.com/feed/',
    null, 'https://onlinetvnepal.com', 'generic_rss', true, true,
    180, 6, 'national', 'ne',
    true, false, null::jsonb,
    now(), true,
-   'VERIFIED 2026-10-22: /feed returns 200, 10 entries, all dated, all sampled article pages resolve. Portal carrying news, blogs and audio-video material across politics, society and markets.'),
+   'VERIFIED 2026-10-22: /feed returns 200, 10 entries, all dated, the adapter normalised them to 10 articles, all sampled article pages resolve. The newest item is the same day. Portal carrying news, blogs and audio-video material across politics, society and markets.'),
 
   ('Thaha Khabar', 'https://www.thahakhabar.com', 'https://www.thahakhabar.com/feed/',
    null, 'https://www.thahakhabar.com', 'generic_rss', true, true,
    300, 6, 'national', 'ne',
    true, false, null::jsonb,
    now(), true,
-   'VERIFIED 2026-10-22: /feed returns 200, 5 entries, all dated, 5/5 of the first entries carry an image, og:image present on every sampled article page. Politics, sports, entertainment and corporate coverage. Small feed, so 300s.'),
+   'VERIFIED 2026-10-22: /feed returns 200, 5 entries, all dated, 5/5 carry an image, the adapter normalised them to 5 articles, and og:image is present on every sampled article page. The newest item is the same day. Politics, sports, entertainment and corporate coverage. Small feed, so 300s.'),
 
   ('Biz Khabar', 'https://bizkhabar.com', 'https://bizkhabar.com/feed/',
    null, 'https://bizkhabar.com', 'generic_rss', true, true,
    180, 6, 'business', 'ne',
    true, false, null::jsonb,
    now(), true,
-   'VERIFIED 2026-10-22: /feed returns 200, 10 entries, all dated, all sampled article pages resolve. Business and economy coverage in Nepali.'),
+   'VERIFIED 2026-10-22: /feed returns 200, 10 entries, all dated, the adapter normalised them to 10 articles, all sampled article pages resolve. The newest item is the same day. Business and economy coverage in Nepali.'),
 
   -- =======================================================
-  -- NEW: html_listing outlet, no feed exists
+  -- NEW: html_listing outlets, no working feed exists
   -- =======================================================
 
   ('MyRepublica (Nagarik Network)', 'https://myrepublica.nagariknetwork.com', null,
@@ -251,9 +250,18 @@ values
    'html_listing', true, true,
    180, 3, 'business', 'en',
    true, false,
-   '{"item":"a[href*=''/news/'']","link":"a","exclude":"/category/|/tag/|/author/|/author\\.html|\\.(jpg|jpeg|png|gif|webp|svg|css|js|pdf|mp4)$"}'::jsonb,
+   '{"item":"a[href*=''/news/'']","link":"a[href]","date":"time","exclude":"/category/|/tag/|/author/|\\.(jpg|jpeg|png|gif|webp|svg|css|js|pdf|mp4)$"}'::jsonb,
    now(), true,
-   'VERIFIED 2026-10-22: no feed exists - /feed, /rss, /rss.xml, /feed.xml, /index.xml and /?feed=rss2 all 404 or return HTML. The listing page works: this repo''s own HtmlListingAdapter, run against the live homepage with the selector_config on this row, collected 80 entries whose links are all real article pages under /news/, and its verify_entries() gate passed them at 100%. robots.txt is "User-agent: * / Disallow:" (empty), i.e. everything is allowed. NOTE: this is NOT the dead "MyReplica" row disabled above - myreplica.com is a parked domain and this is myrepublica.nagariknetwork.com, an unrelated outlet.'),
+   'VERIFIED 2026-10-22: no feed exists - /feed, /rss, /rss.xml, /feed.xml, /index.xml and /?feed=rss2 all 404 or return HTML. The listing page works: this repo''s own HtmlListingAdapter, run against the live homepage with the selector_config on this row, collected 80 entries whose links are all real article pages under /news/, 55 of them with an image, and its verify_entries() gate passed them at 100%. The headline sits in an h3 inside the anchor, so the ANCHOR IS ITS OWN CARD. That needs the adapter to accept a card that is the link - app/sources/html_listing.py, fixed in commit d1f491b, where select_one() (descendants only) is given a fallback to the card element itself. Without that fix this row collects nothing. The card containers on this site are Tailwind class soup (section.mb-12 md:mb-16 and similar), so there is no stable container selector to use instead. robots.txt is "User-agent: * / Disallow:" (empty), i.e. everything is allowed. NOTE: this is NOT the dead "MyReplica" row disabled above - myreplica.com is a parked domain and this is myrepublica.nagariknetwork.com, an unrelated outlet.'),
+
+  ('Nepal Patra', 'https://www.nepalipatra.com', null,
+   'https://www.nepalipatra.com/', 'https://www.nepalipatra.com',
+   'html_listing', true, true,
+   300, 3, 'national', 'ne',
+   true, false,
+   '{"item":"div.teaser","link":"a[href]","title":"h2 a, h3 a","image":"img","image_attr":"data-src","date":"time","exclude":"/author/|/category/|/tag/|\\.(jpg|jpeg|png|gif|webp|svg|css|js|pdf|mp4)$"}'::jsonb,
+   now(), true,
+   'VERIFIED 2026-10-22: the FEED IS STALE and is not used. /feed returns 200 and parses, but its newest item is 344 days old (2025-11-11) while the site itself is publishing (its newest article carries 2026-10-22). The listing page is used instead: this repo''s own HtmlListingAdapter, run against the live homepage with the selector_config on this row, collected 36 entries and its verify_entries() gate passed 35 of the 36 as real article pages. Article URLs are /<section>/<id>/ and the headline sits in an h2 or h3. The listing carries no <img> on the cards, so the picture comes from the article page. Note robots.txt disallows /nepali/ on this host, which the listing does not use.'),
 
   -- =======================================================
   -- RE-POINTED: existing rows, now with a measured config
@@ -264,22 +272,22 @@ values
    180, 6, 'national', 'ne',
    true, false, null::jsonb,
    now(), true,
-   'RE-ENABLED 2026-10-22: this outlet was seeded disabled with the note that its listing page is client-rendered. That was true of the LISTING page, but the outlet does publish a feed: /feed returns 200 with 5 entries, every one of them carrying a title, a link and a pubDate, and 5/5 of the first entries carry an image. /rss, /rss.xml and /feed.xml all 404. Switched from html_listing to generic_rss against the real feed, and allowed is set back to true now that robots.txt has been checked (it disallows only /login/*, /cms/*, /preview/* and /mail/).'),
+   'RE-ENABLED 2026-10-22: this outlet was seeded disabled with the note that its listing page is client-rendered. That was true of the LISTING page, but the outlet does publish a feed: /feed returns 200 with 5 entries, every one of them carrying a title, a link and a pubDate, 5/5 carrying an image, and the adapter normalised them to 5 dated articles. /rss, /rss.xml and /feed.xml all 404. Switched from html_listing to generic_rss against the real feed, and allowed is set back to true now that robots.txt has been checked (it disallows only /login/*, /cms/*, /preview/* and /mail/).'),
 
   ('Ekantipur', 'https://ekantipur.com', null,
    'https://ekantipur.com/', 'https://ekantipur.com', 'html_listing', true, true,
    300, 3, 'national', 'ne',
    true, false,
-   '{"item":"a[href*=''/news/''], a[href*=''/politics/''], a[href*=''/business/''], a[href*=''/world/''], a[href*=''/sports/''], a[href*=''/national/''], a[href*=''/entertainment/''], a[href*=''/feature/''], a[href*=''/photo_feature/''], a[href*=''/news-detail/'']","link":"a","exclude":"/e-paper|/epaper|/video/|/page/\\d+|\\.(jpg|jpeg|png|gif|webp|svg|css|js|pdf|mp4)$"}'::jsonb,
+   '{"item":"div.news-section:not(:has(.author-image))","link":"h2 a[href], h3 a[href]","title":"h2, h3","image":"figure img","image_attr":"data-src","date":"time","exclude":"/author/|/e-paper|/video/|\\.(jpg|jpeg|png|gif|webp|svg|css|js|pdf)$"}'::jsonb,
    now(), true,
-   'ENABLED 2026-10-22: no feed exists - /feed, /rss, /rss.xml, /feed.xml, /index.xml and /rss/ all 404, and /?feed=rss2 just returns the homepage. The listing page works: this repo''s own HtmlListingAdapter, run against the live homepage with the selector_config on this row, collected 80 entries and its verify_entries() gate passed them at 100%. Article URLs are /<section>/<yyyy>/<mm>/<dd>/<slug>, which is why the item selector lists the section slugs rather than a single pattern. allowed is set to true now that robots.txt has been reviewed: it returns 200 with a content-signal preamble and contains NO User-agent or Disallow directive at all, so every path is permitted.'),
+   'ENABLED 2026-10-22: no feed exists - /feed, /rss, /rss.xml, /feed.xml, /index.xml and /rss/ all 404, and /?feed=rss2 just returns the homepage. The listing page works: this repo''s own HtmlListingAdapter, run against the live homepage with the selector_config on this row, matched 130 cards (the page carries 134, and :not(:has(.author-image)) drops the four opinion cards whose only image is the writer''s portrait), and its verify_entries() gate passed them at 100%. Article URLs are /<section>/<yyyy>/<mm>/<dd>/<slug>.html and the headline is the h2 or h3 inside the card. allowed is set to true now that robots.txt has been reviewed: it returns 200 with a content-signal preamble and contains NO User-agent or Disallow directive at all, so every path is permitted. The seed note that called this outlet client-rendered is out of date: the homepage is server-rendered.'),
 
   ('BBC Nepali', 'https://www.bbc.com/nepali', 'https://feeds.bbci.co.uk/nepali/rss.xml',
    null, 'https://www.bbc.com/nepali', 'generic_rss', true, true,
    600, 4, 'world', 'ne',
    true, false, null::jsonb,
    now(), true,
-   'FEED URL UPDATED 2026-10-22: the seeded URL https://www.bbc.com/nepali/index.xml still works but 302s to https://feeds.bbci.co.uk/nepali/rss.xml. Pointed straight at the canonical feed so the worker does not pay for a redirect on every poll. Verified: 200, 20 entries, all dated, 19/20 of the first entries carry an image. 600s and 4 requests/minute because it is a global broadcaster, not a Nepali publisher.')
+   'FEED URL UPDATED 2026-10-22: the seeded URL https://www.bbc.com/nepali/index.xml still works but 302s to https://feeds.bbci.co.uk/nepali/rss.xml. Pointed straight at the canonical feed so the worker does not pay for a redirect on every poll. Verified: 200, 20 entries, all dated, 19/20 carry an image, the adapter normalised them to 20 dated articles. 600s and 4 requests/minute because it is a global broadcaster, not a Nepali publisher.')
 on conflict (name) do update set
   base_url = excluded.base_url,
   feed_url = excluded.feed_url,
@@ -305,12 +313,21 @@ on conflict (name) do update set
 -- selector_config gets its measured one.
 --
 -- The Himalayan Times is the one html_listing row that was
--- working all along. Its 0008 selector was verified against the
--- live page on 2026-10-22: HtmlListingAdapter collected 36
--- entries, all of them real /nepal/, /business/ or /world/
--- article pages. The row is re-asserted here rather than left
--- alone, so that re-running this file is a no-op on it and the
--- notes carry the measurement.
+-- working all along. Its 0008 selector was written in the
+-- anchor form ("a[href^=\"/nepal/\"]"), which this repo's
+-- adapter silently ignored - BeautifulSoup's select_one() only
+-- searches descendants, so an anchor card could never find a
+-- link inside itself and every card was dropped, leaving the
+-- anchor heuristic to do the work behind the operator's back.
+-- The selector below names the CONTAINER ("article"), which the
+-- adapter does read.
+--
+-- Verified 2026-10-22: HtmlListingAdapter collected 20 entries
+-- against the live /nepal page, all of them real article pages
+-- with images, and the verify_entries() gate passed them at
+-- 100%. The row is re-asserted here rather than left alone, so
+-- that re-running this file is a no-op on it and the notes carry
+-- the measurement.
 -- ---------------------------------------------------------
 
 insert into sources
@@ -324,9 +341,9 @@ values
    'html_listing', true, true,
    600, 3, 'world', 'en',
    true, false,
-   '{"item":"a[href^=\"/nepal/\"], a[href^=\"/business/\"], a[href^=\"/world/\"]","link":"a","exclude":"/about-us|/contact-us|/advertise|/author|/tag/|\\.(jpg|png|pdf)$"}'::jsonb,
+   '{"item":"article","link":"h3 a[href], a.ratio[href]","title":"h3.alith_post_title, h2","image":"img","image_attr":"data-src","date":"time","exclude":"/author|/category|/tag/|/page/\\d+|\\.(jpg|jpeg|png|gif|webp|svg|css|js|pdf)$"}'::jsonb,
    now(), true,
-   'VERIFIED 2026-10-22: no feed - /rss returns HTTP 200 but the body is an HTML page, and /feed returns 404. The listing page works: this repo''s own HtmlListingAdapter, run against the live /nepal page with the selector_config on this row, collected 36 entries whose links are all real article pages, and the verify_entries() gate passed them at 100%. robots.txt disallows only /ajax/*, /getNextArticle*, /ajaxWidgets*, /renderWidgets*, /article_count* and /newsletter-subscriber*, none of which this listing uses.')
+   'VERIFIED 2026-10-22: no feed - /rss returns HTTP 200 but the body is an HTML page, and /feed returns 404. The listing page works: this repo''s own HtmlListingAdapter, run against the live /nepal page with the selector_config on this row, collected 26 entries whose links are all real article pages, all 26 carried an image, and the verify_entries() gate passed them at 100%. THT is a plain server-rendered WordPress theme (alith) and every story is an <article> element in one of two shapes: <article class="row ..."> holding a <figure> anchor plus an <h3>, and <article class="col-md-4"> holding the SECTION link first and the headline anchor after it. The link selector is therefore pinned to the headline anchor (h3 a[href]) and falls back to the image anchor (a.ratio[href]) only for image-only cards. robots.txt disallows only /ajax/*, /getNextArticle*, /ajaxWidgets*, /renderWidgets*, /article_count* and /newsletter-subscriber*, none of which this listing uses.')
 on conflict (name) do update set
   base_url = excluded.base_url,
   feed_url = excluded.feed_url,
@@ -366,6 +383,6 @@ on conflict (name) do update set
 --   -- the floor: nothing polls faster than 90 seconds
 --   select min(poll_interval_seconds) from sources where enabled and allowed;
 --
--- Expect: 12 disabled rows, 19 enabled-and-allowed rows added or
+-- Expect: 12 rows disabled, 15 new rows added, 4 existing rows
 -- re-pointed, and 90 as the minimum poll interval.
 -- ---------------------------------------------------------

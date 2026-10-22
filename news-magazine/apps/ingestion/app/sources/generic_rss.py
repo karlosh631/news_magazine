@@ -33,6 +33,153 @@ from app.sources.base import NormalizedArticle, SourceAdapter
 
 
 # ---------------------------------------------------------------------------
+# WORDPRESS HOSTS
+#
+# A WordPress feed serves a fixed number of items: the site's
+# "posts_per_rss" option, which is 10 for most WordPress sites and 5
+# for several Nepali ones. The operator wants more than that.
+#
+# Only these hosts get a page-size parameter or a second page
+# appended. A feed that is not WordPress is fetched exactly as it was
+# before, because neither parameter means anything to a non-WordPress
+# server and both change a URL that does not need changing.
+#
+# Each host below was MEASURED, not guessed: the feed was fetched and
+# its <generator> tag read. A generator of
+# "https://wordpress.org/?v=X.Y.Z" is WordPress. Where the generator
+# is absent but the feed body carries "wp-content" (the asset path
+# every WordPress theme uses), it is WordPress too. Everything else on
+# the list of Nepali outlets that was checked -- ratopati.com,
+# setopati.com, nagariknews.com, nepalitimes.com, nepalsamaya.com,
+# osnepal.com, ujyaaloonline.com, himalkhabar.com, thahakhabar.com,
+# baahrakhari.com -- serves a feed with no WordPress marker at all.
+#
+# The operator can extend this list without a deploy by setting
+# RSS_WORDPRESS_HOSTS (comma-separated).
+# ---------------------------------------------------------------------------
+
+KNOWN_WORDPRESS_HOSTS = frozenset({
+    # Already seeded.
+    "www.onlinekhabar.com",
+    "english.onlinekhabar.com",
+    "nepalnews.com",
+    "english.nepalnews.com",
+    "nagariktimes.com",
+    "www.khabarzone.com",
+    "www.pradeshpost.com",
+    # Verified in the 2026-10-22 outlet round.
+    "www.karobardaily.com",
+    "newsofnepal.com",
+    "www.kathmandutribune.com",
+    "techmandu.com",
+    "rajdhanidaily.com",
+    "arthasarokar.com",
+    "www.nepalipatra.com",
+    "www.telegraphnepal.com",
+    "onlinetvnepal.com",
+    "bizkhabar.com",
+})
+
+
+#: Never ask for more pages than this, whatever the setting says.
+#: Every extra page is one extra request to a publisher.
+MAX_FEED_PAGES = 10
+
+
+def _wordpress_hosts(settings) -> set[str]:
+    """
+    The hosts whose feeds may be paged.
+
+    The built-in list, plus whatever the operator added through
+    RSS_WORDPRESS_HOSTS.
+    """
+    hosts = set(KNOWN_WORDPRESS_HOSTS)
+
+    extra = getattr(settings, "rss_wordpress_hosts", None)
+
+    if extra:
+        for host in str(extra).split(","):
+            host = host.strip().lower()
+            if host:
+                hosts.add(host)
+
+    return hosts
+
+
+def build_feed_urls(feed_url: str, settings) -> list[str]:
+    """
+    The URLs to fetch for one poll of one feed.
+
+    Returns a list of one URL in the ordinary case, and more than one
+    only when the host is a known WordPress install and the operator
+    has asked for more than a single page.
+
+    Two parameters can be added, and only to a WordPress host:
+
+        posts_per_page=<n>   the page size asked for
+        paged=<k>            the k-th page of the feed
+
+    MEASURED 2026-10-22 on the live Nepali feeds, which is why both
+    exist and why the second one is the one that matters:
+
+        ?posts_per_page=100   changes NOTHING. The item count and the
+                              first item are identical with and without
+                              it on every WordPress feed tested
+                              (10 of 10). WordPress pins the main
+                              feed's posts_per_page to the
+                              posts_per_rss option and ignores the
+                              query string. It is still sent, because
+                              it is free and it does help any site
+                              that does honour it.
+
+        ?paged=2, ?paged=3    DO work. They return the NEXT page of
+                              items -- older stories, the same count
+                              per page. This is the only mechanism
+                              measured that actually gets more items
+                              out of a WordPress feed.
+
+    A URL that already has a query string of its own is extended with
+    "&", not "?", so nothing is thrown away.
+    """
+    page_size = int(getattr(settings, "rss_page_size", 0) or 0)
+    param = (
+        getattr(settings, "rss_page_size_param", "posts_per_page")
+        or "posts_per_page"
+    ).strip()
+    pages = int(getattr(settings, "rss_feed_pages", 1) or 1)
+
+    pages = max(1, min(pages, MAX_FEED_PAGES))
+
+    # Nothing to add: fetch the feed exactly as it is configured.
+    if page_size <= 0 and pages <= 1:
+        return [feed_url]
+
+    host = (urlparse(feed_url).hostname or "").lower()
+
+    if host not in _wordpress_hosts(settings):
+        return [feed_url]
+
+    def extend(url: str, extra: str) -> str:
+        separator = "&" if "?" in url else "?"
+        return f"{url}{separator}{extra}"
+
+    base = feed_url
+
+    if page_size > 0 and param:
+        base = extend(base, f"{param}={page_size}")
+
+    urls = []
+
+    for page in range(1, pages + 1):
+        if page == 1:
+            urls.append(base)
+        else:
+            urls.append(extend(base, f"paged={page}"))
+
+    return urls
+
+
+# ---------------------------------------------------------------------------
 # TEXT HELPERS
 # ---------------------------------------------------------------------------
 
@@ -613,12 +760,27 @@ def _extract_video_url(
 
 class GenericRssAdapter(SourceAdapter):
 
+    def __init__(self, source_row: dict):
+        super().__init__(source_row)
+
+        # The raw documents fetched for this poll. There is normally
+        # exactly one; there is more than one only when the operator
+        # asked for extra pages of a WordPress feed, in which case
+        # parse() merges them.
+        self._documents: list[str] = []
+
     async def fetch(self) -> str:
         """
         Fetch the configured RSS/Atom feed.
 
         Only fetches the feed itself.
         Does not crawl article pages.
+
+        For a known WordPress host, the operator may have asked for
+        more than the first page of the feed. Each extra page is one
+        extra request, and the rate limiter is waited on between
+        them, so a paged fetch is still inside the rate this source
+        declared it tolerates.
         """
 
         feed_url = self.source.get(
@@ -641,8 +803,6 @@ class GenericRssAdapter(SourceAdapter):
                 f"{feed_url}."
             )
 
-        await self.rate_limiter.wait()
-
         headers = {
             "User-Agent": self.settings.default_user_agent,
             "Accept": (
@@ -659,26 +819,50 @@ class GenericRssAdapter(SourceAdapter):
             .default_request_timeout_seconds
         )
 
+        urls = build_feed_urls(
+            feed_url,
+            self.settings,
+        )
+
+        documents: list[str] = []
+
         async with httpx.AsyncClient(
             timeout=timeout,
             follow_redirects=True,
         ) as client:
 
-            response = await client.get(
-                feed_url,
-                headers=headers,
-            )
+            for url in urls:
+                # robots.txt is checked for EVERY url, not just the
+                # first one: a paged request is a different URL and a
+                # host is free to allow one and refuse the other.
+                if not await self.check_allowed(url):
+                    raise PermissionError(
+                        f"Source '{self.source.get('name', 'unknown')}' "
+                        f"is not allowed for {url}. Check sources.allowed "
+                        "and the outlet's robots.txt."
+                    )
 
-            response.raise_for_status()
+                await self.rate_limiter.wait()
 
-            # Make sure we actually received content.
-            if not response.text.strip():
-                raise ValueError(
-                    f"RSS feed returned an empty response: "
-                    f"{feed_url}"
+                response = await client.get(
+                    url,
+                    headers=headers,
                 )
 
-            return response.text
+                response.raise_for_status()
+
+                # Make sure we actually received content.
+                if not response.text.strip():
+                    raise ValueError(
+                        f"RSS feed returned an empty response: "
+                        f"{url}"
+                    )
+
+                documents.append(response.text)
+
+        self._documents = documents
+
+        return documents[0]
 
     def parse(
         self,
@@ -686,38 +870,62 @@ class GenericRssAdapter(SourceAdapter):
     ) -> list[dict]:
         """
         Parse RSS/Atom using feedparser.
+
+        Normally there is one document. When the operator asked for
+        more pages of a WordPress feed there is one per page, and
+        their entries are merged here, with a story that appears on
+        two pages kept only once.
         """
 
-        parsed = feedparser.parse(
-            raw
-        )
+        documents = getattr(self, "_documents", None) or [raw]
 
-        # feedparser can report malformed XML.
-        if getattr(
-            parsed,
-            "bozo",
-            False,
-        ):
-            # bozo_exception doesn't always mean the feed
-            # is unusable, so don't automatically reject it.
-            # We only reject when there are no usable entries.
-            if not parsed.entries:
-                error = getattr(
-                    parsed,
-                    "bozo_exception",
-                    None,
-                )
+        entries: list[dict] = []
+        seen: set[str] = set()
+        bozo_error = None
 
-                raise ValueError(
-                    f"Unable to parse RSS/Atom feed: "
-                    f"{error}"
-                )
+        for document in documents:
+            parsed = feedparser.parse(
+                document
+            )
 
-        entries = []
+            # feedparser can report malformed XML.
+            if getattr(
+                parsed,
+                "bozo",
+                False,
+            ):
+                # bozo_exception doesn't always mean the feed
+                # is unusable, so don't automatically reject it.
+                # We only reject when there are no usable entries.
+                if not parsed.entries:
+                    # One malformed page must not lose the pages
+                    # that did work, so the error is remembered and
+                    # raised only if nothing at all could be read.
+                    if bozo_error is None:
+                        bozo_error = getattr(
+                            parsed,
+                            "bozo_exception",
+                            None,
+                        )
+                    continue
 
-        for entry in parsed.entries:
-            entries.append(
-                dict(entry)
+            for entry in parsed.entries:
+                item = dict(entry)
+
+                # The same story can appear on two pages of a feed.
+                key = item.get("id") or item.get("link")
+
+                if key:
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                entries.append(item)
+
+        if not entries and bozo_error is not None:
+            raise ValueError(
+                f"Unable to parse RSS/Atom feed: "
+                f"{bozo_error}"
             )
 
         return entries

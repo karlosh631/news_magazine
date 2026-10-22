@@ -71,6 +71,43 @@ export function createPublicSupabaseClient() {
 }
 
 /**
+ * The SERVICE ROLE client, for the tables the anon key must not read.
+ *
+ * This bypasses Row Level Security entirely, so it is the most
+ * dangerous client in the app and the only one that must never reach
+ * the browser. It exists for exactly one thing today: the admin
+ * tables, which carry password hashes and therefore have no
+ * `using (true)` select policy - an admin's hash must not be
+ * readable by anyone who asks for it.
+ *
+ * It is only ever constructed inside a route handler or a server
+ * component. There is no `NEXT_PUBLIC_` prefix on the variable it
+ * reads, so Next.js will not inline it into the client bundle.
+ */
+export function createServiceRoleClient() {
+  const url = resolveUrl();
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!key) {
+    throw new Error(
+      "SUPABASE_SERVICE_ROLE_KEY is not set. The admin panel cannot read " +
+        "the admin tables without it.",
+    );
+  }
+
+  return createClient<Database>(url, key, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+    // No `cache: "no-store"` override here. The service role's reads
+    // are of credentials, and a credential that is cached is a
+    // credential that outlives the change that revoked it.
+  });
+}
+
+/**
  * Session-aware Supabase client.
  *
  * Reads the user's session from cookies and still enforces RLS with the

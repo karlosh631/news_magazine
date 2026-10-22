@@ -126,7 +126,27 @@ export default async function CategoryPage({ params }: Props) {
     const side = await getLatestArticles();
 
     return (
-      <main className="min-h-screen">
+      /*
+        The Reels page is a full-viewport experience, and it is the one
+        route on the site that must not have a page-level scrollbar.
+
+        `min-h-screen` was wrong here. The header is `h-16` and sticky,
+        and a sticky element still occupies space in the flow, so the
+        document was header (64px) + main (100vh) tall - 64px past the
+        viewport. The page therefore scrolled, and the scrollbar sat on
+        the right edge of the screen next to the drifting news column,
+        which is exactly where a reader expects nothing to be.
+
+        The height is now the viewport minus the header, and the content
+        inside is sized against that rather than against the viewport
+        again. `overflow-hidden` is belt and braces: it guarantees the
+        route cannot grow a page scrollbar even if a child is taller
+        than expected, and the middle column scrolls itself.
+
+        The other category routes are ordinary scrolling pages and are
+        untouched.
+      */
+      <main className="h-[calc(100dvh-4rem)] overflow-hidden">
         <ReelsFeed reels={reels.reels} sideArticles={side.articles} />
       </main>
     );

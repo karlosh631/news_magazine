@@ -1,7 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { Header } from "@/components/Header";
-import { Footer } from "@/components/Footer";
+import { RouteFooter } from "@/components/RouteFooter";
 import { getCategories } from "@/lib/news";
 import { themeScript } from "@/components/ThemeToggle";
 import { SITE_NAME, SITE_URL, SITE_LOGO } from "@/lib/site";
@@ -136,7 +136,7 @@ export default async function RootLayout({
           screen readers announce two main landmarks per page.
         */}
         <div className="flex-1">{children}</div>
-        <Footer />
+        <RouteFooter />
       </body>
     </html>
   );

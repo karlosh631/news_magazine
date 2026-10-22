@@ -140,19 +140,27 @@ function emptyFeed(
  * application-level read-then-insert check running per source sync with
  * no uniqueness constraint behind it. See lib/feed-dedup.ts.
  *
- * A third pass runs after them, `dropRepeatedImages`, for the failure
- * neither of the others can see: two entirely different stories rendered
- * under one photograph, because outlets reuse pictures. See
- * lib/feed-images.ts — including what that pass deliberately does not
- * catch.
+ * A third pass, `dropImageless`, removes stories with no artwork at all.
+ * That is the pass behind the "NO IMAGE AVAILABLE" tiles readers were
+ * seeing: the card's honest placeholder used to be the only handling
+ * such a row ever got, and on every surface that does not poll the
+ * archive the placeholder was simply permanent. Like the other two it is
+ * a filter, not a reordering, and like them it falls back to showing the
+ * rows when dropping them would empty the page.
  *
- * A fourth, `dropImageless`, removes stories with no artwork at all. That
- * is the pass behind the "NO IMAGE AVAILABLE" tiles readers were seeing:
- * the card's honest placeholder used to be the only handling such a row
- * ever got, and on every surface that does not poll the archive the
- * placeholder was simply permanent. Like the other three it is a filter,
- * not a reordering, and like them it falls back to showing the rows when
- * dropping them would empty the page.
+ * A fourth runs after it, `dropRepeatedImages`, for the failure none of
+ * the others can see: two entirely different stories rendered under one
+ * photograph, because outlets reuse pictures — and, worse, two outlets
+ * covering one event each re-uploading the same agency frame under their
+ * own filename, so the picture is the same and the URLs are not. That
+ * pass takes the SECOND picture away rather than the second story: the
+ * story is real and stays on the page, and the card shows the honest
+ * "no image" state. See lib/feed-images.ts.
+ *
+ * The ORDER matters. The imageless filter runs first, so a card whose
+ * picture was taken away by the duplicate pass is not then removed as
+ * imageless — which would lose the story and defeat the point of taking
+ * the picture away instead of the story.
  */
 export async function getLatestArticles(options?: {
   limit?: number;
@@ -477,7 +485,7 @@ async function languageSelect({
   // broken. It is a filter, not a reordering, so putting it here changes
   // which rows survive and nothing about their order.
   const articles = preferIllustrated(
-    dropImageless(dropRepeatedImages(dropDuplicateStories(newestFirst(rows)))),
+    dropRepeatedImages(dropImageless(dropDuplicateStories(newestFirst(rows)))),
     limit
   );
 
@@ -670,8 +678,8 @@ async function directSelect({
   // components/LiveArticleFeed.tsx could not have saved this — it is
   // populated by an onError that only fires after the browser has tried
   // the image, and only on surfaces that pass the callback at all.
-  const articles = dropImageless(
-    dropRepeatedImages(dropDuplicateStories(mapped))
+  const articles = dropRepeatedImages(
+    dropImageless(dropDuplicateStories(mapped))
   ).slice(0, limit);
 
   return {
@@ -844,7 +852,7 @@ export async function getRelatedArticles(
   // A blank tile is worse here than on the grid, not better: the rail is
   // four cards, so one placeholder is a quarter of it, and there is no
   // surrounding grid for the eye to read it against.
-  return dropImageless(dropRepeatedImages(dropDuplicateStories(related))).slice(
+  return dropRepeatedImages(dropImageless(dropDuplicateStories(related))).slice(
     0,
     limit
   );

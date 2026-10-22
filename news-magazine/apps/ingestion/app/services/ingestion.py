@@ -570,6 +570,28 @@ async def verify_media_images(
     media["image_url"] = live
     media["image_highres_url"] = live
 
+    # Was this picture taken from the story's OWN page, or from the feed?
+    #
+    # That distinction is the difference between an image that has been
+    # CHECKED against the story and one that has merely been found
+    # somewhere in the feed's markup. A feed image is a published
+    # photographer's or editor's choice about a slot in a feed, and it is
+    # regularly a promoted or related story's picture - an Aston Villa
+    # football photograph on a story about drugs seized from a motorcycle,
+    # measured on production.
+    #
+    # `image_verified_at` (migration 0016) is the record of that check, and
+    # it is what makes the repair pass able to find the rows that were
+    # never confirmed. A row whose image came from the feed is left
+    # unverified ON PURPOSE: it is a candidate for a later pass to
+    # re-resolve from the story's own page, and until that happens nobody
+    # has proved the picture belongs to the story.
+    page_candidates = set(page.image_candidates or []) if page else set()
+    page_candidates.update(
+        u for u in ((page.image_highres_url, page.image_url) if page else ()) if u
+    )
+    media["image_verified"] = bool(page_candidates) and live in page_candidates
+
     # gif_url is a separate column and the card walks it last. Keep it
     # only if it too survives the probe.
     gif = media.get("gif_url")
@@ -1537,6 +1559,34 @@ def _build_body(article: Any, excerpt: str | None) -> str | None:
     return "".join(f"<p>{block}</p>" for block in paragraphs) or None
 
 
+# Whether `articles.image_verified_at` exists.
+#
+# Migration 0016 added it and the repair passes need it. The store path
+# writes it too - a row whose picture was confirmed against its own page
+# is not a candidate for re-resolving, and one that was not confirmed is
+# - but a store path that NAMES a column the database does not have
+# fails every insert. That would take the whole news pipeline down over
+# an optional marker, which is exactly why the repair passes were
+# written to skip themselves instead.
+#
+# So the column is written optimistically, and a database that rejects
+# it is remembered. One failed statement, once, and then the column is
+# left out of every write for the life of the process.
+_IMAGE_VERIFIED_COLUMN: bool | None = None
+
+
+def _is_missing_column(exc: Exception, column: str) -> bool:
+    """True when an error says a column does not exist.
+
+    PostgREST's wording differs from Postgres's, so both are checked:
+    the REST layer says "column articles.image_verified_at does not
+    exist" and the SQL layer says 'column "image_verified_at" does not
+    exist'.
+    """
+    text = str(exc).lower()
+    return "does not exist" in text and column.lower() in text
+
+
 async def store_article(
     db,
     article: Any,
@@ -1569,6 +1619,26 @@ async def store_article(
     now = datetime.now(timezone.utc).isoformat()
     slug = make_slug(article.headline, source_row.get("sector"), content_hash)
 
+    # Declared here, not at the point of assignment below: the row is
+    # built before the fallback runs, and the row reads this flag.
+    global _IMAGE_VERIFIED_COLUMN
+
+    # The record of whether the picture was CHECKED against this story's
+    # own page, or merely taken from the feed.
+    #
+    # `image_verified_at` is null when the image was not confirmed against
+    # the story's own page, and that is the whole point of the column: a
+    # row is either known-good or a candidate for the repair pass. A
+    # timestamp is not written for an unverified image, because "we have
+    # not checked this yet" and "we checked this and it was fine" must
+    # not look the same to the repair pass. Migration 0016 added the
+    # column; this is what gives it meaning.
+    #
+    # The column is written optimistically. A database without migration
+    # 0016 has no such column, and the upsert below falls back to
+    # writing without it and remembers that, so the cost of the missing
+    # migration is one failed statement rather than a broken pipeline.
+
     row = {
         "slug": slug,
         "headline": article.headline,
@@ -1585,6 +1655,15 @@ async def store_article(
         "featured_image_url": media.get("image_url"),
         "featured_image_alt": media.get("image_alt"),
         "image_highres_url": media.get("image_highres_url"),
+        # The record of whether the picture was CHECKED against this
+        # story's own page, or merely taken from the feed. Null when it
+        # was not checked, which is what makes the row a candidate for
+        # the repair pass. See the note above.
+        **(
+            {"image_verified_at": now if media.get("image_verified") else None}
+            if _IMAGE_VERIFIED_COLUMN is not False
+            else {}
+        ),
         "video_url": media.get("video_url"),
         "video_embed_url": media.get("video_embed_url"),
         "audio_url": media.get("audio_url"),
@@ -1617,6 +1696,31 @@ async def store_article(
             lambda: db.table("articles").upsert(row, on_conflict="slug").execute()
         )
     except Exception as exc:
+        # A database without migration 0016 has no `image_verified_at`,
+        # and an upsert that NAMES a missing column fails. That is not a
+        # reason to lose the story, so the row is written again without
+        # the marker and the fact is remembered, so the retry happens
+        # once for the life of the process rather than once per article.
+        if (
+            "image_verified_at" in row
+            and _is_missing_column(exc, "image_verified_at")
+        ):
+            _IMAGE_VERIFIED_COLUMN = False
+            logger.info(
+                "articles.image_verified_at is not present, so the store path "
+                "will not write it. Apply migration 0016 to enable it."
+            )
+            row.pop("image_verified_at", None)
+            try:
+                response = await db_call(
+                    lambda: db.table("articles").upsert(row, on_conflict="slug").execute()
+                )
+            except Exception as retry_exc:
+                logger.info(
+                    "articles upsert failed for %r: %s",
+                    article.headline[:80], retry_exc,
+                )
+                return None
         # articles_content_hash_idx is UNIQUE (0001) while we upsert on
         # `slug`. A story already stored under a different slug therefore
         # cannot be written here — and returning None for it is worse than
@@ -1628,7 +1732,7 @@ async def store_article(
         # representation case below recovers by slug, and let the link be
         # written so the story counts as a second sighting rather than a
         # rejection.
-        if _is_content_hash_conflict(exc):
+        elif _is_content_hash_conflict(exc):
             recovered = await _lookup_id_by_content_hash(db, content_hash)
             if recovered:
                 logger.info(
@@ -1637,15 +1741,25 @@ async def store_article(
                     article.headline[:80],
                 )
                 return recovered
+            # The row exists but could not be found by hash either.
+            # Report it rather than falling through to a read of
+            # `response`, which was never assigned on this path.
+            logger.info(
+                "articles upsert hit an existing content_hash for %r but the "
+                "row could not be found; the link was not written.",
+                article.headline[:80],
+            )
+            return None
 
         # Not a hash collision, or the row could not be found. Report it
         # rather than raising: the caller uses the return value to decide
         # whether it is safe to write the article_sources link.
-        logger.info(
-            "articles upsert failed for %r: %s",
-            article.headline[:80], exc,
-        )
-        return None
+        else:
+            logger.info(
+                "articles upsert failed for %r: %s",
+                article.headline[:80], exc,
+            )
+            return None
 
     article_id = _extract_id(response)
     if article_id:
@@ -1915,11 +2029,38 @@ async def run_source_sync(
                 feed_media = media_from_feed(article)
                 extracted: ExtractedMedia | None = None
 
-                needs_fetch = bool(
-                    (article.raw_metadata or {}).get("needs_article_fetch")
-                ) or not feed_media.get("image_url")
-
-                if enrich_media and article.source_article_url and (needs_fetch or not feed_media.get("image_url")):
+                # A STORY'S OWN PAGE IS THE AUTHORITY FOR ITS IMAGE.
+                #
+                # The feed's image is not the story's image. It is whatever
+                # the publisher put in the feed enclosure, and for an outlet
+                # that reuses a "featured" or promoted slot in the feed, that
+                # is a DIFFERENT story's photograph. Measured on production:
+                # the drug-seizure story on nepalnews.com
+                # (2026/10/22/armed-forces-seize-drugs-from-motorcycle) had
+                # stored .../wp-content/uploads/2026/10/aston-villa.webp - an
+                # Aston Villa FOOTBALL photograph - while the story's own
+                # og:image was .../2026/10/apf11.jpg, the armed police
+                # photograph that actually belongs to it.
+                #
+                # The old rule fetched the article page only when the feed
+                # had NO image at all, so for every RSS outlet the feed's
+                # picture won by default and the story's own page was never
+                # consulted. Only the html_listing adapter set
+                # `needs_article_fetch`, so this applied to the majority of
+                # the outlets. And because `dedup.check` matches a stored row
+                # and continues long before the media block, the wrong image
+                # was written once and never revisited.
+                #
+                # So the page is fetched for every NEW story. It costs one
+                # request per story that is not already stored - the poll
+                # only reaches this code for a story that passed the
+                # duplicate check - and the same request is where the
+                # alt text and the article's own word count come from, so it
+                # is not spent twice.
+                #
+                # `enrich_media` still governs it, so an operator who wants
+                # the old feed-only behaviour can turn it off.
+                if enrich_media and article.source_article_url:
                     extracted = await extract_from_article(
                         article.source_article_url,
                         media_http,

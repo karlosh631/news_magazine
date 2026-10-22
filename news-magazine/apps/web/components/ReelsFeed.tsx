@@ -78,11 +78,26 @@ function useLayoutVariant(): "mobile" | "desktop" {
   return variant;
 }
 
+/*
+  Heights are `h-full`, not `h-[100dvh]`.
+
+  The route makes the page exactly the viewport minus the header
+  (app/category/[slug]/page.tsx), so anything that sized itself against
+  the viewport again would be 64px too tall and would push a
+  page-level scrollbar onto the right edge of the screen. `h-full`
+  inherits the height the route already got right, and the middle
+  column's own scroller then fills it exactly.
+
+  `overflow-y-scroll` on the feed is deliberate and is NOT the scrollbar
+  the reader complained about: that one is inside the middle column and
+  is what makes the snap scroller look like a phone feed. The scrollbar
+  that was on the right edge of the screen was the PAGE's, and this is
+  what removes it.
+*/
 const FEED_SCROLL =
-  "h-[100dvh] lg:h-[calc(100dvh-2rem)] w-full snap-y snap-mandatory overflow-y-scroll overscroll-contain scroll-smooth bg-gray-950";
-const FEED_ITEM =
-  "h-[100dvh] lg:h-[calc(100dvh-2rem)] w-full shrink-0 snap-start scroll-smooth";
-const COLUMN_WINDOW = "h-[100dvh] lg:h-[calc(100dvh-2rem)] overflow-hidden";
+  "h-full min-h-0 w-full snap-y snap-mandatory overflow-y-scroll overscroll-contain scroll-smooth bg-gray-950";
+const FEED_ITEM = "h-full w-full shrink-0 snap-start scroll-smooth";
+const COLUMN_WINDOW = "h-full min-h-0 overflow-hidden";
 
 /**
  * One news column that drifts downwards forever.
@@ -553,12 +568,18 @@ export function ReelsFeed({
   );
 
   return (
-    <div className="relative">
+    /*
+      `h-full` because both layouts inside are `h-full`, and a
+      percentage height against an auto-height parent resolves to
+      auto. The route gives this the viewport minus the header, and
+      this passes it down unchanged.
+    */
+    <div className="relative h-full">
       {/* ================= MOBILE ================= */}
       {renderFeed("mobile")}
 
       {/* ================= DESKTOP ================= */}
-      <div className="hidden lg:grid lg:h-[100dvh] lg:grid-cols-[minmax(0,1fr)_minmax(0,420px)_minmax(0,1fr)] lg:items-start lg:gap-6 lg:px-6 lg:py-4">
+      <div className="hidden lg:grid lg:h-full lg:grid-cols-[minmax(0,1fr)_minmax(0,420px)_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)] lg:items-stretch lg:gap-6 lg:px-6 lg:py-4">
         <DriftingColumn
           articles={leftArticles}
           paused={driftPaused}
@@ -566,8 +587,13 @@ export function ReelsFeed({
           label="Latest news"
         />
 
-        {/* The focused element. Everything else is scaffolding. */}
-        <div className="mx-auto w-full max-w-[420px]">{renderFeed("desktop")}</div>
+        {/* The focused element. Everything else is scaffolding.
+
+            `h-full` is what lets the feed inside resolve against the
+            grid row rather than against the viewport. Without it the
+            middle column is auto-height and the snap scroller has
+            nothing to scroll within. */}
+        <div className="mx-auto h-full min-h-0 w-full max-w-[420px]">{renderFeed("desktop")}</div>
 
         <DriftingColumn
           articles={rightArticles}

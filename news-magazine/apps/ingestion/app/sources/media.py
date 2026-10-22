@@ -222,6 +222,44 @@ _IMAGE_FILE_RE = re.compile(
     r"\.(?:jpe?g|png|webp|gif|avif|bmp|svg)(?:$|[?#])", re.IGNORECASE
 )
 
+# A file inside a THEME's own asset directory is site furniture, never a
+# story's photograph.
+#
+# `https://onlinekhabar.com/wp-content/themes/onlinekhabar-2021/img/ok-khusi.png`
+# is OnlineKhabar's own "khusi" badge, and it was being served as the
+# og:image of two unrelated stories. A theme directory holds the site's
+# chrome — its logo, its badges, its sprites — and no publisher files a
+# news photograph there.
+#
+# The shape is `/themes/<theme>/<asset-dir>/`, which is WordPress's
+# convention and the only one in the wild where a real story image could
+# be mistaken for chrome.
+_THEME_ASSET_RE = re.compile(
+    r"/themes?/[^/]+/(?:img|images|assets|dist|static|fonts)/", re.IGNORECASE
+)
+
+# WordPress writes a duplicate upload as "name-Copy.jpg", and publishers
+# leave them behind when they re-upload a picture.
+#
+# `.../public/400-300/media/FBBF4C13...-1-Copy.jpg` was the artwork of
+# three unrelated OnlineKhabar stories. A copy of a copy is not the
+# original upload, and the original is the one the outlet intended.
+_DUPLICATE_COPY_RE = re.compile(
+    r"[-_](?:copy|副本|kopy|copia|copie)\.(?:jpe?g|png|webp|gif|avif)$",
+    re.IGNORECASE,
+)
+
+# A GIF in the IMAGE columns is nearly always a screenshot, an animated
+# badge or a sprite.
+#
+# `.../Clipboard_-_October_8_2024_4_59_PM.gif` is a photograph of a
+# clipboard, dated October 2024, and it was the artwork of two 2026
+# speeches. A publisher's own animated picture is a real thing, and it
+# has its own column — `gif_url`, taken from the feed and rendered
+# deliberately. So a GIF arriving as the story's photograph is furniture
+# that reached the wrong field.
+_GIF_ARTWORK_RE = re.compile(r"\.gif(?:$|[?#])", re.IGNORECASE)
+
 # Common image-URL size tokens, used to prefer the largest rendition.
 #
 # A token only counts when the URL attaches it to a SIZE. The earlier
@@ -375,8 +413,31 @@ def _clean_url(value: str | None, base_url: str) -> str | None:
     return value
 
 
+def _is_theme_asset(url: str) -> bool:
+    """A file from the site's own theme directory - chrome, not a story."""
+    return bool(_THEME_ASSET_RE.search(url))
+
+
+def _is_duplicate_copy(url: str) -> bool:
+    """A "name-Copy" duplicate of an upload, not the original."""
+    return bool(_DUPLICATE_COPY_RE.search(url.split("?")[0].split("#")[0]))
+
+
+def _is_gif_artifact(url: str) -> bool:
+    """A GIF in the artwork columns: a screenshot, a badge or a sprite."""
+    return bool(_GIF_ARTWORK_RE.search(url.split("?")[0].split("#")[0]))
+
+
 def _looks_like_junk_image(url: str) -> bool:
     if _JUNK_IMAGE_RE.search(url):
+        return True
+
+    # The three rules above are separate functions rather than more
+    # alternatives in one big regex, so that a rule can be reasoned
+    # about - and switched off - on its own without unravelling the
+    # others. Each of them exists because a specific wrong picture was
+    # measured on production.
+    if _is_theme_asset(url) or _is_duplicate_copy(url) or _is_gif_artifact(url):
         return True
 
     # No filename means no file. This is the one failure a rendition

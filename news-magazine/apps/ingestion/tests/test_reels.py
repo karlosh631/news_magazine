@@ -892,8 +892,9 @@ async def test_one_reels_pass_stores_commons_clips_with_no_api_keys(monkeypatch)
         "TestReels/1.0 (+https://example.test)"
     ), "the configured User-Agent must reach Commons"
 
-    assert len(db.upsert_rows) == 1, db.calls
-    row = db.upsert_rows[0]
+    reels_rows = [r for r in db.upsert_rows if r.get("title")]
+    assert len(reels_rows) == 1, db.calls
+    row = reels_rows[0]
 
     assert row["source_key"] == "wikimedia"
     assert row["external_id"] == "12345"
@@ -940,7 +941,8 @@ async def test_a_pass_with_no_keys_at_all_survives_the_providers_that_need_them(
     await sched._sync_reels()
 
     assert [call["url"] for call in sent] == [PROVIDERS["wikimedia"].endpoint]
-    assert len(db.upsert_rows) == 1
+    reels_rows = [r for r in db.upsert_rows if r.get("title")]
+    assert len(reels_rows) == 1
 
 
 async def test_a_provider_error_does_not_lose_the_providers_that_worked(monkeypatch):
@@ -991,7 +993,8 @@ async def test_a_provider_error_does_not_lose_the_providers_that_worked(monkeypa
     ]
 
     # And the healthy provider's reels still landed.
-    assert [row["source_key"] for row in db.upsert_rows] == ["wikimedia"]
+    reels_rows = [r for r in db.upsert_rows if r.get("title")]
+    assert [row["source_key"] for row in reels_rows] == ["wikimedia"]
 
 
 # =============================================================

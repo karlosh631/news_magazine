@@ -96,3 +96,79 @@ export function imageKey(url: string | null | undefined): string | null {
   const base = withoutSizeSuffix(path);
   return kept.length > 0 ? `${base}?${kept.join("&")}` : base;
 }
+
+/**
+ * A looser key: the FILENAME with its digits and separators removed.
+ *
+ * WHY A SECOND KEY IS NEEDED
+ * --------------------------
+ * `imageKey` is exact, and exactness cannot see a syndicated photograph.
+ * Two outlets covering the same event each re-upload the same agency
+ * picture under their own filename, so the two cards show one photograph
+ * twice while the keys differ in every character. Measured on the live
+ * feed:
+ *
+ *   assets-cdn.kathmandupost.com/.../kbktmrss04u3a81321211020260848571000x0-1792569245.jpg
+ *   english.nepalnews.com/.../KB_-KTM_-RSS_-04_-_U3A8132-1-768x512-1.jpeg
+ *
+ * Both are the same frame of the President receiving Dashain tika. With
+ * the digits and the separators gone the two filenames both reduce to
+ * "kbktmrssuab", which is the photograph's identity underneath the
+ * renaming.
+ *
+ * WHY DIGITS AND SEPARATORS, AND NOTHING ELSE
+ * -------------------------------------------
+ * The renaming an agency photo goes through keeps the letters and
+ * changes everything else: a counter, a date, a size, the separators
+ * that join them. So the letters are the part that survives, and they
+ * are what identifies the picture.
+ *
+ * The length floor matters. "image.jpg" and "photo.png" reduce to
+ * "image" and "photo", which would collapse every story that uses a
+ * generically named file into one. At 10 characters a key has to be
+ * specific enough to be a real photograph's name - measured against the
+ * live feed, ten letters produced ten clusters and thirteen rows, and
+ * every one of them was either a genuine duplicate or a publisher's
+ * own site-wide default image.
+ *
+ * WHAT THIS CANNOT DO
+ * -------------------
+ * It cannot tell two DIFFERENT photographs that happen to share a
+ * filename. When it guesses wrong the cost is one card showing no
+ * picture instead of a duplicate one - the story is still on the page,
+ * and the honest placeholder is better than the same frame twice.
+ */
+export function imageStemKey(url: string | null | undefined): string | null {
+  const trimmed = (url ?? "").trim();
+  if (!trimmed) return null;
+
+  const withoutFragment = trimmed.split("#")[0] ?? trimmed;
+  const path = withoutFragment.split("?")[0] ?? withoutFragment;
+  const fileName = path.replace(/^https?:\/\//i, "").split("/").pop() ?? "";
+
+  // The extension goes first, for the same reason the size token does:
+  // it is not part of the picture's name. One outlet saved the frame as
+  // ".jpg" and another as ".jpeg", and keeping the extension would make
+  // two copies of one photograph differ by three letters.
+  const name = fileName.replace(/\.[A-Za-z0-9]+$/, "");
+
+  // Letters only: digits and separators are the part that gets rewritten
+  // when one photo is published by two outlets.
+  //
+  // The size token goes next, and that order matters too. A rendition
+  // marker is digits, an "x", and more digits - "768x512", and the
+  // "x0" a news CMS leaves on an unknown-size original. If those
+  // letters were kept, the two copies of one photograph would differ
+  // by a stray "x" and never match. Removing the whole token first
+  // leaves the letters that actually name the picture:
+  //
+  //   kbktmrss04u3a81321211020260848571000x0-1792569245  -> kbktmrssuab
+  //   KB_-KTM_-RSS_-04_-_U3A8132-1-768x512-1              -> kbktmrssuab
+  const withoutSizes = name.toLowerCase().replace(/\d+x\d*/g, "");
+  const stem = withoutSizes.replace(/[^a-z]/g, "");
+
+  return stem.length >= IMAGE_STEM_MIN_LENGTH ? stem : null;
+}
+
+/** The shortest filename stem that is specific enough to be a photograph. */
+export const IMAGE_STEM_MIN_LENGTH = 10;

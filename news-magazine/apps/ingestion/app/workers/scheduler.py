@@ -480,6 +480,80 @@ REEL_PROVIDERS: tuple[tuple[str, str | None], ...] = (
 # works like every other setting here.
 
 
+def _reels_health_row(
+    source_key: str,
+    *,
+    enabled: bool,
+    missing_env_var: str | None,
+    key_count: int,
+    min_poll_seconds: int = 0,
+    last_run_at: str | None = None,
+    last_count: int | None = None,
+    last_error: str | None = None,
+    last_status: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "source_key": source_key,
+        "enabled": enabled,
+        "missing_env_var": missing_env_var,
+        "key_count": key_count,
+        "min_poll_seconds": min_poll_seconds,
+        "last_run_at": last_run_at,
+        "last_count": last_count,
+        "last_error": last_error,
+        "last_status": last_status,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _record_reels_health(
+    source_key: str,
+    *,
+    enabled: bool,
+    missing_env_var: str | None,
+    key_count: int,
+    min_poll_seconds: int = 0,
+    last_run_at: str | None = None,
+    last_count: int | None = None,
+    last_error: str | None = None,
+    last_status: str | None = None,
+) -> None:
+    """
+    Write one provider's state where the admin dashboard can read it.
+
+    Never raises. A health row that cannot be written is a missing
+    insight, not a failed reels pass, and the pass it describes has
+    already happened. The reels tab must not stop working because the
+    dashboard is down.
+    """
+    row = _reels_health_row(
+        source_key,
+        enabled=enabled,
+        missing_env_var=missing_env_var,
+        key_count=key_count,
+        min_poll_seconds=min_poll_seconds,
+        last_run_at=last_run_at,
+        last_count=last_count,
+        last_error=last_error,
+        last_status=last_status,
+    )
+
+    try:
+        await asyncio.to_thread(
+            lambda: get_db()
+            .table("reels_source_health")
+            .upsert(row, on_conflict="source_key")
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001 - a missing insight is not a failure
+        logger.debug(
+            "Reels: could not record health for %s (%s). The table needs "
+            "migration 0018.",
+            source_key,
+            exc,
+        )
+
+
 def _reels_summary(health: Any) -> str:
     """
     One log line for one provider, from its SourceHealth.
@@ -613,10 +687,28 @@ async def _sync_reels_body() -> None:
                 logger.info(
                     "Reels: %s SKIPPED, no API key configured.", source_key
                 )
+                # But the OPERATOR has to be able to see it, and a log
+                # line at INFO is not a way to see it. This is the row
+                # the admin dashboard reads, and it names the variable
+                # to set. Without it the Reels tab looks broken for a
+                # reason nobody can find.
+                await _record_reels_health(
+                    source_key,
+                    enabled=False,
+                    missing_env_var=(keys_field or "").upper(),
+                    key_count=0,
+                )
                 continue
 
             pool.reset_cooldowns()
             pools.append((source_key, pool))
+
+            await _record_reels_health(
+                source_key,
+                enabled=True,
+                missing_env_var=None,
+                key_count=len(pool),
+            )
 
         # One client for the whole pass. A provider per client would mean
         # a new connection pool per source for no benefit — the requests
@@ -684,14 +776,40 @@ async def _sync_reels_body() -> None:
                     )
                     health = results[0]
                     _reels_last_run[source_key] = time.monotonic()
+
+                    # Record what this pass actually produced, so the
+                    # dashboard can say "this provider ran and returned
+                    # 30 clips" rather than only "this provider is on".
+                    await _record_reels_health(
+                        source_key,
+                        enabled=True,
+                        missing_env_var=None,
+                        key_count=len(pool),
+                        min_poll_seconds=int(
+                            getattr(source, "min_poll_seconds", 0) or 0
+                        ),
+                        last_run_at=datetime.now(timezone.utc).isoformat(),
+                        last_count=int(getattr(health, "stored", 0) or 0),
+                        last_error=(health.error or None),
+                        last_status="error" if health.error else "ok",
+                    )
                 except asyncio.CancelledError:
                     # Teardown, not a provider failure. See _sync_one: a
                     # swallowed cancellation breaks structured concurrency.
                     raise
-                except Exception:
+                except Exception as exc:
                     # One provider's adapter blowing up must not end the
                     # pass; the remaining providers are unaffected by it.
                     logger.exception("Reels: %s raised during this pass.", source_key)
+                    await _record_reels_health(
+                        source_key,
+                        enabled=True,
+                        missing_env_var=None,
+                        key_count=len(pool),
+                        last_run_at=datetime.now(timezone.utc).isoformat(),
+                        last_error=f"{type(exc).__name__}: {exc}"[:300],
+                        last_status="error",
+                    )
                     continue
 
                 if health.error:

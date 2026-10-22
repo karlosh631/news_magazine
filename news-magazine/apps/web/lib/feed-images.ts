@@ -54,7 +54,7 @@
  * reads as an annoyance; a repeat it wrongly drops would delete a story.
  */
 
-import { imageKey } from "@/lib/image-url";
+import { imageKey, imageStemKey } from "@/lib/image-url";
 
 /** The fields `dropRepeatedImages` reads. Everything else is carried through. */
 export interface ImageRow {
@@ -77,12 +77,27 @@ export interface ImageRow {
  * `gif_url` is included because NewsCard renders it in exactly the same
  * slot when a story has no photograph. Two articles sharing one site's
  * default gif is the same defect as two sharing a photo.
+ *
+ * TWO KINDS OF KEY
+ * ----------------
+ * `imageKey` is exact: same URL, same picture. It cannot see a
+ * syndicated photograph, because two outlets each re-upload the agency
+ * frame under their own filename and the URLs differ in every
+ * character.
+ *
+ * `imageStemKey` is the filename with its digits and separators gone,
+ * which is the part that survives the renaming and so identifies the
+ * picture underneath it. It is namespaced ("stem:") so it can never
+ * collide with an exact key, and it is deliberately looser — a false
+ * positive costs one card its picture, never a card its headline.
  */
 function rowKeys(row: ImageRow): string[] {
   const keys: string[] = [];
   for (const url of [row.image_highres_url, row.featured_image_url, row.gif_url]) {
-    const key = imageKey(url);
-    if (key && !keys.includes(key)) keys.push(key);
+    const exact = imageKey(url);
+    if (exact && !keys.includes(exact)) keys.push(exact);
+    const stem = imageStemKey(url);
+    if (stem && !keys.includes(`stem:${stem}`)) keys.push(`stem:${stem}`);
   }
   return keys;
 }
@@ -91,15 +106,27 @@ function rowKeys(row: ImageRow): string[] {
  * Keep one card per photograph.
  *
  * Greedy in feed order, the first row to claim a key keeps it and every
- * later row carrying that key goes. Linear rather than the pairwise scan
- * `dropDuplicateStories` needs, because image identity is exact: a Set
- * lookup settles it, there is no similarity threshold to tune, and a
- * feed is tens of rows.
+ * later row carrying that key has its PICTURE TAKEN AWAY. Linear rather
+ * than the pairwise scan `dropDuplicateStories` needs, because image
+ * identity is exact: a Set lookup settles it, there is no similarity
+ * threshold to tune, and a feed is tens of rows.
  *
- * A dropped row's keys are NOT added to the set. It is not rendered, so
- * an image that appears nowhere else on the page stays available to a
- * later story instead of being suppressed by a card the reader never
- * sees.
+ * WHY THE PHOTOGRAPH IS REMOVED AND NOT THE STORY
+ * ------------------------------------------------
+ * This used to DROP the row. That is a lie about what was reported
+ * today: the story is real, it was published by two outlets, and losing
+ * it from the page loses news because of a picture.
+ *
+ * The reader's brief is explicit: never show a card with a picture that
+ * belongs to a different story, and never show the same picture twice -
+ * and when there is no picture, show the story without one. So the
+ * second card now renders the honest "no image" state and its headline
+ * stays on the page. The story survives; only the wrong picture goes.
+ *
+ * A blanked row's keys are NOT added to the set. It is not rendered with
+ * a picture, so an image that appears nowhere else on the page stays
+ * available to a later story instead of being suppressed by a card the
+ * reader never sees.
  *
  * Empty in, empty out: if every row shares one photograph, this returns
  * a single card rather than an empty page. The feed the caller fetches
@@ -110,20 +137,39 @@ export function dropRepeatedImages<T extends ImageRow>(rows: T[]): T[] {
   if (rows.length < 2) return rows;
 
   const seen = new Set<string>();
-  const dropped = new Set<string>();
+  const blanked = new Set<string>();
 
   for (const row of rows) {
     const keys = rowKeys(row);
 
     if (keys.some((key) => seen.has(key))) {
-      dropped.add(row.id);
+      blanked.add(row.id);
       continue;
     }
 
     for (const key of keys) seen.add(key);
   }
 
-  return rows.filter((row) => !dropped.has(row.id));
+  if (!blanked.size) return rows;
+
+  return rows.map((row) => (blanked.has(row.id) ? blankArtwork(row) : row));
+}
+
+/**
+ * A copy of the row with its artwork removed.
+ *
+ * Every artwork column is cleared, not just the one that clashed: the
+ * card walks highres → featured → gif and falls through on a 404, so
+ * leaving any of them in place would let the same photograph back in
+ * through a different door.
+ */
+function blankArtwork<T extends ImageRow>(row: T): T {
+  return {
+    ...row,
+    featured_image_url: null,
+    image_highres_url: null,
+    gif_url: null,
+  };
 }
 
 /**

@@ -402,7 +402,11 @@ class OnDemandSearcher:
                             )
 
                     row = self._build_row(
-                        article, extracted, query, live_image=live_image
+                        article,
+                        extracted,
+                        query,
+                        live_image=live_image,
+                        image_validated=bool(settings.validate_images),
                     )
                     result = self.db.table("articles").upsert(
                         row, on_conflict="slug"
@@ -425,6 +429,7 @@ class OnDemandSearcher:
         extracted: Any,
         query: str,
         live_image: str | None = None,
+        image_validated: bool = False,
     ) -> dict:
         """
         Assemble the articles row for a resurrected story.
@@ -440,16 +445,36 @@ class OnDemandSearcher:
         excerpt = sanitize_excerpt(article.excerpt) or None
 
         image = None
-        if extracted is not None:
-            image = extracted.image_highres_url or extracted.image_url
-        if not image:
-            image = getattr(article, "thumbnail_url", None)
-
-        # Validation overrides the guess. Both image columns take the
-        # same proven URL: the card prefers image_highres_url, so the
-        # two disagreeing is how a dead highres beat a live featured
-        # image on the article page itself.
-        if live_image is not None:
+        if not image_validated:
+            # Validation did not run, so the only evidence available is
+            # the raw URL the page or the feed offered. Use it - it is
+            # better than nothing - but the row is left UNVERIFIED, so
+            # the repair pass will come back for it.
+            if extracted is not None:
+                image = extracted.image_highres_url or extracted.image_url
+            if not image:
+                image = getattr(article, "thumbnail_url", None)
+        else:
+            # Validation ran, and its answer is the truth.
+            #
+            # The old code had this backwards. It took the raw extracted
+            # URL as the base value and let `live_image` OVERRIDE it,
+            # which meant the fallback was used exactly when validation
+            # had REJECTED every candidate. The junk check had already
+            # said "this URL is an author portrait, do not store it" and
+            # the fallback stored it anyway. That is how a movie review
+            # ended up illustrated with the byline photograph of the
+            # person who wrote it.
+            #
+            # So when validation ran, its answer is the only answer: if
+            # it is None, no candidate was a usable image for this story
+            # and the row carries no image at all. That is the same rule
+            # `verify_media_images` applies on the poll path, and the
+            # web already has an honest "no image available" state.
+            #
+            # Both image columns take the same URL: the card prefers
+            # image_highres_url, so the two disagreeing is how a dead
+            # highres beat a live featured image on the article page.
             image = live_image
 
         if extracted is not None:
@@ -472,6 +497,14 @@ class OnDemandSearcher:
             "excerpt": excerpt,
             "featured_image_url": image,
             "image_highres_url": image,
+            # Only a picture that was checked against the story's own page
+            # counts as verified. See the note on the same column in
+            # app/services/ingestion.py.
+            "image_verified_at": (
+                datetime.now(timezone.utc).isoformat()
+                if image_validated and image
+                else None
+            ),
             "video_url": extracted.video_embed_url if extracted is not None else None,
             "video_embed_url": extracted.video_embed_url if extracted is not None else None,
             "audio_url": extracted.audio_url if extracted is not None else None,

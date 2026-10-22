@@ -7,3 +7,8 @@ news-magazine/apps/web/_scratch/
 news-magazine/apps/web/_skeptic_*.js
 news-magazine/apps/web/_cls_probe*.js
 news-magazine/apps/web/tsconfig.tsbuildinfo
+
+# A scratch file for writing a long commit message before committing
+# it. It is a working note, not a source file, and it does not belong
+# in the history.
+.commit-msg.txt

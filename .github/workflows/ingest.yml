@@ -229,3 +229,11 @@ jobs:
             echo "::warning::The reels pass failed this run. The news sync succeeded; /category/reels may be stale."
           fi
           grep -E "REELS_OK=" sync.log || true
+          # The almanac, for the same reason. A failed almanac pass
+          # leaves the Rashifal page saying the day has not been
+          # fetched yet, which is worth a warning and not worth a red
+          # run — the news is what the run is for.
+          if grep -q "PANCHANG_OK=0" sync.log; then
+            echo "::warning::The almanac pass failed this run. The news sync succeeded; /category/rashifal may be showing an old day."
+          fi
+          grep -E "PANCHANG_OK=" sync.log || true

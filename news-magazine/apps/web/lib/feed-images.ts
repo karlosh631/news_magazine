@@ -62,6 +62,15 @@ export interface ImageRow {
   featured_image_url?: string | null;
   image_highres_url?: string | null;
   gif_url?: string | null;
+  /**
+   * The story's own key points, lifted verbatim from the outlet's
+   * article by the summarizer.
+   *
+   * Read here because a card with no picture can still SHOW something
+   * — the points, in the picture slot — and a card that shows its own
+   * points is not the empty placeholder this pass exists to remove.
+   */
+  summary_points?: string[] | null;
 }
 
 /**
@@ -106,70 +115,58 @@ function rowKeys(row: ImageRow): string[] {
  * Keep one card per photograph.
  *
  * Greedy in feed order, the first row to claim a key keeps it and every
- * later row carrying that key has its PICTURE TAKEN AWAY. Linear rather
- * than the pairwise scan `dropDuplicateStories` needs, because image
- * identity is exact: a Set lookup settles it, there is no similarity
- * threshold to tune, and a feed is tens of rows.
+ * later row carrying that key is DROPPED. Linear rather than the
+ * pairwise scan `dropDuplicateStories` needs, because image identity is
+ * exact: a Set lookup settles it, there is no similarity threshold to
+ * tune, and a feed is tens of rows.
  *
- * WHY THE PHOTOGRAPH IS REMOVED AND NOT THE STORY
- * ------------------------------------------------
- * This used to DROP the row. That is a lie about what was reported
- * today: the story is real, it was published by two outlets, and losing
- * it from the page loses news because of a picture.
+ * WHY THE SECOND CARD IS DROPPED AND NOT MERELY BLANKED
+ * -----------------------------------------------------
+ * This used to take the PICTURE away and leave the story. The reader's
+ * brief has changed: when a duplicate is found, the second one is
+ * dropped rather than shown.
  *
- * The reader's brief is explicit: never show a card with a picture that
- * belongs to a different story, and never show the same picture twice -
- * and when there is no picture, show the story without one. So the
- * second card now renders the honest "no image" state and its headline
- * stays on the page. The story survives; only the wrong picture goes.
+ * The reason is that a blanked card is not a neutral thing. It is a
+ * card whose headline says one thing and whose picture slot says
+ * another, and on a page of illustrated cards the reader reads the
+ * second one as a rendering fault. Worse, the duplicate is almost
+ * never a different story: an outlet that publishes the same item
+ * twice, or two feeds carrying the same wire copy, give the same
+ * photograph AND the same headline, so the reader sees the same
+ * story twice with the title mangled by whatever the outlet's
+ * listing did to it. Showing it a second time is not information.
  *
- * A blanked row's keys are NOT added to the set. It is not rendered with
- * a picture, so an image that appears nowhere else on the page stays
- * available to a later story instead of being suppressed by a card the
- * reader never sees.
+ * So the second one goes, and its slot is filled by the next story
+ * down — which is why every caller over-fetches before calling this
+ * (DEDUP_HEADROOM in lib/news.ts).
  *
- * Empty in, empty out: if every row shares one photograph, this returns
- * a single card rather than an empty page. The feed the caller fetches
- * is over-provisioned for exactly that reason, and the reader still gets
- * one real story.
+ * The floor is not negotiable: if EVERY row would be dropped, one is
+ * kept, so a feed that is one photograph returns one card rather than
+ * an empty page. The reader still gets a real story, and the page
+ * still gets a story.
  */
 export function dropRepeatedImages<T extends ImageRow>(rows: T[]): T[] {
   if (rows.length < 2) return rows;
 
   const seen = new Set<string>();
-  const blanked = new Set<string>();
+  const kept: T[] = [];
 
   for (const row of rows) {
     const keys = rowKeys(row);
 
     if (keys.some((key) => seen.has(key))) {
-      blanked.add(row.id);
+      // The second card for one photograph. Dropped.
       continue;
     }
 
     for (const key of keys) seen.add(key);
+    kept.push(row);
   }
 
-  if (!blanked.size) return rows;
+  if (kept.length === rows.length) return rows;
 
-  return rows.map((row) => (blanked.has(row.id) ? blankArtwork(row) : row));
-}
-
-/**
- * A copy of the row with its artwork removed.
- *
- * Every artwork column is cleared, not just the one that clashed: the
- * card walks highres → featured → gif and falls through on a 404, so
- * leaving any of them in place would let the same photograph back in
- * through a different door.
- */
-function blankArtwork<T extends ImageRow>(row: T): T {
-  return {
-    ...row,
-    featured_image_url: null,
-    image_highres_url: null,
-    gif_url: null,
-  };
+  // Never let a page of one photograph become an empty page.
+  return kept.length > 0 ? kept : rows.slice(0, 1);
 }
 
 /**
@@ -231,6 +228,18 @@ export function hasRenderableArtwork(row: {
  * without a request, and the card removes the ones only a browser can
  * disprove.
  *
+ * A STORY WITH ITS OWN POINTS IS NOT IMAGELESS
+ * ---------------------------------------------
+ * The card no longer renders a grey panel where a missing picture
+ * would be. It renders the story's own key points — the sentences the
+ * summarizer lifted verbatim from the outlet's article — so a story
+ * with no photograph still shows something of itself, which is a
+ * better card than the next story down.
+ *
+ * So this pass removes only the rows with NOTHING to show: no picture,
+ * no video, and no points. A story with points stays, because it is
+ * not a placeholder.
+ *
  * Order is never changed, for the reason every other pass here gives:
  * "newest first" is the promise the page rests on. A dropped card's slot
  * is filled by the next story DOWN, so every caller over-fetches first
@@ -242,6 +251,29 @@ export function hasRenderableArtwork(row: {
  * worse one. Same guard LiveArticleFeed applies to its client-side pass.
  */
 export function dropImageless<T extends ImageRow>(rows: T[]): T[] {
-  const kept = rows.filter(hasRenderableArtwork);
+  const kept = rows.filter(hasSomethingToShow);
   return kept.length > 0 ? kept : rows;
+}
+
+/**
+ * Whether the card would show anything of this story.
+ *
+ * A picture, a video — or the story's own key points, which the card
+ * puts in the picture slot when there is no picture. The three are the
+ * only things that can go there, so this is the question the
+ * placeholder pass actually needs answered.
+ */
+export function hasSomethingToShow(row: {
+  featured_image_url?: string | null;
+  image_highres_url?: string | null;
+  gif_url?: string | null;
+  video_url?: string | null;
+  video_embed_url?: string | null;
+  summary_points?: string[] | null;
+}): boolean {
+  if (hasRenderableArtwork(row)) return true;
+
+  return (row.summary_points ?? []).some(
+    (point) => typeof point === "string" && point.trim().length > 0
+  );
 }

@@ -62,7 +62,7 @@ test.describe("the same photograph under two different names", () => {
     );
   });
 
-  test("the second card loses its picture and keeps its story", () => {
+  test("the second card is dropped, and the first keeps its picture", () => {
     const rows = [
       row("a", "https://assets-cdn.kathmandupost.com/uploads/source/news/2026/third-party/kbktmrss04u3a81321211020260848571000x0-1792569245.jpg"),
       row("b", "https://english.nepalnews.com/wp-content/uploads/2026/10/KB_-KTM_-RSS_-04_-_U3A8132-1-768x512-1.jpeg"),
@@ -70,24 +70,20 @@ test.describe("the same photograph under two different names", () => {
 
     const kept = dropRepeatedImages(rows);
 
-    // BOTH stories are still on the page. A duplicate picture is not a
-    // reason to lose a story.
-    expect(kept).toHaveLength(2);
-
-    // The first keeps its picture.
+    // ONE card for one photograph. The second is dropped rather than
+    // shown with a blanked picture: a duplicate is almost never a
+    // different story — it is the same wire copy, or the same outlet
+    // twice — and a card whose headline and picture slot disagree
+    // reads as a rendering fault.
+    expect(kept).toHaveLength(1);
+    expect(kept[0]!.id).toBe("a");
     expect(kept[0]!.featured_image_url).toContain("kbktmrss04u3a8132");
-
-    // The second shows the honest "no image" state.
-    expect(kept[1]!.featured_image_url).toBeNull();
-    expect(kept[1]!.image_highres_url).toBeNull();
-    expect(kept[1]!.gif_url).toBeNull();
-    expect(kept[1]!.headline).toBe("Story b");
   });
 
-  test("every artwork column is cleared, so the picture cannot come back", () => {
+  test("the picture cannot come back through another column", () => {
     // The card walks highres -> featured -> gif and falls through on a
-    // 404. Leaving the gif in place would let the same picture back in
-    // through a different door.
+    // 404. A gif that shares the picture's stem is the same picture,
+    // and the card that carries it goes with the rest.
     const rows = [
       row("a", "https://x.test/dashaintika-1024x624.jpg"),
       row("b", "https://y.test/dashaintika-1024x624-1.jpg", {
@@ -96,7 +92,20 @@ test.describe("the same photograph under two different names", () => {
     ];
 
     const kept = dropRepeatedImages(rows);
-    expect(kept[1]!.gif_url).toBeNull();
+    expect(kept.map((r) => r.id)).toEqual(["a"]);
+  });
+
+  test("a page of one photograph still shows one card", () => {
+    // The floor: dropping every row would leave the reader with an
+    // empty page, which is a worse answer than a repeated picture.
+    const rows = [
+      row("a", "https://x.test/one.jpg"),
+      row("b", "https://x.test/one.jpg"),
+      row("c", "https://x.test/one.jpg"),
+    ];
+
+    const kept = dropRepeatedImages(rows);
+    expect(kept).toHaveLength(1);
   });
 });
 
@@ -144,8 +153,8 @@ test.describe("a picture that is genuinely different stays", () => {
     ];
 
     const kept = dropRepeatedImages(rows);
-    expect(kept).toHaveLength(2);
-    expect(kept[1]!.featured_image_url).toBeNull();
+    expect(kept).toHaveLength(1);
+    expect(kept[0]!.id).toBe("a");
   });
 
   test("order is never changed", () => {
@@ -156,7 +165,12 @@ test.describe("a picture that is genuinely different stays", () => {
     ];
 
     const kept = dropRepeatedImages(rows);
-    expect(kept.map((r) => r.id)).toEqual(["a", "b", "c"]);
+
+    // "c" carries the same photograph as "a" under another host, so it
+    // goes. The survivors keep their own slots: the order is never
+    // changed, because "newest first" is the promise the page rests on
+    // and a card must never be promoted to win a picture.
+    expect(kept.map((r) => r.id)).toEqual(["a", "b"]);
   });
 
   test("a single row is returned untouched", () => {

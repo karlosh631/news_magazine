@@ -30,7 +30,13 @@ export type NewsCardArticle = {
   slug: string;
   headline: string;
   excerpt: string | null;
-  /** Four points, verbatim from the source article. Shown on the article page, not here. */
+  /**
+   * Four points, verbatim from the source article.
+   *
+   * Shown on the article page in full, and here when the story has no
+   * picture: a card with no photograph shows the story's own points
+   * where the photograph would be, rather than a grey box.
+   */
   summary_points: string[] | null;
   /**
    * The language the outlet published the story in.
@@ -187,21 +193,49 @@ export function NewsCard({
 
   // Every rendition 404'd and this story has no video to stand in for it.
   //
-  // The card copes on its own — it renders an honest "No image available"
-  // panel — but on a feed that has already pulled a deep window of newer
-  // articles, that panel is a worse answer than simply showing the next
-  // story instead. Telling the parent lets it swap this one out; a feed
-  // with nothing left to swap back to simply keeps the honest panel.
+  // The card copes on its own — it shows the story's own key points, or
+  // an honest "No image available" panel if there are none — but on a
+  // feed that has already pulled a deep window of newer articles, a
+  // story with NOTHING to show is a worse answer than simply showing
+  // the next story instead. Telling the parent lets it swap this one
+  // out; a feed with nothing left to swap back to simply keeps the
+  // honest panel.
   //
   // Only fires for a genuinely imageless story. A dead single rendition
   // falls through to the next candidate and never reaches here.
   const hasMedia = Boolean(embed || file);
   const noArtwork = !hasMedia && (imageFailed || candidates.length === 0);
 
+  /*
+    THE STORY'S OWN POINTS, IN THE PICTURE SLOT
+    -------------------------------------------
+    A card with no picture used to show a grey box that said "No image
+    available". That is honest and it is also useless: the reader has
+    scrolled to a headline and gets told nothing about the story.
+
+    The summarizer already lifted four sentences out of the outlet's
+    own article and stored them on the row, verbatim, in the outlet's
+    own words. Those sentences ARE the story, in miniature. So when
+    there is no picture, the card shows the first of them where the
+    picture would be.
+
+    This is the operator's instruction, and it is the right one: a
+    story with no picture is fine, a story with a picture that belongs
+    to something else is not, and a story with its own key points is
+    better than either.
+  */
+  const points = (article.summary_points ?? []).filter(
+    (point): point is string => typeof point === "string" && point.trim().length > 0
+  );
+
+  // Nothing at all to put in the slot: no video, no picture, and no
+  // points of its own. Only THIS is worth swapping out.
+  const nothingToShow = noArtwork && points.length === 0;
+
   useEffect(() => {
-    if (!onImageUnavailable || !noArtwork) return;
+    if (!onImageUnavailable || !nothingToShow) return;
     onImageUnavailable(article.id);
-  }, [noArtwork, onImageUnavailable, article.id]);
+  }, [nothingToShow, onImageUnavailable, article.id]);
 
   return (
     <div className="group relative flex flex-col overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm transition-all duration-200 hover:-translate-y-1 hover:border-gray-300 hover:shadow-lg">
@@ -279,6 +313,32 @@ export function NewsCard({
               referrerPolicy="no-referrer"
               className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
             />
+          ) : noArtwork && points.length ? (
+            /*
+              The story's own key points, where the picture would be.
+
+              Lifted verbatim from the outlet's article by the
+              summarizer, so this is the story's own words and not
+              something written for the card. A reader who cannot see
+              a picture still gets the story.
+
+              The label is there so the block is read as what it is —
+              the story's points — and not as a caption for a picture
+              that failed to load.
+            */
+            <div className="flex h-full w-full flex-col justify-center gap-1 bg-gradient-to-br from-gray-50 to-gray-100 px-4 py-3 dark:from-gray-900 dark:to-gray-800">
+              <span className="text-[9px] font-semibold uppercase tracking-widest text-gray-400 dark:text-gray-500">
+                Key points
+              </span>
+              {points.slice(0, 2).map((point, index) => (
+                <p
+                  key={index}
+                  className="line-clamp-2 text-[11px] leading-snug text-gray-600 dark:text-gray-300"
+                >
+                  {point}
+                </p>
+              ))}
+            </div>
           ) : (
             // No stock photo. A neutral panel says "this story has no
             // artwork", which is honest; a newspaper photo says "this

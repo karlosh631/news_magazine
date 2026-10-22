@@ -80,10 +80,18 @@ Apply these in order. Each is idempotent, so re-running is safe.
 |---|---|
 | `0017_admin_users.sql` | The `admin_users` and `admin_sessions` tables the admin panel signs in against, and the seeded operator account |
 | `0018_reels_source_health.sql` | One row per reels provider: enabled, which env var is missing, key count, and how the last run went |
-| `0019_articles_ingested_at_index.sql` | The index behind the feed's arrival ordering, and a backfill of arrival time for rows that predate the column |
+| `0019_articles_ingested_at_index.sql` | The index behind the arrival-time tiebreaker, and a backfill of arrival time for rows that predate the column |
+| `0020_fix_outlet_selectors.sql` | Working selectors for the outlets whose listing pages could be read, and the reasoning for the ones that cannot |
+| `0021_expanded_sources.sql` | The expanded outlet list: the dead outlets disabled and the verified new ones added |
+| `0022_daily_panchang.sql` | The daily almanac the header strip reads |
 
 Migrations 0001–0016 are the original schema and are described in
 `ARCHITECTURE.md`.
+
+**0017 is safe to run twice.** PostgreSQL has no `create policy if not
+exists`, so the policies are dropped and recreated — otherwise a second
+run dies on the policy and everything after it in the file never
+happens.
 
 ### 3. Ingestion service
 
@@ -171,6 +179,34 @@ ENABLE_TRANSLATION=true .venv/Scripts/python.exe scripts/translate_content.py
 ```
 
 Needs `GEMINI_API_KEY` and migration `0011_translation_columns.sql`.
+
+---
+
+## How much one cycle may fetch
+
+A cap that only exists in a config file is a lie told to the operator.
+There are four, and every one is enforced **at the point the work is
+done** — articles past a cap are never normalised, deduped, page-fetched
+for their media or stored, not merely counted.
+
+| Setting | Default | Bounds |
+|---|---|---|
+| `MAX_ARTICLES_PER_SOURCE` | 500 | One outlet's contribution in one poll |
+| `MAX_ARTICLES_PER_CYCLE` | 20,000 | The whole pipeline, in one cycle |
+| `CYCLE_WINDOW_SECONDS` | 900 | How long one cycle is — a rolling window |
+| `MAX_REELS_PER_PROVIDER` | 500 | One video provider's contribution in one pass |
+| `MAX_REELS_PER_CYCLE` | 5,000 | The whole reels pass |
+
+Raise one and the pipeline really does fetch more; lower one and it
+really does fetch less. When a cap truncates a cycle it is logged, it
+is written to `source_errors` as `fetch_capped` with the cap and the
+number dropped, and the sync log carries it — so the dashboard shows
+it rather than the operator wondering why a quiet outlet is quiet.
+
+The per-cycle cap is a rolling window rather than a fixed schedule,
+because the scheduler has no single pass over every outlet: each
+outlet is polled on its own interval, and the window is what bounds
+the pipeline's total appetite.
 
 ---
 
@@ -301,6 +337,72 @@ session cookie, and a per-address rate limit on failed attempts.
 exists for the operator who should not have to open a Supabase dashboard
 to use their own site.
 
+### The cards are live, and the filters are honest
+
+The twelve stat cards are the **health indicators** — all time, today,
+this week — and they are never narrowed by a filter. Narrowing them
+would turn "is the site working?" into "does this one source have
+stories?".
+
+The tables below them are the working view, and the filters apply to
+those. A date range that ends before it starts, or that starts in the
+future, is **ignored** rather than applied, and the panel says so: a
+range that matches nothing is a range that was never asked for, and
+reporting it as "0 articles" says something false about the site.
+
+The panel does not move under the operator's hands. The header's
+fifteen-second refresh skips `/admin`, because a dashboard that
+redraws its charts and shifts its rows every fifteen seconds cannot be
+read.
+
+**Changing the password.** The seeded account's hash is in migration
+0017, and a hash in a public repository is a published credential.
+Make a new one:
+
+```bash
+cd apps/web
+node scripts/hash-admin-password.mjs "the new password"
+```
+
+It prints the hash and the SQL to store it. It prints the SQL rather
+than running it, because it has no database access on purpose.
+
+### The outlets, and which of them are actually dead
+
+`apps/ingestion/docs/outlet-diagnosis.md` records what was found when
+every failing outlet was fetched and checked by hand, with robots.txt
+read first. Most of it is not fixable from the database, and saying so
+is the useful part:
+
+- **24 News** and **MyReplica** are parked domains on GoDaddy, and
+  **Voice of Nepal** is for sale at HugeDomains. There is nothing to
+  wait out.
+- Seven outlets (Annapurna Post, Arthikabhojan, Bhabishaanepal, Nepal
+  Kantha, Nepalbhas, Newahale, Prasuto Journal) do not resolve at all.
+- **Ministry of Foreign Affairs** does not answer on port 80 or 443.
+- **Himal Khabar** is a client-rendered shell with no article links in
+  the served HTML.
+- **Sudarshan**'s domain now hosts a Hindi-language Indian outlet, so
+  a fixed selector would fetch the wrong country.
+- **The Himalayan Times** was a genuine selector fault and is fixed.
+
+Migration `0020` carries the working selector changes; the rest is in
+it commented out, with the reasoning, because enabling and disabling an
+outlet is the operator's decision and not a code change.
+
+Two adapter bugs were found on the way, and both of them produced
+errors that looked exactly like a bad selector:
+
+- `date` and `image` are documented as **optional** keys in
+  `selector_config`, and both were fatal when absent — the guard read
+  `config.get("date", "time")`, which returns `"time"` when the key is
+  *missing*, so the next line raised `KeyError` on the first card.
+- An article page had to carry an `<h1>` to be believed to be an
+  article. An outlet whose pages carry the headline in an `<h2>` or
+  only in the Open Graph metadata was rejected in its entirety. The
+  check is "does this page name the story", and there are three ways
+  to answer that, so all three are accepted.
+
 ### What it needs
 
 Migration `0017_admin_users.sql`, applied:
@@ -348,41 +450,125 @@ exact name to set.
 
 Wikimedia Commons needs no key and always runs.
 
-**A ceiling worth knowing about.** Commons holds roughly 135 videos on
+**The reels were standing still, and it was the search.** The worker
+logged a healthy run, the provider said it had stored clips, and the page
+showed the same twelve it had shown for days. Commons was asked for the
+*newest* uploads first and the provider asked for exactly **one page** of
+them — so every pass asked for the same twenty-five newest files for
+every term, got the same twenty-five back, found them already stored, and
+stored nothing.
+
+The search now walks further down each term's results, and the walk
+**rotates**: the newest page is always taken, because that is where a
+new upload appears, and a band further down is taken as well, and the
+band moves with the hour. So a pass covers the whole catalogue over the
+course of a day without any one pass having to walk all of it.
+
+**The feed rotates too.** The page shows the whole catalogue rather than
+a page of it, and when the reader reaches the last clip the feed goes
+back to the first — a page that says "you have reached the end" is an
+invitation to leave.
+
+**A ceiling worth knowing about.** Commons holds a few hundred videos on
 Nepal subjects, and **none of them are H.264** — the Wikimedia derivative
 ladder is `*.vp9.webm`, `*.mpeg4.mov`, `*.theora.ogv`, so nothing in that
-catalogue plays on iOS. Ten thousand reels is not reachable from Commons;
-it needs Pexels, Pixabay or YouTube, which is what those three variables
-are for.
+catalogue plays on iOS. A hundred thousand reels is not reachable from
+Commons; it needs Pexels, Pixabay or YouTube, which is what those three
+variables are for.
+
+---
+
+## Clicking a headline on the reels page
+
+The two columns that drift down either side of the video feed are the
+one place on the site where a headline is the only way from the current
+page to a story. Clicking one used to navigate away, which threw the
+reader out of the video.
+
+It now opens **in the column it was clicked in** — not in a panel over
+the middle of the screen, which covered the video and sat between the
+two columns the story belongs to. And only that column stops moving: the
+other one keeps drifting and the reel keeps playing, so the page carries
+on around the story being read.
+
+The dialog is a real one. The focus moves into it, is trapped inside it,
+and returns to the card that opened it. Escape and the backdrop close
+it. The background is taken out of the accessibility tree while it is
+open, and the card stays a real link, so "open in a new tab" and "copy
+link" still work.
 
 ---
 
 ## What is on the page, and why
 
-### Newest first means newest FETCHED
+### Newest first means newest NEWS
 
-The feed is ordered by `ingested_at` — when **we** first saw the story —
-and not by `published_at`, when the outlet published it. A publisher can
-sit on a story for hours before filing it in their feed; when it does
-appear, it is new to this site and belongs at the top, even though its
-publication timestamp is older than stories already on the page.
+The feed is ordered by `published_at` — when the outlet **published** the
+story — with `ingested_at` (when we fetched it) as the tiebreaker.
 
-The reverse matters just as much. A story published two minutes ago that
-we fetched ten minutes ago has been on the homepage the whole time, so it
-must not leap back to the top every time the feed polls. Sorting by
-arrival means a story moves up **once**, when it arrives, and then stays
-put.
+This used to be the other way round: the order was by arrival, on the
+argument that a publisher who sits on a story for hours makes it new to
+this site when it finally appears. The argument is true, and it is also
+the wrong thing to show somebody who opened a news site. The top of the
+homepage was a story published in **June**, above the news of the day,
+with two more from three days earlier above that — because we had
+re-fetched them.
 
-The keyset cursor addresses `ingested_at` for the same reason: a cursor
-that addresses a different ordering than the query runs puts the page
-boundary in the wrong place, and the reader loses stories with no error
-and no empty page — just rows that were never shown. `lib/feed-cursor.ts`
-holds the order and the cursor together, because they are one decision.
+A feed whose first cards are four months old reads as broken, and the
+reader was right. So the newest news is on top, and within one
+publication moment the most recently fetched copy wins — which is where
+the better picture and the higher outlet count come from.
 
-Migration `0019_articles_ingested_at_index.sql` indexes that ordering
-and backfills the arrival time for rows that predate the column — a NULL
-arrival time sorts last and is unreachable through the keyset, so those
-stories would fall off the end of the archive entirely.
+The re-fetch was lying too. A story pulled back out of the database by a
+search — a "resurrected" one — was stamped with the *current* time as
+its arrival, so every re-fetched old story claimed to be brand new and
+jumped to the top. A resurrected story now keeps its publication time as
+its arrival time; the re-fetch is still recorded, in `resurrected_at`
+and `last_seen_at`.
+
+The keyset cursor addresses `published_at` for the same reason as the
+ordering: a cursor that addresses a different ordering than the query
+runs puts the page boundary in the wrong place, and the reader loses
+stories with no error and no empty page — just rows that were never
+shown. `lib/feed-cursor.ts` holds the order and the cursor together,
+because they are one decision.
+
+### Every page is endless
+
+The category pages used to render twenty-four cards and stop. They were
+the only pages on the site that ended, so a reader who wanted the rest
+of a category had nowhere to go, and the newest story in a busy
+category could sit below the fold with nothing to pull it up. They use
+the homepage's live feed now: newest first, growing as the reader
+scrolls, never leaving the category, and never showing a story twice.
+
+The loader starts a page 1200px ahead of the viewport rather than
+800px, and a page is thirty cards rather than twenty-four, so a reader
+scrolling fast through a category does not outrun the loader and watch
+it catch up.
+
+### The date, the almanac and the weather
+
+Under the header there is a strip: today's date in Gregorian and in
+Bikram Sambat, the tithi, sunrise and sunset, and the weather in
+Kathmandu. It is a strip and not a card, because there is no story in
+it.
+
+The Nepali date comes from the source that publishes the almanac, which
+the ingestion worker fetches once a day and stores. It is not computed
+in the browser: getting the Bikram Sambat calendar right needs the
+month lengths for every year, and a wrong table is worse than no date —
+a site that says "५ माघ २०८३" on the wrong day is not a site that
+says nothing. Until the worker has run, the strip shows the Gregorian
+date and the weather, which is the honest answer and not a guess.
+
+The weather is Open-Meteo, which needs no key. A weather API that needs
+a key is a weather API that stops working when the key expires, and a
+header that stops working is a broken site.
+
+The date is **Nepal's** date, not the server's and not the browser's.
+Kathmandu is UTC+05:45, so at 18:00 UTC it is already the next day
+there.
 
 ### A picture that belongs to the story
 
@@ -477,10 +663,10 @@ reels feed. Everything else has a working default — see
 
 ```bash
 cd apps/ingestion
-.venv/Scripts/python.exe -m pytest            # 394 tests
+.venv/Scripts/python.exe -m pytest            # 432 tests
 
 cd apps/web
-npx playwright test                            # 58 tests
+npx playwright test                            # 106 tests
 ```
 
 The ingestion suite covers URL normalisation (including the srcset and
@@ -492,7 +678,8 @@ verbatim sentence from the source article.
 The web suite is unit tests over pure functions — no browser, no server,
 no network, about a second in total. It covers the duplicate-suppression
 rules, the picture rules, the image-host allowlist, the feed's merge and
-its ordering, the keyset cursor, and the admin sign-in.
+its ordering, the keyset cursor, the admin sign-in, the reels drift and
+the story dialog, and the date and weather in the header.
 
 CI runs both plus a production build and an import check of every module
 on every push.

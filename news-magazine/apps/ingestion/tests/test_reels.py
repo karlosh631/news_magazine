@@ -45,7 +45,12 @@ import pytest
 from app.services.reels import keys as reels_keys
 from app.services.reels.keys import KeyPool, KeyPoolExhausted, build_pool
 from app.services.reels import providers as reels_providers
-from app.services.reels.providers import PROVIDERS, _BaseSource, build_source
+from app.services.reels.providers import (
+    MAX_SEARCH_TERMS,
+    PROVIDERS,
+    _BaseSource,
+    build_source,
+)
 from app.services.reels.store import (
     FEED_COLUMNS,
     REEL_CONFLICT,
@@ -2895,11 +2900,18 @@ def test_the_term_list_is_bounded():
     """
     A misconfigured list of 200 terms must not turn one poll into 200
     requests against a free API.
+
+    The bound was 12 when a pass asked for ONE page per term. It is 40
+    now, because a pass asks for several pages per term and the
+    coverage of the catalogue is what the term list decides - but it is
+    a bound all the same, and the request budget in the provider is what
+    caps the burst.
     """
     many = ",".join(f"term{i}" for i in range(200))
     terms = _commons(many)._search_terms()
 
-    assert len(terms) <= 12, len(terms)
+    assert len(terms) <= MAX_SEARCH_TERMS, len(terms)
+    assert len(terms) <= 40, len(terms)
 
 
 def test_duplicate_terms_are_collapsed():
@@ -3036,7 +3048,11 @@ def test_the_hint_is_still_bounded():
     """
     source = _commons("cat:" + "Videos of Rain, " * 400)
 
-    assert len(source.hint) <= 1200, len(source.hint)
+    # The bound has to clear the longest term list the provider can
+    # still act on - 40 terms at the 80-character per-category limit is
+    # under 3300 - and the slice must still drop whole terms rather
+    # than leave half of one.
+    assert len(source.hint) <= 3400, len(source.hint)
     assert not source.hint.endswith("Videos"), source.hint[-60:]
 
 

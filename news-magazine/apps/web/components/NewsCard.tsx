@@ -6,6 +6,7 @@ import { useEffect, useState, type MouseEvent } from "react";
 import { OptimizedImage } from "@/components/OptimizedImage";
 import { formatNewsDate, type SiteLanguage } from "@/lib/date";
 import { withoutSizeSuffix } from "@/lib/image-url";
+import { isPlainActivation } from "@/lib/story-dialog";
 
 /**
  * How wide a card's picture is, as the browser should be told.
@@ -31,6 +32,14 @@ export type NewsCardArticle = {
   excerpt: string | null;
   /** Four points, verbatim from the source article. Shown on the article page, not here. */
   summary_points: string[] | null;
+  /**
+   * The language the outlet published the story in.
+   *
+   * Optional, and deliberately so: this type is what the cards are
+   * given, and some callers build a card from a row that does not
+   * carry a language at all.
+   */
+  language?: "ne" | "en";
   featured_image_url: string | null;
   image_highres_url: string | null;
   video_url: string | null;
@@ -139,10 +148,22 @@ export function NewsCard({
   article,
   language = "en",
   onImageUnavailable,
+  onOpen,
 }: {
   article: NewsCardArticle;
   language?: SiteLanguage;
   onImageUnavailable?: (articleId: string) => void;
+  /**
+   * Open the story where the reader already is, instead of navigating
+   * to it.
+   *
+   * The drifting columns on the reels page use this: a headline there
+   * opens a dialog over the feed, so the reader does not lose their
+   * place in the video. The card stays a link underneath — a modified
+   * click still opens a new tab, the address can still be copied, and
+   * the middle mouse still does what the middle mouse does.
+   */
+  onOpen?: (article: NewsCardArticle, trigger: HTMLAnchorElement) => void;
 }) {
   const candidates = pickImages(article);
   const [imageIndex, setImageIndex] = useState(0);
@@ -186,6 +207,28 @@ export function NewsCard({
     <div className="group relative flex flex-col overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm transition-all duration-200 hover:-translate-y-1 hover:border-gray-300 hover:shadow-lg">
       <Link
         href={`/article/${article.slug}`}
+        onClick={
+          onOpen
+            ? (event) => {
+                /*
+                  A modified click is the browser's business: ctrl-click
+                  and cmd-click open a new tab, shift-click opens a new
+                  window, and a middle-click pastes the link. Those are
+                  things the reader asked for explicitly, so they are
+                  left alone. Only a plain left click opens the story
+                  where the reader is standing.
+                */
+                if (!isPlainActivation(event)) return;
+                event.preventDefault();
+                onOpen(article, event.currentTarget);
+              }
+            : undefined
+        }
+        // The card is identified so that the story it opens can hand
+        // the focus back to it — and to the same story's card in the
+        // visible copy of a drifting column, when the one that was
+        // clicked is one of that column's hidden repeats.
+        data-article-id={onOpen ? article.id : undefined}
         className="flex flex-1 flex-col focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600"
       >
         {/* ================= MEDIA ================= */}

@@ -11,8 +11,15 @@ import {
 import { useRouter } from "next/navigation";
 
 import { useImagelessFilter } from "@/components/ImagelessGrid";
-import { NewsCard } from "@/components/NewsCard";
+import { NewsCard, type NewsCardArticle } from "@/components/NewsCard";
 import { ReelCard } from "@/components/ReelCard";
+import { StoryDialog } from "@/components/StoryDialog";
+import {
+  DRIFT_PX_PER_SEC,
+  driftOffsetAfter,
+  isDriftHeld,
+  shouldDriftRun,
+} from "@/lib/drift";
 import type { Reel } from "@/lib/reels";
 import type { LatestArticle } from "@/types/database";
 
@@ -43,9 +50,6 @@ import type { LatestArticle } from "@/types/database";
  * for the same CPU, and on a phone that is the difference between
  * smooth and unusable.
  */
-
-/** How fast the side columns drift, in CSS pixels per second. */
-const DRIFT_PX_PER_SEC = 10;
 
 /**
  * Shared geometry between the mobile feed and the desktop centre column.
@@ -127,11 +131,20 @@ function AutoScrollColumn({
   paused,
   reduceMotion,
   label,
+  onOpenStory,
 }: {
   articles: LatestArticle[];
   paused: boolean;
   reduceMotion: boolean;
   label: string;
+  /**
+   * Open a story in place, over the feed, instead of navigating to it.
+   *
+   * The columns are the one place on the site where a headline is the
+   * only way from the current page to a story, and following it used to
+   * throw the reader out of the video they were watching.
+   */
+  onOpenStory?: (article: NewsCardArticle, trigger: HTMLElement) => void;
 }) {
   const trackRef = useRef<HTMLDivElement | null>(null);
   const copyRef = useRef<HTMLDivElement | null>(null);
@@ -202,19 +215,36 @@ function AutoScrollColumn({
       // A tab that was throttled or a frame that was janked hands us a
       // delta of seconds. At 10px/s that is a visible jump, and for a
       // track that has to wrap cleanly, a jump straight past the seam.
-      const delta = Math.min(100, now - previous);
+      const delta = now - previous;
       if (delta <= 0) return;
 
-      if (hoverRef.current || paused || document.hidden) return;
+      /*
+        The rules live in lib/drift.ts so they can be pinned by the test
+        suite without a browser. The important one is the order: the
+        column is only moved when it is allowed to move, so a held
+        column keeps the offset it had — frozen exactly where it is,
+        not reset — and it starts again from there when the hold ends.
+      */
+      if (
+        !shouldDriftRun({
+          held: paused,
+          hovered: hoverRef.current,
+          hidden: document.hidden,
+        })
+      ) {
+        return;
+      }
 
       const track = trackRef.current;
       const copyHeight = copyRef.current?.getBoundingClientRect().height ?? 0;
       if (!track || copyHeight <= 1) return;
 
-      let next = offsetRef.current + (DRIFT_PX_PER_SEC * delta) / 1000;
-      // One full copy of travel and we are back where we started looking,
-      // because the copy below is identical to the copy above.
-      if (next >= copyHeight) next -= copyHeight;
+      const next = driftOffsetAfter(
+        offsetRef.current,
+        delta,
+        copyHeight,
+        DRIFT_PX_PER_SEC
+      );
       offsetRef.current = next;
       track.style.transform = `translate3d(0, ${-next}px, 0)`;
     };
@@ -257,6 +287,9 @@ function AutoScrollColumn({
           key={`${duplicate ? "copy" : "live"}-${article.id}`}
           article={article}
           onImageUnavailable={markImageless}
+          // A headline in a drifting column opens the story over the
+          // feed rather than navigating away from it.
+          onOpen={onOpenStory}
         />
       ))}
     </div>
@@ -327,6 +360,35 @@ export function ReelsFeed({
   );
   const [driftPaused, setDriftPaused] = useState(false);
   const [reduceMotion, setReduceMotion] = useState(false);
+
+  /*
+    The story the reader has open, if any.
+
+    Clicking a headline in one of the drifting columns opens the story
+    HERE, over the feed, instead of navigating to it: the reels stay
+    mounted behind it, the reader keeps their place in the video, and
+    the columns hold still while they read. Closing it hands the
+    reader back to the card they clicked.
+
+    The trigger is kept separately from the story because the story is
+    data and the trigger is a DOM node, and the focus has to go back
+    to the exact card that was clicked.
+  */
+  const [openStory, setOpenStory] = useState<NewsCardArticle | null>(null);
+  const storyTriggerRef = useRef<HTMLElement | null>(null);
+  const backgroundRef = useRef<HTMLDivElement | null>(null);
+
+  const openStoryInPlace = useCallback(
+    (article: NewsCardArticle, trigger: HTMLElement) => {
+      storyTriggerRef.current = trigger;
+      setOpenStory(article);
+    },
+    []
+  );
+
+  const closeStory = useCallback(() => {
+    setOpenStory(null);
+  }, []);
 
   /*
     Sound is a session-level choice, so the state lives here rather than
@@ -567,6 +629,22 @@ export function ReelsFeed({
     </div>
   );
 
+  /*
+    Whether the columns are being held still.
+
+    Two reasons, and the second is the important one: the reader may
+    have pressed the pause button, and a story may be open in front of
+    the columns. A column that keeps drifting under a paragraph of
+    text moves the words out from under the reader's eyes, so an open
+    story holds the columns exactly where they are — and lets them
+    carry on from there the moment the story closes.
+  */
+  const driftHeld = isDriftHeld({
+    manuallyPaused: driftPaused,
+    storyOpen: openStory !== null,
+    reduceMotion,
+  });
+
   return (
     /*
       `h-full` because both layouts inside are `h-full`, and a
@@ -575,48 +653,82 @@ export function ReelsFeed({
       this passes it down unchanged.
     */
     <div className="relative h-full">
-      {/* ================= MOBILE ================= */}
-      {renderFeed("mobile")}
+      {/*
+        Everything the reader is not currently reading.
 
-      {/* ================= DESKTOP ================= */}
-      <div className="hidden lg:grid lg:h-full lg:grid-cols-[minmax(0,1fr)_minmax(0,420px)_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)] lg:items-stretch lg:gap-6 lg:px-6 lg:py-4">
-        <DriftingColumn
-          articles={leftArticles}
-          paused={driftPaused}
-          reduceMotion={reduceMotion}
-          label="Latest news"
-        />
+        It is one element so that a story can take the whole page out
+        of the accessibility tree in one move: while the story is
+        open, a screen reader must not be able to walk into the reels
+        or the columns behind it, because the story is modal.
 
-        {/* The focused element. Everything else is scaffolding.
+        The attribute is applied by the dialog rather than declared
+        here, because Chrome refuses to hide a subtree that still holds
+        the focus — and the focus starts on one of the cards inside
+        this element. The dialog moves the focus into itself first and
+        hides the background second.
+      */}
+      <div ref={backgroundRef} className="relative h-full">
+        {/* ================= MOBILE ================= */}
+        {renderFeed("mobile")}
 
-            `h-full` is what lets the feed inside resolve against the
-            grid row rather than against the viewport. Without it the
-            middle column is auto-height and the snap scroller has
-            nothing to scroll within. */}
-        <div className="mx-auto h-full min-h-0 w-full max-w-[420px]">{renderFeed("desktop")}</div>
+        {/* ================= DESKTOP ================= */}
+        <div className="hidden lg:grid lg:h-full lg:grid-cols-[minmax(0,1fr)_minmax(0,420px)_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)] lg:items-stretch lg:gap-6 lg:px-6 lg:py-4">
+          <DriftingColumn
+            articles={leftArticles}
+            paused={driftHeld}
+            reduceMotion={reduceMotion}
+            label="Latest news"
+            onOpenStory={openStoryInPlace}
+          />
 
-        <DriftingColumn
-          articles={rightArticles}
-          paused={driftPaused}
-          reduceMotion={reduceMotion}
-          label="Latest news"
-        />
+          {/* The focused element. Everything else is scaffolding.
+
+              `h-full` is what lets the feed inside resolve against the
+              grid row rather than against the viewport. Without it the
+              middle column is auto-height and the snap scroller has
+              nothing to scroll within. */}
+          <div className="mx-auto h-full min-h-0 w-full max-w-[420px]">{renderFeed("desktop")}</div>
+
+          <DriftingColumn
+            articles={rightArticles}
+            paused={driftHeld}
+            reduceMotion={reduceMotion}
+            label="Latest news"
+            onOpenStory={openStoryInPlace}
+          />
+        </div>
+
+        {/* Ambient motion has to be stoppable, not just interruptible. */}
+        {!reduceMotion && (
+          <button
+            type="button"
+            onClick={() => setDriftPaused((value) => !value)}
+            // A stable name plus a pressed state: a button whose own label
+            // flips between "pause" and "resume" reads as two different
+            // controls to a screen reader.
+            aria-label="Auto-scrolling news columns"
+            aria-pressed={driftPaused}
+            className="absolute bottom-4 left-1/2 hidden -translate-x-1/2 rounded-full border border-gray-200 bg-white/90 px-3 py-1.5 text-[11px] font-medium uppercase tracking-wider text-gray-500 shadow-sm backdrop-blur transition-colors hover:text-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 lg:inline-flex"
+          >
+            {driftPaused ? "Resume news" : "Pause news"}
+          </button>
+        )}
       </div>
 
-      {/* Ambient motion has to be stoppable, not just interruptible. */}
-      {!reduceMotion && (
-        <button
-          type="button"
-          onClick={() => setDriftPaused((value) => !value)}
-          // A stable name plus a pressed state: a button whose own label
-          // flips between "pause" and "resume" reads as two different
-          // controls to a screen reader.
-          aria-label="Auto-scrolling news columns"
-          aria-pressed={driftPaused}
-          className="absolute bottom-4 left-1/2 hidden -translate-x-1/2 rounded-full border border-gray-200 bg-white/90 px-3 py-1.5 text-[11px] font-medium uppercase tracking-wider text-gray-500 shadow-sm backdrop-blur transition-colors hover:text-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 lg:inline-flex"
-        >
-          {driftPaused ? "Resume news" : "Pause news"}
-        </button>
+      {/*
+        The story, over the feed.
+
+        The reels are still mounted behind it — this is an overlay on
+        the same page, not a navigation — and the columns are held
+        still for as long as it is up.
+      */}
+      {openStory && (
+        <StoryDialog
+          article={openStory}
+          onClose={closeStory}
+          returnFocusTo={storyTriggerRef.current}
+          background={backgroundRef.current}
+        />
       )}
     </div>
   );

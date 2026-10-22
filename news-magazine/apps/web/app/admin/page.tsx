@@ -139,6 +139,12 @@ export default async function AdminPage({
           </p>
         ) : null}
 
+        {data.ignoredFilter ? (
+          <p className="mt-4 rounded-lg border border-sky-800/60 bg-sky-950/40 px-3 py-2 text-xs text-sky-200">
+            {data.ignoredFilter}
+          </p>
+        ) : null}
+
         {/* ---- Headline numbers ---- */}
         <section className="mt-8 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
           {data.stats.map((stat) => (
@@ -209,39 +215,62 @@ export default async function AdminPage({
           subtitle="what is running, and what switches the rest on"
           className="mt-4"
         >
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[640px] text-left text-xs">
+          <div className="-mx-1 overflow-x-auto px-1">
+            <table className="w-full min-w-[720px] text-left text-xs">
+              <caption className="sr-only">
+                Each reels provider, whether it is switched on, how many
+                clips it has contributed, when it last ran, and which
+                environment variable it needs.
+              </caption>
               <thead>
                 <tr className="border-b border-slate-800 text-[10px] uppercase tracking-wider text-slate-500">
-                  <th className="py-2 pr-3 font-medium">Provider</th>
-                  <th className="py-2 pr-3 font-medium">State</th>
-                  <th className="py-2 pr-3 font-medium">Clips</th>
-                  <th className="py-2 pr-3 font-medium">Last run</th>
-                  <th className="py-2 pr-3 font-medium">Last pass</th>
-                  <th className="py-2 font-medium">Needs</th>
+                  <th scope="col" className="py-2 pr-3 font-medium">
+                    Provider
+                  </th>
+                  <th scope="col" className="py-2 pr-3 font-medium">
+                    State
+                  </th>
+                  <th scope="col" className="py-2 pr-3 text-right font-medium">
+                    Clips
+                  </th>
+                  <th scope="col" className="py-2 pr-3 font-medium">
+                    Last run
+                  </th>
+                  <th scope="col" className="py-2 pr-3 font-medium">
+                    Last pass
+                  </th>
+                  <th scope="col" className="py-2 font-medium">
+                    Needs
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/70">
                 {data.reelsSources.map((source) => (
-                  <tr key={source.sourceKey}>
-                    <td className="py-2.5 pr-3 font-medium capitalize text-slate-200">
+                  <tr
+                    key={source.sourceKey}
+                    className="transition-colors hover:bg-slate-800/30"
+                  >
+                    <th
+                      scope="row"
+                      className="py-2.5 pr-3 text-left font-medium capitalize text-slate-200"
+                    >
                       {source.sourceKey}
-                    </td>
+                    </th>
                     <td className="py-2.5 pr-3">
                       {source.enabled ? (
-                        <span className="rounded-full bg-emerald-950 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-emerald-300">
+                        <span className="inline-block rounded-full bg-emerald-950 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-emerald-300">
                           On
                         </span>
                       ) : (
-                        <span className="rounded-full bg-slate-800 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                        <span className="inline-block rounded-full bg-slate-800 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
                           Off
                         </span>
                       )}
                     </td>
-                    <td className="py-2.5 pr-3 tabular-nums text-slate-300">
+                    <td className="py-2.5 pr-3 text-right tabular-nums text-slate-300">
                       {source.clipCount.toLocaleString("en-US")}
                     </td>
-                    <td className="py-2.5 pr-3 text-slate-400">
+                    <td className="py-2.5 pr-3 whitespace-nowrap text-slate-400">
                       {source.lastRunAt
                         ? new Date(source.lastRunAt)
                             .toISOString()
@@ -249,11 +278,18 @@ export default async function AdminPage({
                             .slice(0, 16)
                         : "—"}
                     </td>
-                    <td className="py-2.5 pr-3 text-slate-400">
+                    <td
+                      className="max-w-[18rem] truncate py-2.5 pr-3 text-slate-400"
+                      title={
+                        source.lastStatus === "ok"
+                          ? `${source.lastCount ?? 0} clips stored`
+                          : (source.lastError ?? undefined)
+                      }
+                    >
                       {source.lastStatus === "ok"
                         ? `${source.lastCount ?? 0} stored`
                         : source.lastError
-                          ? source.lastError.slice(0, 60)
+                          ? source.lastError
                           : "—"}
                     </td>
                     <td className="py-2.5 font-mono text-[11px] text-amber-300">
@@ -266,66 +302,88 @@ export default async function AdminPage({
           </div>
           <p className="mt-3 text-[11px] leading-relaxed text-slate-500">
             Wikimedia needs no key, and it is the only one that is on.
-            It holds about a hundred and thirty-five Nepal videos in
-            total, and none of them are H.264 — so none of them play on
-            iOS. Pexels, Pixabay and YouTube carry an effectively
-            unlimited catalogue with sound; each needs one environment
-            variable on the ingestion service and nothing else. YouTube
-            embeds rather than hosts, so it is unlimited and always new.
+            It holds a few hundred Nepal videos in total, and none of
+            them are H.264 — so none of them play on iOS. Pexels, Pixabay
+            and YouTube carry an effectively unlimited catalogue with
+            sound; each needs one environment variable on the ingestion
+            service and nothing else. YouTube embeds rather than hosts,
+            so it is unlimited and always new.
           </p>
         </Panel>
 
         <div className="mt-4 grid gap-4 lg:grid-cols-2">
           {/* ---- Sources ---- */}
           <Panel title="Outlets" subtitle={`${data.healthySources} of ${data.totalSources} healthy`}>
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[520px] text-left text-xs">
-                <thead>
+            <div className="-mx-1 max-h-[26rem] overflow-auto px-1">
+              <table className="w-full min-w-[560px] text-left text-xs">
+                <caption className="sr-only">
+                  Every outlet, whether it is healthy, how many articles it
+                  has contributed, how often it is polled, and when it last
+                  ran.
+                </caption>
+                <thead className="sticky top-0 z-10 bg-slate-900/95 backdrop-blur">
                   <tr className="border-b border-slate-800 text-[10px] uppercase tracking-wider text-slate-500">
-                    <th className="py-2 pr-3 font-medium">Source</th>
-                    <th className="py-2 pr-3 font-medium">State</th>
-                    <th className="py-2 pr-3 font-medium">Articles</th>
-                    <th className="py-2 pr-3 font-medium">Every</th>
-                    <th className="py-2 font-medium">Last poll</th>
+                    <th scope="col" className="py-2 pr-3 font-medium">
+                      Source
+                    </th>
+                    <th scope="col" className="py-2 pr-3 font-medium">
+                      State
+                    </th>
+                    <th scope="col" className="py-2 pr-3 text-right font-medium">
+                      Articles
+                    </th>
+                    <th scope="col" className="py-2 pr-3 text-right font-medium">
+                      Every
+                    </th>
+                    <th scope="col" className="py-2 font-medium">
+                      Last poll
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/70">
                   {data.sources.map((source) => (
-                    <tr key={source.id}>
-                      <td className="py-2 pr-3">
+                    <tr
+                      key={source.id}
+                      className="transition-colors hover:bg-slate-800/30"
+                    >
+                      <th scope="row" className="py-2 pr-3 text-left font-normal">
                         <span className="font-medium text-slate-200">
                           {source.name}
                         </span>
                         <span className="ml-2 text-[10px] text-slate-500">
                           {source.adapter}
                         </span>
-                      </td>
+                      </th>
                       <td className="py-2 pr-3">
                         {!source.enabled || !source.allowed ? (
-                          <span className="text-[10px] uppercase tracking-wider text-slate-500">
+                          <span className="inline-block rounded-full bg-slate-800 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
                             {source.allowed ? "Disabled" : "Not approved"}
                           </span>
                         ) : source.lastStatus === "success" ? (
-                          <span className="text-[10px] uppercase tracking-wider text-emerald-400">
+                          <span className="inline-block rounded-full bg-emerald-950 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-emerald-300">
                             Healthy
                           </span>
                         ) : source.lastStatus === "partial" ? (
-                          <span className="text-[10px] uppercase tracking-wider text-amber-400">
+                          <span className="inline-block rounded-full bg-amber-950 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-300">
                             Partial
                           </span>
+                        ) : source.lastStatus === "failed" ? (
+                          <span className="inline-block rounded-full bg-red-950 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-red-300">
+                            Failed
+                          </span>
                         ) : (
-                          <span className="text-[10px] uppercase tracking-wider text-red-400">
+                          <span className="inline-block rounded-full bg-slate-800 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
                             {source.lastStatus ?? "Waiting"}
                           </span>
                         )}
                       </td>
-                      <td className="py-2 pr-3 tabular-nums text-slate-300">
+                      <td className="py-2 pr-3 text-right tabular-nums text-slate-300">
                         {source.articleCount.toLocaleString("en-US")}
                       </td>
-                      <td className="py-2 pr-3 tabular-nums text-slate-400">
+                      <td className="py-2 pr-3 text-right tabular-nums text-slate-400">
                         {source.pollInterval}s
                       </td>
-                      <td className="py-2 text-slate-400">
+                      <td className="whitespace-nowrap py-2 text-slate-400">
                         {source.lastRunAt
                           ? new Date(source.lastRunAt)
                               .toISOString()
@@ -385,19 +443,28 @@ export default async function AdminPage({
           {/* ---- Top articles ---- */}
           <Panel title="Most read" subtitle="by view_count">
             {data.topArticles.length ? (
-              <ol className="space-y-2">
+              <ol className="space-y-1">
                 {data.topArticles.map((article, index) => (
-                  <li key={article.id} className="flex items-baseline gap-3">
+                  <li
+                    key={article.id}
+                    className="flex items-baseline gap-3 rounded px-1 py-1 transition-colors hover:bg-slate-800/30"
+                  >
                     <span className="w-4 shrink-0 text-right text-[10px] tabular-nums text-slate-600">
                       {index + 1}
                     </span>
-                    <Link
-                      href={`/article/${article.slug}`}
-                      className="min-w-0 flex-1 truncate text-xs text-slate-300 underline-offset-2 hover:text-white hover:underline"
-                    >
-                      {article.headline}
-                    </Link>
-                    <span className="shrink-0 text-[11px] tabular-nums text-slate-500">
+                    <span className="min-w-0 flex-1">
+                      <Link
+                        href={`/article/${article.slug}`}
+                        title={article.headline}
+                        className="block truncate text-xs text-slate-300 underline-offset-2 hover:text-white hover:underline"
+                      >
+                        {article.headline}
+                      </Link>
+                      <span className="mt-0.5 block truncate text-[10px] text-slate-500">
+                        {article.source ?? "unknown"}
+                      </span>
+                    </span>
+                    <span className="shrink-0 text-[11px] tabular-nums text-slate-400">
                       {article.views.toLocaleString("en-US")}
                     </span>
                   </li>
@@ -411,16 +478,32 @@ export default async function AdminPage({
           {/* ---- Errors ---- */}
           <Panel title="Recent errors" subtitle="from source_errors">
             {data.recentErrors.length ? (
-              <ul className="space-y-2">
+              <ul className="space-y-1">
                 {data.recentErrors.map((error, index) => (
-                  <li key={index} className="text-xs">
-                    <span className="text-slate-500">
-                      {error.source ?? "unknown"}
-                    </span>{" "}
-                    <span className="text-red-300">
-                      {error.errorType ?? "error"}
-                    </span>
-                    <p className="mt-0.5 break-words text-slate-400">
+                  <li
+                    key={index}
+                    className="rounded px-1 py-1 text-xs transition-colors hover:bg-slate-800/30"
+                  >
+                    <div className="flex items-baseline gap-2">
+                      <span className="truncate font-medium text-slate-400">
+                        {error.source ?? "unknown"}
+                      </span>
+                      <span className="shrink-0 text-[10px] uppercase tracking-wider text-red-300">
+                        {error.errorType ?? "error"}
+                      </span>
+                      <span className="ml-auto shrink-0 whitespace-nowrap text-[10px] tabular-nums text-slate-600">
+                        {error.occurredAt
+                          ? new Date(error.occurredAt)
+                              .toISOString()
+                              .replace("T", " ")
+                              .slice(5, 16)
+                          : ""}
+                      </span>
+                    </div>
+                    <p
+                      className="mt-0.5 line-clamp-2 break-words text-slate-400"
+                      title={error.message}
+                    >
                       {error.message}
                     </p>
                   </li>
@@ -543,20 +626,49 @@ function FilterBar({
     query?: string;
   };
 }) {
+  // What the operator is actually looking at, in words.
+  //
+  // A dashboard that quietly shows different numbers depending on a
+  // filter is a dashboard that gets disbelieved. The headline cards
+  // are ALWAYS live overall data - they are the health indicators, and
+  // narrowing them would turn "is the site working?" into "does this
+  // one source have stories?". The tables below them are the working
+  // view, and those are what the filters apply to.
+  const applied = data.appliedFilters;
+  const active: string[] = [];
+
+  if (applied.query) active.push(`headline contains "${applied.query}"`);
+  if (applied.sourceId) {
+    const source = data.sources.find((s) => s.id === applied.sourceId);
+    active.push(`outlet ${source?.name ?? applied.sourceId}`);
+  }
+  if (applied.categoryId) {
+    const category = data.categories.find((c) => c.id === applied.categoryId);
+    active.push(`category ${category?.name ?? applied.categoryId}`);
+  }
+  if (applied.since || applied.until) {
+    active.push(
+      `fetched ${applied.since ? `from ${applied.since.slice(0, 10)}` : "at any time"} ${
+        applied.until ? `to ${applied.until.slice(0, 10)}` : "onwards"
+      }`
+    );
+  }
+
   return (
-    <form
-      method="get"
-      className="mt-6 flex flex-wrap items-end gap-3 rounded-lg border border-slate-800 bg-slate-900/60 p-4"
-    >
-      <Field label="Search headlines">
-        <input
-          type="search"
-          name="q"
-          defaultValue={filters.query ?? ""}
-          placeholder="a word in the headline"
-          className="w-full rounded-md border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-slate-200 outline-none focus:border-slate-500"
-        />
-      </Field>
+    <>
+      <form
+        method="get"
+        className="mt-6 flex flex-wrap items-end gap-3 rounded-lg border border-slate-800 bg-slate-900/60 p-4"
+      >
+        <Field label="Search headlines">
+          <input
+            type="search"
+            name="q"
+            defaultValue={filters.query ?? ""}
+            placeholder="a word in the headline"
+            className="w-full rounded-md border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-slate-200 outline-none focus:border-slate-500"
+          />
+        </Field>
 
       <Field label="Source">
         <select
@@ -620,7 +732,26 @@ function FilterBar({
           Reset
         </Link>
       </div>
-    </form>
+      </form>
+
+      {/* One sentence saying what is being shown, so the numbers are
+          never a surprise. The cards above are always live overall
+          data; the tables below are what the filters narrow. */}
+      <p className="mt-2 text-[11px] text-slate-500">
+        {active.length ? (
+          <>
+            <span className="font-medium text-slate-400">Filtered to</span>{" "}
+            {active.join(" · ")}. The cards above stay live overall; the
+            tables below are narrowed.
+          </>
+        ) : (
+          <>
+            Showing everything, live. The cards above are overall
+            totals, and the tables below show the same data.
+          </>
+        )}
+      </p>
+    </>
   );
 }
 

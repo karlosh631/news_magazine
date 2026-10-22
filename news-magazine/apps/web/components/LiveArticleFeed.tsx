@@ -75,29 +75,35 @@ const ROTATE_MS = 75_000;
 const PINNED = 9;
 
 /**
- * How many cards one "Load more" brings in.
+ * How many cards one page of the archive brings in.
  *
- * Twenty-four, matching the server-rendered first page and PAGE_SIZE in
- * lib/news.ts, so every page of the feed is the same size. The API's own
- * ceiling is 500, so this is a choice about request size — not a limit on
- * how far down the archive a reader can go.
+ * Thirty, so a page is a little taller than the viewport on a phone and
+ * the reader is not offered a fresh screenful of the same feed every
+ * few seconds of scrolling. The API's own ceiling is 500, so this is a
+ * choice about request size — not a limit on how far down the archive a
+ * reader can go.
  */
-const MORE_PAGE_SIZE = 24;
+const MORE_PAGE_SIZE = 30;
 
 /**
  * How far ahead of the viewport the sentinel starts a load.
  *
  * Not zero. At zero the request only starts once the sentinel is already
  * on screen, so the reader always watches the gap arrive and always waits
- * through a request they can see coming. 800px is about three rows, the
- * same beat as a lazy-loaded image resolving.
+ * through a request they can see coming.
+ *
+ * It is 1200px rather than 800 because the archive is now endless on
+ * every page, and the reader scrolling fast through the national
+ * category would otherwise outrun the loader and watch it catch up.
+ * Three screens' worth of runway is enough that the next page is
+ * usually already there.
  *
  * This is also what keeps "the whole feed" honest. The observer loads
  * until the sentinel is pushed out of that band and then stops, so a
  * reader who scrolls reaches the end of the archive while a reader who
  * does not never pays for a card they did not look at.
  */
-const SENTINEL_ROOT_MARGIN = "800px 0px";
+const SENTINEL_ROOT_MARGIN = "1200px 0px";
 
 type Rotate = "off" | "on";
 
@@ -129,6 +135,7 @@ export function LiveArticleFeed({
   initialCursor = null,
   emptyState,
   rotation = "off",
+  category,
 }: {
   initialArticles: LatestArticle[];
   /**
@@ -138,6 +145,20 @@ export function LiveArticleFeed({
   initialCursor?: FeedCursor | null;
   emptyState?: { title: string; description: string };
   rotation?: Rotate;
+  /**
+   * The category slug to stay inside.
+   *
+   * The category pages used to render a plain grid of twenty-four
+   * cards and stop, which made them the only pages on the site that
+   * ended. A reader who wanted the rest of a category had to go
+   * somewhere else, and the newest story in a category could sit
+   * below the fold with nothing to pull it up.
+   *
+   * With this set, the page is the same live feed as the homepage:
+   * the newest first, growing as the reader scrolls, and never
+   * leaving the category.
+   */
+  category?: string;
 }) {
   const [articles, setArticles] = useState(initialArticles);
   const [checking, setChecking] = useState(false);
@@ -307,6 +328,7 @@ export function LiveArticleFeed({
           t: String(Date.now()),
         });
         if (lang) params.set("language", lang);
+        if (category) params.set("category", category);
 
         const response = await fetch(`/api/live-news?${params}`, {
           cache: "no-store",
@@ -352,7 +374,7 @@ export function LiveArticleFeed({
         setChecking(false);
       }
     },
-    [mergeInto]
+    [category, mergeInto]
   );
 
   /**
@@ -387,6 +409,7 @@ export function LiveArticleFeed({
         params.set("after_id", from.id);
       }
       if (language) params.set("language", language);
+      if (category) params.set("category", category);
 
       const response = await fetch(`/api/live-news?${params}`, {
         cache: "no-store",
@@ -441,7 +464,7 @@ export function LiveArticleFeed({
       moreInFlight.current = false;
       setLoadingMore(false);
     }
-  }, [cursor, language, mergeInto]);
+  }, [category, cursor, language, mergeInto]);
 
   /**
    * Start the archive again from the newest page.

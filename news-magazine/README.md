@@ -22,6 +22,8 @@ point comes verbatim from the outlet that published it.
 | **Summaries** | Exactly four points per story, extracted verbatim from the article body |
 | **Retention** | Articles pruned 48h after publication, then re-fetched on demand if someone searches for them |
 | **Search** | Postgres full-text + trigram, so Nepali (Devanagari) queries actually match |
+| **Reels** | Short video from Wikimedia Commons, Pexels, Pixabay and YouTube, served newest-arrival first |
+| **Admin** | Sign-in, live dashboard, per-source health, and the reels feed's own source health |
 
 ---
 
@@ -70,7 +72,20 @@ python apps/ingestion/.venv/Scripts/python.exe scripts/supabase_admin.py apply
 `apply` runs each file once and records it in `_applied_migrations`, so
 re-running is safe.
 
-### 2. Ingestion service
+### 2. Migrations
+
+Apply these in order. Each is idempotent, so re-running is safe.
+
+| Migration | What it does |
+|---|---|
+| `0017_admin_users.sql` | The `admin_users` and `admin_sessions` tables the admin panel signs in against, and the seeded operator account |
+| `0018_reels_source_health.sql` | One row per reels provider: enabled, which env var is missing, key count, and how the last run went |
+| `0019_articles_ingested_at_index.sql` | The index behind the feed's arrival ordering, and a backfill of arrival time for rows that predate the column |
+
+Migrations 0001–0016 are the original schema and are described in
+`ARCHITECTURE.md`.
+
+### 3. Ingestion service
 
 ```bash
 cd apps/ingestion
@@ -99,7 +114,7 @@ Run the HTTP service alongside it (for search resurrection):
 SCHEDULER_ENABLED=false .venv/Scripts/python.exe -m uvicorn app.main:app --port 8000
 ```
 
-### 3. Frontend
+### 4. Frontend
 
 ```bash
 cd apps/web
@@ -265,6 +280,137 @@ so enabling an outlet cannot make the worker hammer a site.
 
 ---
 
+## The admin panel
+
+`/admin` is a dashboard, not a page that links to one. It opens on
+`/login` when there is no valid session, and the sign-in is a real one:
+PBKDF2-SHA256 at 210,000 iterations for the password, an HMAC-signed
+session cookie, and a per-address rate limit on failed attempts.
+
+| Route | What it is |
+|---|---|
+| `/admin` | The dashboard: 12 stat cards, hourly and daily charts, the event mix, the per-outlet table, the categories, the most-read stories, and the recent errors |
+| `/login` | The sign-in form |
+| `/403` | Signed in, and the answer is still no |
+| `/api/admin/login` | POST. Verifies the password, writes the session row, issues the cookie |
+| `/api/admin/logout` | POST. Deletes the session row and clears the cookie |
+
+**It is a second door, not a replacement.** The Supabase Auth path in
+`middleware.ts` is untouched and still works: a user with an `admin` or
+`super_admin` row in `user_roles` gets in exactly as before. This door
+exists for the operator who should not have to open a Supabase dashboard
+to use their own site.
+
+### What it needs
+
+Migration `0017_admin_users.sql`, applied:
+
+```bash
+python apps/ingestion/.venv/Scripts/python.exe scripts/supabase_admin.py apply
+```
+
+The migration seeds one account — `thapakarlosh631@gmail.com` — with a
+PBKDF2 hash. The password is in the migration file's header comment.
+**Change it.** A seeded credential in a public repository is a published
+credential; the hash is safe to publish and the password is not.
+
+The session cookie is signed with a secret, and the secret has to be the
+same on every request — a Vercel function can be a different instance on
+the next request, and a key generated per process would invalidate every
+session on every cold start. The order of preference:
+
+1. `ADMIN_SESSION_SECRET` — the right answer
+2. `SUPABASE_SERVICE_ROLE_KEY` — already in the deployment
+3. `INGESTION_SECRET` — also already in the deployment
+
+The fallback exists so the panel works the moment it is deployed. Set
+`ADMIN_SESSION_SECRET` if you would rather it were not derived from a
+key that has another job.
+
+### The reels health panel
+
+The reels were not updating, and the reason was invisible: Pexels,
+Pixabay and YouTube are implemented, and all three were being **skipped**
+because their API keys are not set. Nothing said so — a provider with no
+credential is logged at INFO, because "we have no key" is not an error.
+
+Migration `0018_reels_source_health.sql` records, per provider, whether
+it is enabled, **which environment variable is missing**, how many keys
+there are, and how the last run went. The dashboard shows it. The row
+that matters is the one with `enabled = false`, because it carries the
+exact name to set.
+
+| Variable | Provider |
+|---|---|
+| `PEXELS_API_KEYS` | Pexels — stock video, comma-separated keys |
+| `PIXABAY_API_KEYS` | Pixabay — stock video, comma-separated keys |
+| `YOUTUBE_API_KEYS` | YouTube — comma-separated API keys |
+
+Wikimedia Commons needs no key and always runs.
+
+**A ceiling worth knowing about.** Commons holds roughly 135 videos on
+Nepal subjects, and **none of them are H.264** — the Wikimedia derivative
+ladder is `*.vp9.webm`, `*.mpeg4.mov`, `*.theora.ogv`, so nothing in that
+catalogue plays on iOS. Ten thousand reels is not reachable from Commons;
+it needs Pexels, Pixabay or YouTube, which is what those three variables
+are for.
+
+---
+
+## What is on the page, and why
+
+### Newest first means newest FETCHED
+
+The feed is ordered by `ingested_at` — when **we** first saw the story —
+and not by `published_at`, when the outlet published it. A publisher can
+sit on a story for hours before filing it in their feed; when it does
+appear, it is new to this site and belongs at the top, even though its
+publication timestamp is older than stories already on the page.
+
+The reverse matters just as much. A story published two minutes ago that
+we fetched ten minutes ago has been on the homepage the whole time, so it
+must not leap back to the top every time the feed polls. Sorting by
+arrival means a story moves up **once**, when it arrives, and then stays
+put.
+
+The keyset cursor addresses `ingested_at` for the same reason: a cursor
+that addresses a different ordering than the query runs puts the page
+boundary in the wrong place, and the reader loses stories with no error
+and no empty page — just rows that were never shown. `lib/feed-cursor.ts`
+holds the order and the cursor together, because they are one decision.
+
+Migration `0019_articles_ingested_at_index.sql` indexes that ordering
+and backfills the arrival time for rows that predate the column — a NULL
+arrival time sorts last and is unreachable through the keyset, so those
+stories would fall off the end of the archive entirely.
+
+### A picture that belongs to the story
+
+A story could show a photograph that belonged to a *different* story —
+a football image on a story about drugs being seized. Three causes, all
+fixed:
+
+- the RSS feed's picture was treated as authoritative over the story's
+  own page, so a syndicated story kept the publisher's thumbnail instead
+  of the photograph on the article;
+- the fallback that fills in a missing picture walked backwards,
+  preferring the feed's image over the page's;
+- three classes of junk URL were being accepted as photographs — theme
+  assets, "copy" duplicates, and GIFs left over from an earlier site.
+
+The page is now always fetched for a new story, and where the picture
+came from is recorded on the row (`image_verified_at`), so the dashboard
+can tell a picture verified against the article from one that was not.
+
+### The same photograph twice
+
+The same photo served at two sizes is two URLs and one filename stem, so
+the feed catches it by **stem**, not by full URL. The second card loses
+its picture and keeps its story: a story without a picture is better
+than the same story with the wrong one.
+
+---
+
 ## Deployment
 
 ### The one thing you must set up
@@ -312,11 +458,18 @@ schedulers polling the same 27 outlets concurrently.
 
 **Vercel** (`apps/web`): `NEXT_PUBLIC_SUPABASE_URL`,
 `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_SITE_URL`, and optionally
-`GEMINI_API_KEY`, `INGESTION_SERVICE_URL`, `INGESTION_SECRET`.
+`GEMINI_API_KEY`, `INGESTION_SERVICE_URL`, `INGESTION_SECRET`,
+`ADMIN_SESSION_SECRET`.
+
+`SUPABASE_SERVICE_ROLE_KEY` is also read on the server, by the admin
+panel only — it is never sent to the browser. The admin panel needs a
+service-role key to read `admin_users` and `admin_sessions` at all.
 
 **Ingestion**: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`,
-`INGESTION_SECRET`, `CRON_SECRET`. Everything else has a working default
-— see `apps/ingestion/.env.example`.
+`INGESTION_SECRET`, `CRON_SECRET`, and optionally
+`PEXELS_API_KEYS` / `PIXABAY_API_KEYS` / `YOUTUBE_API_KEYS` for the
+reels feed. Everything else has a working default — see
+`apps/ingestion/.env.example`.
 
 ---
 
@@ -324,15 +477,24 @@ schedulers polling the same 27 outlets concurrently.
 
 ```bash
 cd apps/ingestion
-.venv/Scripts/python.exe -m pytest
+.venv/Scripts/python.exe -m pytest            # 394 tests
+
+cd apps/web
+npx playwright test                            # 58 tests
 ```
 
-44 tests covering URL normalisation (including the srcset and mixed-content
-bugs), the Devanagari slug path, fuzzy syndication thresholds, the
-`partial_ratio` regression guard, sentence splitting, and the guarantee
-that every summary point is a verbatim sentence from the source article.
+The ingestion suite covers URL normalisation (including the srcset and
+mixed-content bugs), the Devanagari slug path, fuzzy syndication
+thresholds, the `partial_ratio` regression guard, sentence splitting, the
+media resolution rules, and the guarantee that every summary point is a
+verbatim sentence from the source article.
 
-CI runs these plus a production build and an import check of every module
+The web suite is unit tests over pure functions — no browser, no server,
+no network, about a second in total. It covers the duplicate-suppression
+rules, the picture rules, the image-host allowlist, the feed's merge and
+its ordering, the keyset cursor, and the admin sign-in.
+
+CI runs both plus a production build and an import check of every module
 on every push.
 
 ---

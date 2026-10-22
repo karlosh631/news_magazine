@@ -27,6 +27,57 @@ export type AdminFilters = {
   query?: string;
 };
 
+/**
+ * The date range, as it will actually be applied.
+ *
+ * A range that cannot match anything is a RANGE THAT WAS NEVER ASKED
+ * FOR, and the difference matters. The operator picked "from 28
+ * October" and "to 22 October" — the browser had prefilled the second
+ * field, the first was in the future, and every filtered query
+ * returned nothing. The panel then said "0 articles" in a way that
+ * read as "this site has published nothing", which is a completely
+ * different statement.
+ *
+ * So a range that ends before it starts, or that starts in the
+ * future, is IGNORED — the panel shows the live overall data, which is
+ * what "nothing selected" means — and says so, rather than quietly
+ * reporting zeros that look like a fact about the site.
+ */
+export type ResolvedRange = {
+  since?: string;
+  until?: string;
+  /** Set when the range was unusable and was therefore dropped. */
+  ignoredReason: string | null;
+};
+
+export function resolveRange(filters: AdminFilters): ResolvedRange {
+  const since = filters.since || undefined;
+  const until = filters.until || undefined;
+
+  if (!since && !until) {
+    return { ignoredReason: null };
+  }
+
+  const sinceTime = since ? Date.parse(since) : Number.NaN;
+  const untilTime = until ? Date.parse(until) : Number.NaN;
+
+  if (Number.isFinite(sinceTime) && Number.isFinite(untilTime) && sinceTime > untilTime) {
+    return {
+      ignoredReason:
+        "The date range ends before it starts, so it was ignored and everything is shown.",
+    };
+  }
+
+  if (Number.isFinite(sinceTime) && sinceTime > Date.now()) {
+    return {
+      ignoredReason:
+        "The start of the date range is in the future, so it was ignored and everything is shown.",
+    };
+  }
+
+  return { since, until, ignoredReason: null };
+}
+
 export type StatCard = {
   label: string;
   value: number;
@@ -101,10 +152,14 @@ export type AdminData = {
   reelsSources: ReelsSourceRow[];
   recentErrors: ErrorRow[];
   filters: AdminFilters;
+  /** The filters as they were actually applied. */
+  appliedFilters: AdminFilters;
   totalSources: number;
   healthySources: number;
   generatedAt: string;
   degraded: string | null;
+  /** Set when a filter was unusable and was therefore ignored. */
+  ignoredFilter: string | null;
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -149,6 +204,26 @@ function applyFilters<T extends { eq: Function; gte: Function; lte: Function; li
   return q;
 }
 
+/**
+ * How many rows a query matches.
+ *
+ * THE BUG THIS EXISTS FOR
+ * -----------------------
+ * This used to end in `.execute()`. That method does not exist in
+ * postgrest-js 1.16.1 — the builder is a thenable, and `await`ing it
+ * is how you run it. So every call threw `TypeError: ... .execute is
+ * not a function`, the `catch` below turned it into `0`, and every
+ * number on the dashboard read zero while the charts beside it, which
+ * use plain selects, showed the real totals. A panel that reports
+ * "0 articles" next to a chart of 301 is worse than no panel: it says
+ * the site is empty, and the site is not.
+ *
+ * The count itself comes from the `Content-Range` header, which
+ * PostgREST returns because `count: "exact"` asks for it, and
+ * `head: true` keeps the body empty. The error is logged rather than
+ * swallowed, so a broken query is visible instead of looking like an
+ * empty table.
+ */
 async function countRows(
   supabase: ReturnType<typeof createServiceRoleClient>,
   table: string,
@@ -157,10 +232,14 @@ async function countRows(
   try {
     const { count, error } = await build(
       supabase.from(table).select("id", { count: "exact", head: true })
-    ).execute();
-    if (error) return 0;
+    );
+    if (error) {
+      console.error(`[admin] count on ${table} failed: ${error.message}`);
+      return 0;
+    }
     return count ?? 0;
-  } catch {
+  } catch (error) {
+    console.error(`[admin] count on ${table} threw:`, error);
     return 0;
   }
 }
@@ -184,6 +263,24 @@ export async function getAdminData(filters: AdminFilters): Promise<AdminData> {
   const supabase = createServiceRoleClient();
   const now = new Date();
   const degraded: string[] = [];
+
+  // A date range that cannot match anything is dropped rather than
+  // applied, so the panel shows the live overall data rather than a
+  // page of zeros. See resolveRange. It is reported on its own rather
+  // than through `degraded`, which is for panels that could not be
+  // read - nothing failed here, a filter was simply not usable.
+  const range = resolveRange(filters);
+
+  // The filters as they will actually be applied. The headline cards
+  // deliberately do NOT use these - they are live health indicators
+  // (all time, today, this week) and a filter that narrows them would
+  // turn "is the site working?" into "does this one source have
+  // stories?". The tables below do use them.
+  const scoped: AdminFilters = {
+    ...filters,
+    since: range.since,
+    until: range.until,
+  };
 
   const startOfToday = new Date(
     Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
@@ -316,11 +413,28 @@ export async function getAdminData(filters: AdminFilters): Promise<AdminData> {
     const errorCounts = new Map<string, number>();
 
     const [articleCounts, syncs, errorRows] = await Promise.all([
-      supabase
-        .from("articles")
-        .select("source_id")
-        .in("source_id", ids.length ? ids : ["00000000-0000-0000-0000-000000000000"])
-        .then((r: any) => (r.error ? [] : (r.data ?? []))),
+      // The per-outlet article count respects the date range, because
+      // "how many has this outlet produced since Monday" is the
+      // question a filter is asking.
+      scoped.since || scoped.until
+        ? supabase
+            .from("articles")
+            .select("source_id")
+            .in(
+              "source_id",
+              ids.length ? ids : ["00000000-0000-0000-0000-000000000000"]
+            )
+            .gte("ingested_at", scoped.since ?? "1970-01-01")
+            .lte("ingested_at", scoped.until ?? "2999-12-31")
+            .then((r: any) => (r.error ? [] : (r.data ?? [])))
+        : supabase
+            .from("articles")
+            .select("source_id")
+            .in(
+              "source_id",
+              ids.length ? ids : ["00000000-0000-0000-0000-000000000000"]
+            )
+            .then((r: any) => (r.error ? [] : (r.data ?? []))),
       supabase
         .from("source_sync_logs")
         .select("source_id, status, started_at, finished_at, error_count")
@@ -408,10 +522,13 @@ export async function getAdminData(filters: AdminFilters): Promise<AdminData> {
 
   const topArticles: TopArticle[] = [];
   try {
-    const { data, error } = await supabase
-      .from("articles")
-      .select("id, slug, headline, source_name_snapshot, view_count, published_at")
-      .eq("status", "published")
+    const { data, error } = await applyFilters(
+      supabase
+        .from("articles")
+        .select("id, slug, headline, source_name_snapshot, view_count, published_at")
+        .eq("status", "published"),
+      scoped
+    )
       .order("view_count", { ascending: false })
       .limit(10);
     if (error) throw error;
@@ -495,11 +612,21 @@ export async function getAdminData(filters: AdminFilters): Promise<AdminData> {
 
   const recentErrors: ErrorRow[] = [];
   try {
-    const { data, error } = await supabase
+    // `source_errors` is filtered on its own columns: it has
+    // `occurred_at` rather than `ingested_at`, so the shared
+    // `applyFilters` cannot be used here. The date range is applied
+    // in the query, on the column this table actually has.
+    let errorQuery = supabase
       .from("source_errors")
       .select("source_id, error_type, message, occurred_at")
       .order("occurred_at", { ascending: false })
-      .limit(15);
+      .limit(200);
+
+    if (scoped.sourceId) errorQuery = errorQuery.eq("source_id", scoped.sourceId);
+    if (scoped.since) errorQuery = errorQuery.gte("occurred_at", scoped.since);
+    if (scoped.until) errorQuery = errorQuery.lte("occurred_at", scoped.until);
+
+    const { data, error } = await errorQuery;
     if (error) throw error;
 
     const names = new Map(sources.map((s) => [s.id, s.name]));
@@ -511,6 +638,9 @@ export async function getAdminData(filters: AdminFilters): Promise<AdminData> {
         occurredAt: row.occurred_at,
       });
     }
+    // Only the newest few are shown, so the list is trimmed after the
+    // filters rather than before them.
+    recentErrors.splice(15);
   } catch {
     degraded.push("recent errors");
   }
@@ -561,10 +691,12 @@ export async function getAdminData(filters: AdminFilters): Promise<AdminData> {
     reelsSources,
     recentErrors,
     filters,
+    appliedFilters: scoped,
     totalSources,
     healthySources,
     generatedAt: now.toISOString(),
     degraded: degraded.length ? degraded.join(", ") : null,
+    ignoredFilter: range.ignoredReason,
   };
 }
 

@@ -119,6 +119,69 @@ BUSY_RETRY_BASE_SECONDS = 2.0
 #: "fewer rows" instead of "800MB downloads".
 COMMONS_MAX_PAGE_SIZE = 25
 
+#: How many PAGES of results one term is asked for in a single pass.
+#:
+#: THE REELS FEED WAS FROZEN BECAUSE OF THIS NUMBER NOT EXISTING
+#: -----------------------------------------------------------
+#: The search asks Commons for the NEWEST uploads first
+#: (`gsrsort=create_timestamp_desc`) and the provider asked for exactly
+#: one page of them. So every pass asked for the same twenty-five
+#: newest files for every term, got the same twenty-five files back,
+#: and stored nothing new. The Reels tab was not slow to update - it
+#: was being handed the same rows it already had, and the pool never
+#: grew past the newest slice of each term.
+#:
+#: Commons' own catalogue is far deeper than one page. Measured against
+#: the live API, `intitle:nepal` holds 66 videos, `intitle:festival`
+#: holds 894, and `incategory:"Videos of Snow"` holds 173. A single
+#: page of 25 was never going to be the pool.
+#:
+#: Four pages per term is 100 candidates per term, and with a dozen
+#: terms it is 1,200 candidates a pass. Most are dropped - too long, no
+#: usable licence, no transcode - but the ones that survive ACCUMULATE
+#: in the database, and the database is the backup pool the feed
+#: rotates through.
+COMMONS_PAGES_PER_TERM = 4
+
+#: How many bands the deep paging is split into.
+#:
+#: The deep pages ROTATE, they do not always start at the same place.
+#: Each pass always takes the newest page - that is where a new upload
+#: appears - and then a band further down the results, and the band
+#: moves with the hour. So over a day the pass works through the whole
+#: catalogue of every term, and the pool fills without any single pass
+#: having to walk the entire thing.
+#:
+#: Eight bands of four pages covers 200 results per term. A term with
+#: fewer than that is exhausted and says so, and the pass stops early
+#: rather than asking for pages that do not exist.
+COMMONS_ROTATION_BANDS = 8
+
+#: The most requests one pass may make, whatever the term list says.
+#:
+#: A ceiling on the burst, not on the catalogue. Commons has no quota
+#: and asks clients to be polite; this keeps one pass to a few dozen
+#: requests and a few tens of seconds, and the rotation fills the rest
+#: over the day.
+COMMONS_MAX_REQUESTS_PER_PASS = 96
+
+#: How many search terms one pass may use.
+#:
+#: This was 12, and 12 was enough only when a pass asked for one page
+#: of results per term. With the catalogue being walked in bands, more
+#: terms means more of it is covered per pass, and the terms are cheap
+#: - they are one request each, and the request budget above is what
+#: actually bounds the burst.
+#:
+#: The number matters for coverage, not for politeness: Commons holds
+#: its Nepal footage in many separate corners, and no single term
+#: reaches more than a few dozen of them. Measured against the live
+#: API, the terms the operator asked for hold between 1 and 66 videos
+#: each - `intitle:nepal` 66, `intitle:tharu` 48, `intitle:himalayan`
+#: 29, `intitle:bhaktapur` 1. The union is the pool, and the union is
+#: only as big as the term list.
+MAX_SEARCH_TERMS = 40
+
 #: Floor for a "playable" rendition. Picking a 180px variant is how you
 #: get a card that renders beautifully and looks like garbage.
 MIN_HEIGHT = 360
@@ -654,14 +717,14 @@ class _BaseSource:
             # with no message anywhere.
             #
             # The bound has to clear the longest list `_search_terms` can
-            # still act on — 12 terms at the 80-character per-category
-            # limit is under 1100 — so it is set above that, and the real
+            # still act on — 40 terms at the 80-character per-category
+            # limit is under 3300 — so it is set above that, and the real
             # work is still done by the term cap rather than by this slice.
             # Truncating at a comma boundary also means an over-long
             # operator value loses whole terms rather than half of one.
-            if len(self.hint) > 1200:
-                cut = self.hint.rfind(",", 0, 1200)
-                self.hint = self.hint[: cut if cut > 0 else 1200]
+            if len(self.hint) > 3400:
+                cut = self.hint.rfind(",", 0, 3400)
+                self.hint = self.hint[: cut if cut > 0 else 3400]
 
     # -------------------------------------------------
     # HTTP
@@ -1008,6 +1071,17 @@ class WikimediaSource(_BaseSource):
         first_error: ProviderError | None = None
         failed_terms: list[str] = []
 
+        # The band this pass works through.
+        #
+        # It moves with the hour, so consecutive passes reach further
+        # down each term's results and the pool fills over the course of
+        # a day rather than in one enormous pass. The term's own index
+        # is mixed in so two terms do not walk the same band at the same
+        # time - the requests are spread across the catalogue rather
+        # than concentrated on one corner of it.
+        hour = datetime.now(timezone.utc).hour
+        requests_made = 0
+
         for index, term in enumerate(terms):
             params = {
                 "action": "query",
@@ -1036,45 +1110,86 @@ class WikimediaSource(_BaseSource):
                 "viprop": "url|size|mime|mediatype|derivatives|extmetadata",
             }
 
-            try:
-                payload = await self._search_with_retry(params, term)
-            except ProviderError as exc:
-                failed_terms.append(term)
-                if first_error is None:
-                    first_error = exc
-                logger.warning(
-                    "wikimedia: term %r failed (%s); continuing with the "
-                    "remaining %d term(s).",
-                    term,
-                    str(exc)[:120],
-                    len(terms) - index - 1,
-                )
-                continue
-
-            found = (payload.get("query") or {}).get("pages") or []
-            if not isinstance(found, list):
-                continue
-
-            for page in found:
-                if not isinstance(page, dict):
-                    continue
-                title = str(page.get("title") or "")
-                if title and title in seen_titles:
-                    continue
-                if title:
-                    seen_titles.add(title)
-                pages.append(page)
-
-            # Paced deliberately.
+            # The pages this term is asked for.
             #
-            # A pass fires a dozen searches back to back. That is a burst
-            # shape, and CirrusSearch's answer to a burst is the "too
-            # busy" error above. Half a second between them costs five
-            # seconds on a pass that already has a three-minute ceiling,
-            # and is the difference between a pass that usually completes
-            # and one that usually does not.
-            if index + 1 < len(terms):
+            # The FIRST page is the newest uploads, and it is always
+            # taken: that is where genuinely new material appears, and
+            # a pass that skipped it would never notice a new upload at
+            # all. The rest is a rotating window further down the
+            # results, which is what actually grows the pool.
+            band = (hour + index) % COMMONS_ROTATION_BANDS
+            offsets = [0]
+            for step in range(COMMONS_PAGES_PER_TERM - 1):
+                offsets.append(
+                    (band * COMMONS_MAX_PAGE_SIZE) + (step * COMMONS_MAX_PAGE_SIZE)
+                )
+
+            for offset in offsets:
+                if requests_made >= COMMONS_MAX_REQUESTS_PER_PASS:
+                    logger.info(
+                        "wikimedia: request budget for this pass reached "
+                        "(%d); the remaining bands are covered by the next "
+                        "pass.",
+                        COMMONS_MAX_REQUESTS_PER_PASS,
+                    )
+                    break
+
+                page_params = dict(params)
+                if offset:
+                    page_params["gsroffset"] = str(offset)
+                else:
+                    # Offset 0 is the default, and sending it explicitly
+                    # would be noise in the request log.
+                    page_params.pop("gsroffset", None)
+
+                requests_made += 1
+
+                try:
+                    payload = await self._search_with_retry(page_params, term)
+                except ProviderError as exc:
+                    failed_terms.append(term)
+                    if first_error is None:
+                        first_error = exc
+                    logger.warning(
+                        "wikimedia: term %r failed at offset %d (%s); "
+                        "continuing with the remaining terms.",
+                        term,
+                        offset,
+                        str(exc)[:120],
+                    )
+                    break
+
+                found = (payload.get("query") or {}).get("pages") or []
+                if not isinstance(found, list):
+                    break
+
+                for page in found:
+                    if not isinstance(page, dict):
+                        continue
+                    title = str(page.get("title") or "")
+                    if title and title in seen_titles:
+                        continue
+                    if title:
+                        seen_titles.add(title)
+                    pages.append(page)
+
+                # A short page means the term ran out. Asking for the
+                # next one would be asking for nothing, so the term is
+                # done.
+                if len(found) < wanted:
+                    break
+
+                # Paced deliberately.
+                #
+                # A pass fires a burst of searches back to back.
+                # CirrusSearch's answer to a burst is the "too busy"
+                # error, so every request waits a moment. Half a second
+                # between them is the difference between a pass that
+                # usually completes and one that usually does not.
                 await asyncio.sleep(SEARCH_PACING_SECONDS)
+
+            if requests_made >= COMMONS_MAX_REQUESTS_PER_PASS:
+                break
 
         if failed_terms and len(failed_terms) == len(terms):
             # Nothing succeeded, so this is an outage, not an empty
@@ -1281,7 +1396,7 @@ class WikimediaSource(_BaseSource):
             seen.add(key)
             terms.append(term)
 
-            if len(terms) >= 12:
+            if len(terms) >= MAX_SEARCH_TERMS:
                 break
 
         return terms

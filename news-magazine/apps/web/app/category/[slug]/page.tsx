@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 
 import { EmptyState } from "@/components/EmptyState";
-import { ImagelessGrid } from "@/components/ImagelessGrid";
+import { LiveArticleFeed } from "@/components/LiveArticleFeed";
 import { ReelsFeed } from "@/components/ReelsFeed";
 import { getCategories, getLatestArticles } from "@/lib/news";
 import { getReels } from "@/lib/reels";
@@ -177,13 +177,30 @@ export default async function CategoryPage({ params }: Props) {
             }
           />
         ) : (
-          // ImagelessGrid, not a bare map over NewsCard. A plain
-          // <NewsCard article={article} /> passes no
-          // onImageUnavailable, so a story whose stored image 404s had no
-          // way to ask to be replaced and rendered "No image available"
-          // for good. Same markup as before — the grid classes are
-          // inside the component.
-          <ImagelessGrid articles={feed.articles} />
+          // The same live feed the homepage uses, not a fixed grid.
+          //
+          // This page used to render ImagelessGrid - twenty-four cards
+          // and then nothing. It was the only page on the site that
+          // ended, so a reader who wanted the rest of a category had
+          // nowhere to go, and the newest story in a busy category
+          // could sit below the fold with nothing to pull it up.
+          //
+          // LiveArticleFeed is the homepage's feed: newest first, by
+          // arrival rather than publication time, growing as the
+          // reader scrolls, and it never leaves the category. The
+          // empty-image handling it does is the same handling
+          // ImagelessGrid did, and better: a story whose stored image
+          // 404s is dropped from the grid and the next one slides up
+          // into its place.
+          <LiveArticleFeed
+            initialArticles={feed.articles}
+            initialCursor={feed.nextCursor}
+            category={category.slug}
+            emptyState={{
+              title: "No stories in this category yet",
+              description: `Nothing published in the last 48 hours was categorised as ${category.name_en}. The categoriser assigns categories by keyword, so coverage appears as new stories arrive.`,
+            }}
+          />
         )}
       </section>
     </main>

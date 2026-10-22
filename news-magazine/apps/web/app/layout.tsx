@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { Header } from "@/components/Header";
 import { RouteFooter } from "@/components/RouteFooter";
+import { DailyInfoStrip } from "@/components/DailyInfoStrip";
 import { getCategories } from "@/lib/news";
 import { themeScript } from "@/components/ThemeToggle";
 import { SITE_NAME, SITE_URL, SITE_LOGO } from "@/lib/site";
@@ -130,6 +131,22 @@ export default async function RootLayout({
       </head>
       <body className="flex min-h-screen flex-col bg-white text-gray-900 antialiased font-body">
         <Header categories={categories} />
+        {/*
+          The day's information: the date in Gregorian and Bikram
+          Sambat, the tithi, sunrise and sunset, and the weather in
+          Kathmandu.
+
+          It is a strip rather than a card, and it is not an article:
+          there is no picture and no headline, because there is no
+          story here. A Nepali reader checks the date and the tithi
+          before they read the news, and the header was making them
+          go somewhere else for it.
+
+          Every part of it is optional. If the almanac has not been
+          fetched, or the weather service is down, the strip shows
+          what it has and stops - it can never take a page down.
+        */}
+        <DailyInfoStrip />
         {/*
           No <main> wrapper here. Every page renders its own <main>,
           and a <main> nested inside another <main> is invalid HTML —

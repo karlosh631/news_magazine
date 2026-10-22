@@ -209,7 +209,8 @@ _JUNK_IMAGE_RE = re.compile(
     r"(?:^|[/_.-])(?:pixel|spacer|blank|transparent|1x1|avatar|author|logo|"
     r"icon|sprite|favicon|placeholder|loader|lazy[-_.]?|lazyload|"
     r"default[-_]?image|no[-_]?image|dummy|mock|grey|gray|loading|"
-    r"preload|skeleton|shimmer|lightbox|thumb[-_]?small)[/_.-]",
+    r"preload|skeleton|shimmer|lightbox|thumb[-_]?small|statcounter|"
+    r"counter|beacon|pixel)[/_.-]",
     re.IGNORECASE,
 )
 

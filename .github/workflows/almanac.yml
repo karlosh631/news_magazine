@@ -1,0 +1,128 @@
+# =============================================================
+# The daily almanac
+#
+# WHY THIS IS A SEPARATE WORKFLOW
+# -------------------------------
+# The Nepali almanac — the Bikram Sambat date, the tithi, the
+# nakshatra, the sunrise and the sunset, and the twelve horoscopes —
+# is published every morning and does not change during the day. So
+# it is fetched once a day, at one in the morning NEPALI time, and
+# stored.
+#
+# It cannot rely on the long-lived worker alone. That worker is a
+# service that sleeps: Render suspends a free web service after a
+# period with no inbound traffic, and the cron that pings it only
+# runs every few hours. A publication that is fetched once a day and
+# a worker that may be asleep for five hours do not go together — a
+# day that is missed is a day the reader cannot have.
+#
+# So there is a job for it at a fixed time, which does not depend on
+# the worker being awake.
+#
+# THE TIME
+# --------
+# One in the morning in Nepal is 19:15 UTC the day before, because
+# Kathmandu is UTC+05:45 and the difference is not a round number of
+# hours. GitHub's cron is in UTC, so the schedule below is
+# `19:15 UTC` = `01:00 Nepal`.
+#
+# GitHub's own scheduling is not precise — a scheduled workflow can
+# run minutes or hours late, and on a busy repository much later —
+# so the worker ALSO fetches the almanac, hourly, and whichever
+# lands first wins. The store is an upsert on the Gregorian day, so
+# the second run refreshes the row instead of adding a second one.
+#
+# WHAT IT DOES NOT DO
+# -------------------
+# It does not touch the articles, the reels, the sources or anything
+# else. It writes two tables and nothing else, and it never fails the
+# run: a missing almanac is a missing line in a header, not a reason
+# to fail a scheduled job.
+# =============================================================
+
+name: Daily almanac
+
+on:
+  schedule:
+    # 19:15 UTC = 01:00 in Nepal (UTC+05:45).
+    - cron: "15 19 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ingest-almanac
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  almanac:
+    name: Fetch the almanac and the horoscopes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: news-magazine/apps/ingestion/requirements.txt
+
+      - name: Install ingestion dependencies
+        working-directory: news-magazine/apps/ingestion
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Write .env from repository secrets
+        working-directory: news-magazine/apps/ingestion
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          INGESTION_SECRET: ${{ secrets.INGESTION_SECRET }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for var in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY INGESTION_SECRET CRON_SECRET; do
+            if [ -z "${!var:-}" ]; then
+              echo "::error::Missing secret: $var"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Add these under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          {
+            echo "SUPABASE_URL=$SUPABASE_URL"
+            echo "SUPABASE_SERVICE_ROLE_KEY=$SUPABASE_SERVICE_ROLE_KEY"
+            echo "INGESTION_SECRET=$INGESTION_SECRET"
+            echo "CRON_SECRET=$CRON_SECRET"
+            # The scheduler is not used here: this script runs one pass
+            # and exits. The setting is written anyway so that a stray
+            # import of the scheduler does not start it.
+            echo "SCHEDULER_ENABLED=false"
+            echo "LOG_LEVEL=INFO"
+            echo "LOG_FORMAT=console"
+          } > .env
+
+      - name: Fetch the almanac
+        working-directory: news-magazine/apps/ingestion
+        run: |
+          set -uo pipefail
+          python -m scripts.sync_panchang 2>&1 | tee almanac.log
+          if grep -q "PANCHANG_OK=0" almanac.log; then
+            echo "::warning::The almanac pass failed. The page will show the last day it has."
+          fi
+          grep -E "PANCHANG_OK=" almanac.log || true
+
+      - name: Upload the run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: almanac-log-${{ github.run_number }}
+          path: news-magazine/apps/ingestion/almanac.log
+          retention-days: 7

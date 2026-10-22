@@ -68,7 +68,7 @@ export async function POST(request: Request) {
       a type and a time, and it is what the event mix and the
       timeline are built from.
     */
-    recordEvent("view", {
+    await recordEvent("view", {
       articleId: parsed.data.articleId,
       sessionId: parsed.data.sessionId ?? null,
       metadata: parsed.data.referrer

@@ -186,13 +186,24 @@ async function readPanchang(date: string): Promise<Panchang | null> {
  * is a cached read of a credential — so the cache is here instead,
  * around the one query.
  *
+ * FIVE MINUTES, NOT AN HOUR
+ * -------------------------
  * The almanac for a day does not change during that day, so an hour
- * is generous.
+ * would be generous for the CONTENT. But the cache holds the RESULT,
+ * and the result is "there is no row for today" for the whole of the
+ * night before the worker has run. An hour-long cache on that answer
+ * means the page says "not fetched yet" for an hour after it has been
+ * fetched — which is exactly what it did, and it looked like the
+ * feature was broken rather than slow.
+ *
+ * Five minutes is one query every five minutes for a row that is one
+ * per day, and it means a freshly fetched almanac is on the page
+ * within five minutes.
  */
 const readCachedPanchang = unstable_cache(
   async (date: string) => readPanchang(date),
   ["daily-panchang"],
-  { revalidate: 3600 }
+  { revalidate: 300 }
 );
 
 /**
@@ -305,7 +316,7 @@ async function readPanchangDays(
 const readCachedPanchangDays = unstable_cache(
   async (from: string, limit: number) => readPanchangDays(from, limit),
   ["daily-panchang-days"],
-  { revalidate: 3600 }
+  { revalidate: 300 }
 );
 
 /**
@@ -390,7 +401,7 @@ async function readRashifal(date: string): Promise<RashifalSign[]> {
 const readCachedRashifal = unstable_cache(
   async (date: string) => readRashifal(date),
   ["daily-rashifal"],
-  { revalidate: 3600 }
+  { revalidate: 300 }
 );
 
 /**

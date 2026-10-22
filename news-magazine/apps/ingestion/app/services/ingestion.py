@@ -628,6 +628,38 @@ async def verify_media_images(
     if gif and gif != live and not await validator.is_live(gif):
         media["gif_url"] = None
 
+    # A PICTURE THAT WAS NOT CONFIRMED IS NOT THIS STORY'S PICTURE
+    # -----------------------------------------------------------
+    # `live` above proves the URL returns an image. It does NOT prove
+    # the picture belongs to this story: the candidate list is the
+    # page's own images PLUS the feed's thumbnail, and the feed's
+    # thumbnail is the publisher's choice about a slot in a feed —
+    # regularly a promoted or related story's photograph.
+    #
+    # Measured on production: the story "What is PHP, and why are
+    # security flaws putting European government websites at risk?" was
+    # stored with a black-and-white photograph of an elephant lifted by
+    # an adult elephant's trunk — the "Most Read from World"
+    # thumbnail that Kathmandu Post puts on every one of its article
+    # pages. It was not a broken URL; it was a real image, of
+    # something else entirely.
+    #
+    # The operator's rule is explicit: a picture must belong to the
+    # story it is shown with, and a story with no picture is fine.
+    # So an unconfirmed picture is taken away rather than stored, and
+    # the row is written bare. The repair pass will come back for it
+    # and resolve it from the story's own page.
+    if not media["image_verified"]:
+        logger.info(
+            "No confirmed picture for %r; storing the article with no artwork.",
+            (media.get("image_alt") or "")[:60] or "unstated story",
+        )
+        media["image_url"] = None
+        media["image_highres_url"] = None
+        media["gif_url"] = None
+        media["image_alt"] = None
+        return media, 1
+
     return media, 0
 
 
@@ -865,10 +897,20 @@ async def refresh_stale_images(
             # fetched again.
             .is_("image_verified_at", None)
             .gte("ingested_at", since.isoformat())
-            # Oldest first, so the bounded batch walks the window and
-            # the whole table is covered over a day rather than the
-            # same newest rows being re-checked for ever.
-            .order("ingested_at", desc=False)
+            # NEWEST FIRST, and this is the opposite of what it used to
+            # do. The rows a reader is looking at are the newest ones,
+            # and a wrong picture on the homepage is the wrong picture
+            # that gets reported — the elephant on the PHP story was
+            # ingested at the newest edge of the window and was the
+            # LAST row this pass would ever reach, at five rows a poll.
+            #
+            # The old comment argued that oldest-first "covers the whole
+            # table over a day rather than re-checking the same newest
+            # rows for ever". That is true and it is the wrong priority:
+            # the newest rows are checked first, and once they carry a
+            # marker the pass moves on to the next ones. Nothing is
+            # re-checked for ever, because the marker is what stops it.
+            .order("ingested_at", desc=True)
             .limit(max(limit, 0))
             .execute()
         )
@@ -1070,6 +1112,12 @@ async def repair_broken_image_urls(
                     {
                         "featured_image_url": live,
                         "image_highres_url": live,
+                        # The picture was resolved from this story's OWN
+                        # page, so it IS confirmed. Without this stamp
+                        # the row stays a permanent candidate for the
+                        # refresh pass, which re-fetches it every poll
+                        # for ever.
+                        "image_verified_at": datetime.now(timezone.utc).isoformat(),
                         "last_seen_at": datetime.now(timezone.utc).isoformat(),
                     }
                 )
@@ -1221,6 +1269,12 @@ async def repair_missing_images(
                     {
                         "featured_image_url": live,
                         "image_highres_url": live,
+                        # The picture was resolved from this story's OWN
+                        # page, so it IS confirmed. Without this stamp
+                        # the row stays a permanent candidate for the
+                        # refresh pass, which re-fetches it every poll
+                        # for ever.
+                        "image_verified_at": datetime.now(timezone.utc).isoformat(),
                         "last_seen_at": datetime.now(timezone.utc).isoformat(),
                     }
                 )

@@ -428,7 +428,7 @@ async function languageSelect({
     let query = supabase
       .from("articles")
       .select(
-        "id, slug, headline, excerpt, summary_points, language, featured_image_url, image_highres_url, video_url, video_embed_url, audio_url, gif_url, published_at, source_name_snapshot, source_article_url, source_count, ingested_at"
+        "id, slug, headline, excerpt, summary_points, language, featured_image_url, image_highres_url, video_url, video_embed_url, audio_url, gif_url, image_verified_at, published_at, source_name_snapshot, source_article_url, source_count, ingested_at"
       )
       .eq("status", "published")
       .is("duplicate_of", null)
@@ -579,6 +579,7 @@ function mapArticleRow(row: unknown): LatestArticle {
     video_embed_url: (item.video_embed_url as string) ?? null,
     audio_url: (item.audio_url as string) ?? null,
     gif_url: (item.gif_url as string) ?? null,
+    image_verified_at: (item.image_verified_at as string) ?? null,
     published_at: (item.published_at as string) ?? null,
     ingested_at: (item.ingested_at as string) ?? null,
     source_name_snapshot: (item.source_name_snapshot as string) ?? null,
@@ -613,7 +614,7 @@ async function directSelect({
   let query = supabase
     .from("articles")
     .select(
-      "id, slug, headline, excerpt, summary_points, featured_image_url, image_highres_url, video_url, video_embed_url, audio_url, gif_url, published_at, source_name_snapshot, source_article_url, source_count, ingested_at, primary_category_id"
+      "id, slug, headline, excerpt, summary_points, featured_image_url, image_highres_url, video_url, video_embed_url, audio_url, gif_url, image_verified_at, published_at, source_name_snapshot, source_article_url, source_count, ingested_at, primary_category_id"
     )
     .eq("status", "published")
     .is("duplicate_of", null)
@@ -669,6 +670,7 @@ async function directSelect({
       video_embed_url: (item.video_embed_url as string) ?? null,
       audio_url: (item.audio_url as string) ?? null,
       gif_url: (item.gif_url as string) ?? null,
+    image_verified_at: (item.image_verified_at as string) ?? null,
       published_at: (item.published_at as string) ?? null,
     ingested_at: (item.ingested_at as string) ?? null,
       source_name_snapshot: (item.source_name_snapshot as string) ?? null,
@@ -749,6 +751,8 @@ export function toCardArticle(
     video_embed_url: row.video_embed_url ?? null,
     audio_url: row.audio_url ?? null,
     gif_url: row.gif_url ?? null,
+    image_verified_at:
+      "image_verified_at" in row ? (row.image_verified_at ?? null) : null,
     published_at: row.published_at ?? null,
     // The search RPC's row shape does not carry it, and the mapper
     // serves both shapes — same guarded pattern as source_count below.
@@ -825,7 +829,7 @@ export async function getRelatedArticles(
   const { data, error } = await supabase
     .from("articles")
     .select(
-      "id, slug, headline, excerpt, summary_points, featured_image_url, image_highres_url, video_url, video_embed_url, audio_url, gif_url, published_at, source_name_snapshot, source_article_url, source_count, ingested_at"
+      "id, slug, headline, excerpt, summary_points, featured_image_url, image_highres_url, video_url, video_embed_url, audio_url, gif_url, image_verified_at, published_at, source_name_snapshot, source_article_url, source_count, ingested_at"
     )
     .eq("status", "published")
     .is("duplicate_of", null)
@@ -853,6 +857,7 @@ export async function getRelatedArticles(
       video_embed_url: (item.video_embed_url as string) ?? null,
       audio_url: (item.audio_url as string) ?? null,
       gif_url: (item.gif_url as string) ?? null,
+    image_verified_at: (item.image_verified_at as string) ?? null,
       published_at: (item.published_at as string) ?? null,
     ingested_at: (item.ingested_at as string) ?? null,
       source_name_snapshot: (item.source_name_snapshot as string) ?? null,
@@ -908,7 +913,7 @@ export async function getBreakingNews(limit = 10): Promise<LatestArticle[]> {
   const { data, error } = await supabase
     .from("articles")
     .select(
-      "id, slug, headline, excerpt, summary_points, featured_image_url, image_highres_url, video_url, video_embed_url, audio_url, gif_url, published_at, source_name_snapshot, source_article_url, source_count, ingested_at"
+      "id, slug, headline, excerpt, summary_points, featured_image_url, image_highres_url, video_url, video_embed_url, audio_url, gif_url, image_verified_at, published_at, source_name_snapshot, source_article_url, source_count, ingested_at"
     )
     .eq("status", "published")
     .is("duplicate_of", null)
@@ -935,6 +940,7 @@ export async function getBreakingNews(limit = 10): Promise<LatestArticle[]> {
       video_embed_url: (item.video_embed_url as string) ?? null,
       audio_url: (item.audio_url as string) ?? null,
       gif_url: (item.gif_url as string) ?? null,
+    image_verified_at: (item.image_verified_at as string) ?? null,
       published_at: (item.published_at as string) ?? null,
     ingested_at: (item.ingested_at as string) ?? null,
       source_name_snapshot: (item.source_name_snapshot as string) ?? null,

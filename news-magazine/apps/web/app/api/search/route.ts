@@ -84,7 +84,7 @@ export async function POST(request: Request) {
     search says somebody was looking for something the homepage was
     not showing them.
   */
-  void recordEvent("search", {
+  await recordEvent("search", {
     query: parsed.data.query,
     resultCount: result.articles.length,
   });

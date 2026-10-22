@@ -165,6 +165,7 @@ class FakeQuery:
         self._table = table
         self._filters: list[tuple[str, str, str]] = []
         self._mode = "write"
+        self._limit: int | None = None
 
     def upsert(self, row, on_conflict=None):
         self._recorder["rows"].append((self._table, row, on_conflict))
@@ -189,6 +190,10 @@ class FakeQuery:
         self._mode = "single"
         return self
 
+    def limit(self, count):
+        self._limit = count
+        return self
+
     def execute(self):
         if self._mode == "write":
             return self._recorder
@@ -208,6 +213,10 @@ class FakeQuery:
 
         if self._mode == "single":
             return FakeData(rows[0] if rows else None)
+
+        limit = getattr(self, "_limit", None)
+        if limit is not None:
+            rows = rows[:limit]
         return FakeData(rows)
 
 
@@ -478,3 +487,32 @@ def test_the_stored_row_is_read_back_with_its_timestamp():
 
     assert stamp is not None
     assert (datetime.now(timezone.utc) - stamp) < timedelta(minutes=1)
+
+
+def test_a_day_that_is_not_there_yet_is_not_an_error():
+    """
+    THE BUG THIS EXISTS FOR
+    -----------------------
+    The obvious way to ask the database for one row by its primary key
+    is `maybe_single()`. In this client version it does not work: the
+    `Accept: application/vnd.pgrst.object+json` header asks PostgREST
+    for a bare object, PostgREST answers 406 when the result is empty,
+    and the client's own `except` block RETURNS None instead of a
+    response. So `execute()` hands back `None`, and every caller that
+    then reads `.data` dies on a TypeError.
+
+    It is not a corner case. It is what happens on the first pass of
+    every day, because the day's row is not there yet — and the whole
+    pass was aborting on it, which is why the almanac was never stored
+    even after the migration was applied.
+
+    So the read is a list query with a limit of one, and a day that is
+    not there is None.
+    """
+    from app.services.panchang import panchang_fetched_at
+
+    db = FakeDB()   # nothing stored at all
+
+    stamp = run(panchang_fetched_at(db, date(2026, 10, 22)))
+
+    assert stamp is None

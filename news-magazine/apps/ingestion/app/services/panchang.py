@@ -868,6 +868,9 @@ async def stored_panchang_days(
         logger.warning("panchang: could not read the stored days: %s", exc)
         return []
 
+    if response is None:
+        return []
+
     rows = response.data or []
     found: list[tuple[date, datetime | None]] = []
     for row in rows:
@@ -893,24 +896,47 @@ async def stored_panchang_days(
 
 
 async def panchang_fetched_at(db, day: date) -> datetime | None:
-    """When the row for `day` was last written, if it is there."""
+    """
+    When the row for `day` was last written, if it is there.
+
+    NOT `maybe_single()`
+    -------------------
+    The obvious way to ask for one row by its primary key is
+    `maybe_single()`. In this client version it does not work: the
+    `Accept: application/vnd.pgrst.object+json` header asks PostgREST
+    for a bare object, PostgREST answers 406 when the result is empty,
+    and the client's own `except` block then RETURNS None instead of
+    a response. So `execute()` hands back `None` — and every caller
+    that then reads `.data` dies on a `TypeError`.
+
+    That is not a corner case: it is what happens on the first pass of
+    every day, because the day's row is not there yet. The whole pass
+    was aborting on it, which is why the almanac was never stored even
+    after the migration was applied.
+
+    So it is a list query with a limit of one, and the first row is
+    taken if there is one. The same shape `stored_panchang_days` uses.
+    """
     try:
         response = await db_call(
             lambda: db.table("daily_panchang")
             .select("fetched_at")
             .eq("panchang_date", day.isoformat())
-            .maybe_single()
+            .limit(1)
             .execute()
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("panchang: could not read the fetched_at stamp: %s", exc)
         return None
 
-    row = response.data
-    if not row:
+    if response is None:
         return None
 
-    value = (row or {}).get("fetched_at")
+    rows = response.data or []
+    if not rows:
+        return None
+
+    value = (rows[0] or {}).get("fetched_at")
     if not value:
         return None
 

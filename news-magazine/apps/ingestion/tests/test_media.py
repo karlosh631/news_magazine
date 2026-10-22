@@ -1242,15 +1242,22 @@ async def test_a_dead_gif_url_is_dropped_rather_than_rendered():
     """
     gif_url is a real <img> candidate in the card, so an unvalidated one
     is exactly the broken tile this change exists to stop.
+
+    The page here carries its own photograph, so that photograph is
+    confirmed and survives; the feed's picture and the dead gif go.
     """
     feed = {"image_url": "https://cdn.test/feed.jpg", "gif_url": "https://cdn.test/a.gif"}
-    page = None
+    page = ExtractedMedia(
+        image_url="https://cdn.test/og.jpg",
+        image_candidates=["https://cdn.test/og.jpg"],
+    )
     media = merge_media(feed, page)
 
     async with httpx.AsyncClient(
         transport=transport(
             {
                 "/feed.jpg": build(),
+                "/og.jpg": build(),
                 "/a.gif": build(status=403, content_type="image/gif"),
             }
         )
@@ -1259,8 +1266,37 @@ async def test_a_dead_gif_url_is_dropped_rather_than_rendered():
             media, ImageValidator(client), feed, page
         )
 
-    assert verified["image_url"] == "https://cdn.test/feed.jpg"
+    assert verified["image_url"] == "https://cdn.test/og.jpg"
     assert verified["gif_url"] is None
+
+
+async def test_a_feed_picture_with_no_page_is_not_stored():
+    """
+    The feed's picture is the publisher's choice about a slot in a
+    feed, and it is regularly a promoted or related story's photograph
+    - the "Most Read from World" thumbnail that Kathmandu Post puts
+    on every one of its article pages, which is how a story about PHP
+    security was illustrated with an elephant.
+
+    So a picture that was not confirmed against the story's OWN page
+    is not stored at all. The story is stored bare, and the card shows
+    the story's own key points.
+    """
+    feed = {"image_url": "https://cdn.test/feed.jpg"}
+    page = None
+    media = merge_media(feed, page)
+
+    async with httpx.AsyncClient(
+        transport=transport({"/feed.jpg": build()})
+    ) as client:
+        verified, dropped = await verify_media_images(
+            media, ImageValidator(client), feed, page
+        )
+
+    assert verified["image_url"] is None
+    assert verified["image_highres_url"] is None
+    assert verified["image_verified"] is False
+    assert dropped == 1
 
 
 async def test_a_article_with_no_image_at_all_is_left_untouched():

@@ -573,6 +573,7 @@ class FakeQuery:
         self._table = table
         self._filters: list[tuple[str, str, str]] = []
         self._mode = "write"
+        self._limit: int | None = None
 
     def upsert(self, row, on_conflict=None):
         self._recorder["upserts"].append((self._table, row, on_conflict))
@@ -600,6 +601,10 @@ class FakeQuery:
         self._mode = "single"
         return self
 
+    def limit(self, count):
+        self._limit = count
+        return self
+
     def execute(self):
         if self._mode == "write":
             return self._recorder
@@ -619,6 +624,10 @@ class FakeQuery:
 
         if self._mode == "single":
             return FakeData(rows[0] if rows else None)
+
+        limit = getattr(self, "_limit", None)
+        if limit is not None:
+            rows = rows[:limit]
         return FakeData(rows)
 
 

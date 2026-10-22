@@ -133,11 +133,19 @@ class TestValidationWins:
 
 
 class TestWithoutValidation:
-    def test_the_raw_url_is_still_used_when_nothing_checked_it(self):
+    def test_the_raw_url_is_not_used_when_nothing_checked_it(self):
         """
-        When validation did not run, the raw URL is the only evidence
-        there is. Using it is right - the row is simply left UNVERIFIED,
-        so the repair pass comes back for it later.
+        When validation did not run, NOTHING has been confirmed against
+        the story's own page. The raw URL is exactly the evidence that
+        is not good enough: it is the publisher's choice about a slot
+        in a feed or a scan of the page, and it is regularly a promoted
+        or related story's picture.
+
+        The operator's rule is that a picture must belong to the story
+        it is shown with, and a story with no picture is fine - the
+        card shows the story's own key points. So the row is stored
+        bare, and the repair pass comes back for it and resolves the
+        picture from the story's page.
         """
         service = _service()
 
@@ -149,10 +157,15 @@ class TestWithoutValidation:
             image_validated=False,
         )
 
-        assert row["featured_image_url"] == REAL_PHOTOGRAPH
+        assert row["featured_image_url"] is None
         assert row["image_verified_at"] is None
 
-    def test_the_feed_thumbnail_is_the_last_resort(self):
+    def test_the_feed_thumbnail_is_not_the_last_resort(self):
+        """
+        The feed thumbnail was the other way in. It is a raw URL with
+        no junk check on it at all, and it was the fallback when
+        nothing had been checked.
+        """
         service = _service()
 
         row = service._build_row(
@@ -163,7 +176,7 @@ class TestWithoutValidation:
             image_validated=False,
         )
 
-        assert row["featured_image_url"] == "https://cdn.test/feed-thumb.jpg"
+        assert row["featured_image_url"] is None
         assert row["image_verified_at"] is None
 
 

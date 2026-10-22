@@ -73,6 +73,17 @@ export interface ArticleRow {
   audio_url: string | null;
   gif_url: string | null;
 
+  /**
+   * When this story's picture was confirmed against the story's OWN
+   * page.
+   *
+   * Null means it was never confirmed: the picture came from the
+   * publisher's feed, or from a scan of the page, and nobody has proved
+   * it belongs to this story. The card does not render an unconfirmed
+   * picture — see the operator's rule in components/NewsCard.tsx.
+   */
+  image_verified_at: string | null;
+
   source_id: string | null;
   source_article_url: string | null;
   source_name_snapshot: string | null;
@@ -141,6 +152,17 @@ export interface LatestArticle {
   video_embed_url: string | null;
   audio_url: string | null;
   gif_url: string | null;
+
+  /**
+   * When this story's picture was confirmed against the story's OWN
+   * page.
+   *
+   * Null means it was never confirmed: the picture came from the
+   * publisher's feed, or from a scan of the page, and nobody has proved
+   * it belongs to this story. The card does not render an unconfirmed
+   * picture — see the operator's rule in components/NewsCard.tsx.
+   */
+  image_verified_at: string | null;
   published_at: string | null;
   /**
    * When WE first saw this story — not when the outlet published it.
@@ -177,6 +199,17 @@ export interface SearchResult {
   video_embed_url: string | null;
   audio_url: string | null;
   gif_url: string | null;
+
+  /**
+   * When this story's picture was confirmed against the story's OWN
+   * page.
+   *
+   * Null means it was never confirmed: the picture came from the
+   * publisher's feed, or from a scan of the page, and nobody has proved
+   * it belongs to this story. The card does not render an unconfirmed
+   * picture — see the operator's rule in components/NewsCard.tsx.
+   */
+  image_verified_at: string | null;
   published_at: string | null;
   source_name_snapshot: string | null;
   source_article_url: string | null;

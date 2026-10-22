@@ -109,9 +109,12 @@ test.describe("a card with no picture", () => {
 });
 
 test.describe("the server-side pass", () => {
-  test("a story with no picture but with points is kept", () => {
-    // It is not an empty card: it shows the story's own words where
-    // the photograph would be.
+  test("a story with no picture is dropped, points or not", () => {
+    // The operator's rule: a story whose picture is missing is a
+    // story whose picture was not found, and it does not go on the
+    // page. The card's own key points are a better card than a grey
+    // box, but they are not a reason to keep a story whose picture
+    // the pipeline could not place.
     const rows = [
       {
         id: "a",
@@ -131,7 +134,7 @@ test.describe("the server-side pass", () => {
 
     const kept = dropImageless(rows);
 
-    expect(kept.map((r) => r.id)).toEqual(["a", "b"]);
+    expect(kept.map((r) => r.id)).toEqual(["b"]);
   });
 
   test("a story with no picture and no points is dropped", () => {

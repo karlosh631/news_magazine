@@ -48,6 +48,16 @@ export type NewsCardArticle = {
   language?: "ne" | "en";
   featured_image_url: string | null;
   image_highres_url: string | null;
+  /**
+   * When this story's picture was confirmed against the story's own
+   * page.
+   *
+   * Null means it never was, and the card then shows no picture at
+   * all. Optional, because some callers build a card from a row that
+   * does not carry the column — and an ABSENT marker is not the same
+   * as a marker that says "not confirmed".
+   */
+  image_verified_at?: string | null;
   video_url: string | null;
   video_embed_url: string | null;
   audio_url: string | null;
@@ -108,6 +118,31 @@ function directVideo(url: string | null): string | null {
  * without a feed thumbnail rendered the same unrelated image.
  */
 function pickImages(article: NewsCardArticle): string[] {
+  /*
+    A PICTURE THAT WAS NEVER CONFIRMED IS NOT THIS STORY'S PICTURE
+    -----------------------------------------------------------
+    The database records, in `image_verified_at`, whether the picture
+    was checked against the story's OWN page. When it was not — the
+    picture came from the publisher's feed, or from a scan of the page
+    — the card must not show it.
+
+    What it looked like in production: the story "What is PHP, and why
+    are security flaws putting European government websites at risk?"
+    was illustrated with a black-and-white photograph of an elephant
+    lifted by an adult elephant's trunk. It was not a broken URL; it
+    was a real image, of something else entirely — the "Most Read
+    from World" thumbnail that Kathmandu Post puts on every one of its
+    article pages. The URL loaded, so nothing on the page could tell
+    the reader. The marker can.
+
+    `undefined` (the column was not selected) is NOT treated as
+    "unconfirmed", so a caller that does not carry the column is
+    unaffected. Only an explicit `null` hides the picture.
+  */
+  if (article.image_verified_at === null) {
+    return [];
+  }
+
   const candidates = [
     article.image_highres_url,
     article.featured_image_url,
@@ -355,7 +390,24 @@ export function NewsCard({
             The four-point summary is intentionally NOT here. It is shown
             on the article page, where there is room to read it. */}
         <div className="flex flex-1 flex-col justify-between p-4">
-          <h2 className="font-headline text-base font-bold leading-snug text-gray-900 transition group-hover:text-blue-600 sm:text-lg">
+          {/*
+            THE HEADLINE, AT THE SIZE A HEADLINE IS.
+
+            The operator's note: the headings were very big, and should
+            be the same size as the sources' own. A card is a third of
+            the page wide and holds a photograph as well, so a headline
+            set at a reading size turns the card into a wall of text:
+            three lines of it, and the photograph above it is a
+            decoration.
+
+            So it is set at body size - 15px on a phone, 16px from the
+            `sm` breakpoint - and clamped to three lines. The clamp is
+            what keeps a long headline from pushing every card below
+            it down the page.
+
+            The SERIF is the site's own voice and stays.
+          */}
+          <h2 className="line-clamp-3 font-headline text-[15px] font-semibold leading-snug text-gray-900 transition group-hover:text-blue-600 sm:text-base">
             {article.headline}
           </h2>
 

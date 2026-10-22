@@ -469,14 +469,19 @@ class OnDemandSearcher:
 
         image = None
         if not image_validated:
-            # Validation did not run, so the only evidence available is
-            # the raw URL the page or the feed offered. Use it - it is
-            # better than nothing - but the row is left UNVERIFIED, so
-            # the repair pass will come back for it.
-            if extracted is not None:
-                image = extracted.image_highres_url or extracted.image_url
-            if not image:
-                image = getattr(article, "thumbnail_url", None)
+            # Validation did not run, so NOTHING has been confirmed
+            # against this story's own page. The raw URL the page or the
+            # feed offered is exactly the evidence that is not good
+            # enough: the feed's thumbnail is the publisher's choice
+            # about a slot in a feed, and it is regularly a promoted or
+            # related story's picture.
+            #
+            # The operator's rule is that a picture must belong to the
+            # story it is shown with, and a story with no picture is
+            # fine — the card shows the story's own key points instead.
+            # So the row is stored bare, and the repair pass comes back
+            # for it and resolves the picture from the story's page.
+            image = None
         else:
             # Validation ran, and its answer is the truth.
             #

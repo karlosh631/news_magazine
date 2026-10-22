@@ -228,17 +228,22 @@ export function hasRenderableArtwork(row: {
  * without a request, and the card removes the ones only a browser can
  * disprove.
  *
- * A STORY WITH ITS OWN POINTS IS NOT IMAGELESS
- * ---------------------------------------------
- * The card no longer renders a grey panel where a missing picture
- * would be. It renders the story's own key points — the sentences the
- * summarizer lifted verbatim from the outlet's article — so a story
- * with no photograph still shows something of itself, which is a
- * better card than the next story down.
+ * A STORY WITH ITS OWN POINTS IS NOT A REASON TO KEEP IT
+ * ------------------------------------------------------
+ * The card CAN show the story's own key points where a missing
+ * photograph would be, and that is a better card than a grey box.
  *
- * So this pass removes only the rows with NOTHING to show: no picture,
- * no video, and no points. A story with points stays, because it is
- * not a placeholder.
+ * But the card is not the question. The question is whether the story
+ * should be on the page at all, and the operator's answer is no: a
+ * story whose picture is missing is a story whose picture was not
+ * found, and the pipeline is not certain the headline even belongs
+ * to this outlet. So it is dropped, and the next story down slides
+ * into its place.
+ *
+ * The points remain in the card for the surfaces where a row cannot be
+ * dropped — the article page's related list, and the floor below —
+ * because there a card with something true on it beats a card with a
+ * grey box on it. Neither of those is the FEED.
  *
  * Order is never changed, for the reason every other pass here gives:
  * "newest first" is the promise the page rests on. A dropped card's slot
@@ -251,7 +256,7 @@ export function hasRenderableArtwork(row: {
  * worse one. Same guard LiveArticleFeed applies to its client-side pass.
  */
 export function dropImageless<T extends ImageRow>(rows: T[]): T[] {
-  const kept = rows.filter(hasSomethingToShow);
+  const kept = rows.filter(hasRenderableArtwork);
   return kept.length > 0 ? kept : rows;
 }
 

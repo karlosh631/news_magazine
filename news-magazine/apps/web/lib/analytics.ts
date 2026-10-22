@@ -204,8 +204,31 @@ const REEL_PROVIDER_VARIABLES: { key: string; envVar: string | null }[] = [
   { key: "youtube", envVar: "YOUTUBE_API_KEYS" },
 ];
 
+/**
+ * The bounds of a calendar day, in UTC.
+ *
+ * `since` and `until` arrive from an `<input type="date">`, so they
+ * are DAYS — "2026-10-22" — not instants. Postgres casts a bare date
+ * to midnight, so `ingested_at <= 2026-10-22` means "ingested at or
+ * before midnight at the START of the 22nd", and everything the site
+ * published during the 22nd is thrown away. A range from the 22nd to
+ * the 22nd therefore matched NO row at all, and the "Most read" panel
+ * said "No articles yet" about a day that had hundreds of them.
+ *
+ * So the lower bound is the FIRST instant of `since` and the upper
+ * bound is the LAST instant of `until`. A value that already carries a
+ * time is taken as the instant it names.
+ */
+function startOfDayUtc(day: string): string {
+  return day.includes("T") ? day : `${day}T00:00:00.000Z`;
+}
+
+function endOfDayUtc(day: string): string {
+  return day.includes("T") ? day : `${day}T23:59:59.999Z`;
+}
+
 /** Apply the dashboard's filters to an articles query. */
-function applyFilters<T extends { eq: Function; gte: Function; lte: Function; like: Function }>(
+function applyFilters<T extends { eq: Function; gte: Function; lte: Function; ilike: Function }>(
   query: T,
   filters: AdminFilters
 ): T {
@@ -213,13 +236,18 @@ function applyFilters<T extends { eq: Function; gte: Function; lte: Function; li
 
   if (filters.sourceId) q = q.eq("source_id", filters.sourceId);
   if (filters.categoryId) q = q.eq("primary_category_id", filters.categoryId);
-  if (filters.since) q = q.gte("ingested_at", filters.since);
-  if (filters.until) q = q.lte("ingested_at", filters.until);
+  if (filters.since) q = q.gte("ingested_at", startOfDayUtc(filters.since));
+  if (filters.until) q = q.lte("ingested_at", endOfDayUtc(filters.until));
   if (filters.query) {
     // ilike, and the wildcard goes around the operator's text so a
     // query for "dashain" finds "Dashain" in any case.
+    //
+    // It was `like`, which PostgREST applies CASE-SENSITIVELY: the
+    // same search returned nothing for "dashain" and thirty-five
+    // stories for "Dashain", and the panel could not tell the
+    // operator that the search simply had not been case-folded.
     const safe = filters.query.replace(/[%_,]/g, " ").trim();
-    if (safe) q = q.like("headline", `%${safe}%`);
+    if (safe) q = q.ilike("headline", `%${safe}%`);
   }
 
   return q;
@@ -361,7 +389,11 @@ export async function getAdminData(filters: AdminFilters): Promise<AdminData> {
       .limit(20000);
     if (error) throw error;
     uniqueSessions = new Set((data ?? []).map((r: any) => r.session_id)).size;
-  } catch {
+  } catch (error) {
+    console.error(
+      "[admin] the unique sessions query failed:",
+      error
+    );
     degraded.push("unique sessions");
   }
 
@@ -412,7 +444,11 @@ export async function getAdminData(filters: AdminFilters): Promise<AdminData> {
     for (const [type, count] of [...counts.entries()].sort((a, b) => b[1] - a[1])) {
       eventMix.push({ type, count });
     }
-  } catch {
+  } catch (error) {
+    console.error(
+      "[admin] the event mix query failed:",
+      error
+    );
     degraded.push("event mix");
   }
 
@@ -510,7 +546,11 @@ export async function getAdminData(filters: AdminFilters): Promise<AdminData> {
         errorCount: errorCounts.get(source.id) ?? 0,
       });
     }
-  } catch {
+  } catch (error) {
+    console.error(
+      "[admin] the sources query failed:",
+      error
+    );
     degraded.push("sources");
   }
 
@@ -544,7 +584,11 @@ export async function getAdminData(filters: AdminFilters): Promise<AdminData> {
         articleCount: counts.get(category.id) ?? 0,
       });
     }
-  } catch {
+  } catch (error) {
+    console.error(
+      "[admin] the categories query failed:",
+      error
+    );
     degraded.push("categories");
   }
 
@@ -573,7 +617,11 @@ export async function getAdminData(filters: AdminFilters): Promise<AdminData> {
         publishedAt: row.published_at,
       });
     }
-  } catch {
+  } catch (error) {
+    console.error(
+      "[admin] the top articles query failed:",
+      error
+    );
     degraded.push("top articles");
   }
 
@@ -618,7 +666,11 @@ export async function getAdminData(filters: AdminFilters): Promise<AdminData> {
         hasImage: Boolean(row.featured_image_url),
       });
     }
-  } catch {
+  } catch (error) {
+    console.error(
+      "[admin] the latest articles query failed:",
+      error
+    );
     degraded.push("latest articles");
   }
 
@@ -662,7 +714,11 @@ export async function getAdminData(filters: AdminFilters): Promise<AdminData> {
         clipCount: clipCounts.get(provider.key) ?? 0,
       });
     }
-  } catch {
+  } catch (error) {
+    console.error(
+      "[admin] the reels sources query failed:",
+      error
+    );
     degraded.push("reels sources");
     // The recorded state is missing, but the operator still needs to
     // know which variable switches each provider on. Fall back to the
@@ -716,7 +772,11 @@ export async function getAdminData(filters: AdminFilters): Promise<AdminData> {
     // Only the newest few are shown, so the list is trimmed after the
     // filters rather than before them.
     recentErrors.splice(15);
-  } catch {
+  } catch (error) {
+    console.error(
+      "[admin] the recent errors query failed:",
+      error
+    );
     degraded.push("recent errors");
   }
 

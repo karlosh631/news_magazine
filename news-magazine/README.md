@@ -83,7 +83,10 @@ Apply these in order. Each is idempotent, so re-running is safe.
 | `0019_articles_ingested_at_index.sql` | The index behind the arrival-time tiebreaker, and a backfill of arrival time for rows that predate the column |
 | `0020_fix_outlet_selectors.sql` | Working selectors for the outlets whose listing pages could be read, and the reasoning for the ones that cannot |
 | `0021_expanded_sources.sql` | The expanded outlet list: the dead outlets disabled and the verified new ones added |
-| `0022_daily_panchang.sql` | The daily almanac the header strip reads |
+| `0022_daily_panchang.sql` | The daily almanac: one row per day, with the tithi, the nakshatra and the time windows |
+| `0023_rashifal_category.sql` | The Rashifal category row |
+| `0024_purge_spam_articles.sql` | The removal of the search-engine spam a parked domain served as news |
+| `0025_daily_rashifal.sql` | The twelve horoscopes: twelve rows a day, one per sign |
 
 Migrations 0001–0016 are the original schema and are described in
 `ARCHITECTURE.md`.
@@ -208,6 +211,15 @@ because the scheduler has no single pass over every outlet: each
 outlet is polled on its own interval, and the window is what bounds
 the pipeline's total appetite.
 
+**The almanac is not one of the capped things, and it is on a budget of
+its own.** It is a single source, and it is not a news outlet, so the
+per-cycle caps do not describe it. What bounds it is that the pass asks
+the database first: today's row is refreshed at most once an hour, and
+the week ahead is walked at most once an hour and only when a day is
+missing from it. In steady state that is one request an hour for today
+and eight a day for the week ahead — about forty a day, against a
+source that serves one page to each of its own visitors.
+
 ---
 
 ## Ingestion endpoints
@@ -289,12 +301,31 @@ Neither is required. The four-point summaries work without any API key.
 ## Sources
 
 Configured as rows in the `sources` table, not in code. Migration
-`0008_seed_nepali_sources.sql` seeds 27 outlets.
+`0008_seed_nepali_sources.sql` seeds 27 outlets, and
+`0021_expanded_sources.sql` adds fifteen more, re-points four and
+disables twelve that are verifiably dead.
 
-| Adapter | Outlets |
+**Every outlet, with the URL that works or the exact reason it does
+not, is in `apps/ingestion/docs/outlet-expansion.md`.** Seventy were
+measured against the live web to write it. The short version of what
+was found:
+
+- seven domains do not resolve, and four refuse TCP — one range of
+  addresses that looks like a block or an outage rather than four
+  separate breakages, and worth re-testing from a Nepali network;
+- three serve a GoDaddy parking lander and one redirects to
+  HugeDomains, so the pipeline was filing a domain for sale as news;
+- `news24nepal.tv` has `Disallow: /` in its robots.txt and so is not
+  addable at all;
+- two seed rows had been disabled for the wrong reason — Himal Khabar
+  and Ekantipur were called "client-rendered", which is true of their
+  listings and false of their feeds, and Ekantipur's robots.txt contains
+  no directive at all. Both work now.
+
+| Adapter | What it is for |
 |---|---|
-| `generic_rss` | OnlineKhabar (ne/en), Kantipur/The Kathmandu Post, Ratopati, Setopati, Nepal News (ne/en), Nagarik News, Nagarik Times, Khabarzone, Pradesh Post, BBC Nepali, MOFA |
-| `html_listing` | The Himalayan Times, Annapurna Post, 24 News, MyReplica, Newahale, Nepal Kantha, Bhabishaanepal, Arthikabhojan, Voice of Nepal, Nepalbhas, Prasuto Journal, Sudarshan |
+| `generic_rss` | A WordPress or RSS feed. The page size is sent anyway (`RSS_PAGE_SIZE`), and paging is the mechanism that actually delivers more (`RSS_FEED_PAGES`, off by default because every extra page is an extra request to a publisher). Only known-WordPress hosts get any parameter, and the host list was built by reading each feed's `<generator>` tag rather than guessed. |
+| `html_listing` | A listing page with no feed. It needs a `selector_config`, and the selectors are the whole of the contract. |
 
 Adding an outlet is an `INSERT`, not a deploy:
 
@@ -547,28 +578,42 @@ The loader starts a page 1200px ahead of the viewport rather than
 scrolling fast through a category does not outrun the loader and watch
 it catch up.
 
-### The date, the almanac and the weather
+### The almanac, and the days ahead of it
 
-Under the header there is a strip: today's date in Gregorian and in
-Bikram Sambat, the tithi, sunrise and sunset, and the weather in
-Kathmandu. It is a strip and not a card, because there is no story in
-it.
+`/category/rashifal` carries the Nepali almanac: today's date in
+Gregorian and in Bikram Sambat, the tithi, the nakshatra, the yoga, the
+karana, the paksha, sunrise and sunset, the auspicious and inauspicious
+windows of the day — and the twelve horoscopes, one for each sign.
 
-The Nepali date comes from the source that publishes the almanac, which
-the ingestion worker fetches once a day and stores. It is not computed
-in the browser: getting the Bikram Sambat calendar right needs the
-month lengths for every year, and a wrong table is worse than no date —
-a site that says "५ माघ २०८३" on the wrong day is not a site that
-says nothing. Until the worker has run, the strip shows the Gregorian
-date and the weather, which is the honest answer and not a guess.
+**The values are fetched and stored, never computed on the page.**
+Getting the Bikram Sambat calendar right needs the month lengths for
+every year, and a wrong table is worse than no date — a site that says
+"५ माघ २०८३" on the wrong day is not a site that says nothing. The
+source publishes the panchang as the Nepal Panchanga Nirnayak Samiti
+computes it, and the site is a copy of one day of it.
 
-The weather is Open-Meteo, which needs no key. A weather API that needs
-a key is a weather API that stops working when the key expires, and a
-header that stops working is a broken site.
+**The cron fetches it, and it asks the database first.** The pass runs
+from the five-minute GitHub Actions cron as well as from the long-lived
+worker, because the long-lived worker is a service that sleeps and the
+cron is not. When today's row is there and less than an hour old, the
+pass costs one query and no requests at all — without that check the
+cron would re-download the same large page three hundred times a day.
 
-The date is **Nepal's** date, not the server's and not the browser's.
-Kathmandu is UTC+05:45, so at 18:00 UTC it is already the next day
-there.
+**The days ahead are kept too.** "Today's tithi" is one question and
+"tomorrow's tithi" is another, and only the first of them had a row.
+Each per-day page links to the day after it, and that link is followed:
+it is the site's own conversion of one day into the next, which is worth
+a great deal, because the Bikram Sambat month is 29 to 32 days long and
+cannot be reached by adding seven to today's date. The days ahead bring
+their own horoscopes with them.
+
+The page offers the days it has as a row of buttons, today first, and
+the day is in the URL — so a reader can send somebody tomorrow's
+horoscope and they will see the same day.
+
+**The date is Nepal's date, not the server's.** Kathmandu is UTC+05:45,
+so at 18:00 UTC it is already the next day there, and an almanac row
+keyed on the server's day is a row nobody will ever read.
 
 ### A picture that belongs to the story
 
@@ -588,12 +633,46 @@ The page is now always fetched for a new story, and where the picture
 came from is recorded on the row (`image_verified_at`), so the dashboard
 can tell a picture verified against the article from one that was not.
 
+### A story with no picture
+
+A card with no picture used to show a grey panel that said "No image
+available" — honest, and useless, because the reader scrolled to a
+headline and got told nothing about the story.
+
+The summarizer already lifted four sentences out of the outlet's own
+article and stored them on the row, verbatim, in the outlet's own words.
+Those sentences **are** the story, in miniature, so a card with no
+photograph now shows the first two of them where the photograph would
+be, under a label that says what they are.
+
+This is the operator's brief, and it is the right one: a story with no
+picture is fine, a story with a picture that belongs to something else
+is not, and a story with its own key points is better than either. A
+broken picture and a missing one are the same thing to a reader, so they
+are the same thing to the card.
+
+The consequence runs through the feed: a story with key points is not
+"imageless", so the passes that remove empty cards keep it. Only a story
+with no picture, no video **and** no points is swapped out.
+
 ### The same photograph twice
 
 The same photo served at two sizes is two URLs and one filename stem, so
-the feed catches it by **stem**, not by full URL. The second card loses
-its picture and keeps its story: a story without a picture is better
-than the same story with the wrong one.
+the feed catches it by **stem**, not by full URL.
+
+The second card is **dropped**, not merely stripped of its picture. A
+duplicate is almost never a different story: it is the same wire copy,
+or the same outlet twice, and the headline is usually mangled by
+whatever the listing did to it — so the reader was seeing the same story
+again under a title that read *"SPORTS Nepal face Oman in crucial World
+Cup Lea... Nepal face Oman in crucial World Cup Lea..."*. A blanked card
+is not neutral either: its headline says one thing and its picture slot
+says another.
+
+The dropped card's slot is filled by the next story down, which is why
+every caller over-fetches before calling the pass. The floor is not
+negotiable: a page of one photograph returns one card rather than an
+empty page.
 
 ---
 

@@ -2,3 +2,8 @@ news-magazine/.live-monitor/
 news-magazine/apps/web/test-results/
 jobs.json
 runs.json
+news-magazine/apps/web/_audit/
+news-magazine/apps/web/_scratch/
+news-magazine/apps/web/_skeptic_*.js
+news-magazine/apps/web/_cls_probe*.js
+news-magazine/apps/web/tsconfig.tsbuildinfo

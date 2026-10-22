@@ -43,6 +43,7 @@ read as permissive in the first place.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import html
 import logging
@@ -69,6 +70,54 @@ logger = logging.getLogger("reels.providers")
 #: Commons documentary segment is not what a vertical feed is for, and
 #: letting one in makes the whole category feel like it is lying.
 MAX_SECONDS = 180.0
+
+#: Pause between the per-term searches in one Wikimedia pass.
+#:
+#: A pass fires up to twelve of them back to back. That is a burst, and
+#: CirrusSearch's documented answer to a burst is
+#: `cirrussearch-too-busy-error`. Half a second costs five seconds on a
+#: pass with a three-minute ceiling, and removes most of the pressure
+#: that produces the error in the first place.
+SEARCH_PACING_SECONDS = 0.5
+
+#: How hard to ride out a "search is currently too busy" answer.
+#:
+#: Commons returns it as HTTP 200 with the error inside the body, so it
+#: looks like a success to anything that only checks the status code.
+#: Three attempts — two, four seconds — clears a busy minute without
+#: holding the scheduler slot, which runs at `max_instances=1`.
+BUSY_RETRY_ATTEMPTS = 3
+BUSY_RETRY_BASE_SECONDS = 2.0
+
+#: Largest page of search results we will ask Commons for in one request.
+#:
+#: Commons silently discards the entire `videoinfo` module — returning
+#: HTTP 200, no error object, no warning — once a request combines a
+#: large page with `iiurlwidth`. Measured against the live API, same
+#: query, varying only `gsrlimit`:
+#:
+#:   gsrlimit= 20 + iiurlwidth -> 20 pages, 20 with videoinfo
+#:   gsrlimit= 40 + iiurlwidth -> 40 pages, 40 with videoinfo
+#:   gsrlimit= 50 + iiurlwidth -> 50 pages,  0 with videoinfo
+#:
+#: Fifty is the value this adapter used, so in production every Wikimedia
+#: pass was storing reels built from `imageinfo` alone. Two things break
+#: at once and neither announces itself:
+#:
+#:   1. `duration` is gone, and `_within_duration(None)` returns True —
+#:      so the three-minute cap silently stopped applying.
+#:   2. `derivatives` is gone, and that is the list `_best_video_url`
+#:      picks a playable transcode from. With no derivatives it falls
+#:      back to the ORIGINAL master file, so the feed pointed phones at
+#:      Commons originals — measured at 159MB, 164MB and 807MB — and
+#:      labelled them by a resolution derived from the master rather
+#:      than the bytes actually served.
+#:
+#: Twenty-five leaves ample headroom under the observed cliff while
+#: still asking for a useful page, and `_search_with_retry` re-checks
+#: for the dropped module so a future move of the cliff degrades to
+#: "fewer rows" instead of "800MB downloads".
+COMMONS_MAX_PAGE_SIZE = 25
 
 #: Floor for a "playable" rendition. Picking a 180px variant is how you
 #: get a card that renders beautifully and looks like garbage.
@@ -593,7 +642,26 @@ class _BaseSource:
             # A hint comes from operator config and ends up in a search
             # string; bound it so a pasted paragraph cannot become a 4KB
             # query parameter.
-            self.hint = self.hint[:200]
+            #
+            # 200 was sized for a list of bare place names and was a
+            # silent trap once categories were allowed. `reels_search_terms`
+            # is capped at 12 terms, but a `cat:Videos of Festivals` entry
+            # is 23 characters, so the shipped default list came to 261 and
+            # the last three terms were amputated mid-word — the hint ended
+            # at "cat:Videos of Fest", which then failed the category
+            # validation and was dropped. Nothing errored; the Reels tab
+            # simply stopped receiving festivals, agriculture and markets
+            # with no message anywhere.
+            #
+            # The bound has to clear the longest list `_search_terms` can
+            # still act on — 12 terms at the 80-character per-category
+            # limit is under 1100 — so it is set above that, and the real
+            # work is still done by the term cap rather than by this slice.
+            # Truncating at a comma boundary also means an over-long
+            # operator value loses whole terms rather than half of one.
+            if len(self.hint) > 1200:
+                cut = self.hint.rfind(",", 0, 1200)
+                self.hint = self.hint[: cut if cut > 0 else 1200]
 
     # -------------------------------------------------
     # HTTP
@@ -890,7 +958,18 @@ class WikimediaSource(_BaseSource):
         # Over-fetch. Most candidates get dropped for being longer than
         # three minutes or for having an unreadable licence, and
         # requesting exactly `limit` would return a short feed.
-        wanted = min(50, max(limit, 10) * 3)
+        #
+        # The ceiling is COMMONS_MAX_PAGE_SIZE rather than 50 because of
+        # the trap documented on that constant: asking for 50 pages
+        # *together with* `iiurlwidth` makes Commons answer HTTP 200
+        # with the entire `videoinfo` module silently missing. Twelve
+        # terms at 50 was therefore storing reels with no duration and,
+        # worse, no `derivatives` — which is what `_best_video_url` picks
+        # a transcode from, so every one of them fell back to the
+        # ORIGINAL master file. Commons masters run to hundreds of
+        # megabytes; the feed was pointing phones at 807MB webm files
+        # and calling it a 1080p reel.
+        wanted = min(COMMONS_MAX_PAGE_SIZE, max(limit, 10) * 3)
 
         # One query per configured term, then the union.
         #
@@ -910,7 +989,26 @@ class WikimediaSource(_BaseSource):
         pages: list[dict] = []
         seen_titles: set[str] = set()
 
-        for term in terms:
+        # A term that fails must not cost us the terms that worked.
+        #
+        # Commons is shared infrastructure and it says so: one search in
+        # twelve can come back `cirrussearch-too-busy-error` — HTTP 200,
+        # error in the body, "Search is currently too busy. Please try
+        # again later." Before this, that raised out of `_fetch` and took
+        # the entire pass with it, discarding the result sets already
+        # gathered for terms one through eleven. Because it is
+        # intermittent and Commons-wide, the symptom on the site is not
+        # an error — it is a Reels tab that quietly stops moving while
+        # the worker logs a healthy run.
+        #
+        # So each term is isolated. If EVERY term fails the pass still
+        # raises, because "Commons returned nothing" and "Commons was
+        # unavailable" are different facts and only one of them is a
+        # healthy empty result.
+        first_error: ProviderError | None = None
+        failed_terms: list[str] = []
+
+        for index, term in enumerate(terms):
             params = {
                 "action": "query",
                 "format": "json",
@@ -938,7 +1036,20 @@ class WikimediaSource(_BaseSource):
                 "viprop": "url|size|mime|mediatype|derivatives|extmetadata",
             }
 
-            payload = await self._get_json(params)
+            try:
+                payload = await self._search_with_retry(params, term)
+            except ProviderError as exc:
+                failed_terms.append(term)
+                if first_error is None:
+                    first_error = exc
+                logger.warning(
+                    "wikimedia: term %r failed (%s); continuing with the "
+                    "remaining %d term(s).",
+                    term,
+                    str(exc)[:120],
+                    len(terms) - index - 1,
+                )
+                continue
 
             found = (payload.get("query") or {}).get("pages") or []
             if not isinstance(found, list):
@@ -953,6 +1064,33 @@ class WikimediaSource(_BaseSource):
                 if title:
                     seen_titles.add(title)
                 pages.append(page)
+
+            # Paced deliberately.
+            #
+            # A pass fires a dozen searches back to back. That is a burst
+            # shape, and CirrusSearch's answer to a burst is the "too
+            # busy" error above. Half a second between them costs five
+            # seconds on a pass that already has a three-minute ceiling,
+            # and is the difference between a pass that usually completes
+            # and one that usually does not.
+            if index + 1 < len(terms):
+                await asyncio.sleep(SEARCH_PACING_SECONDS)
+
+        if failed_terms and len(failed_terms) == len(terms):
+            # Nothing succeeded, so this is an outage, not an empty
+            # catalogue. Reporting it as an empty result is what let the
+            # Reels tab go quiet with a healthy-looking log.
+            raise first_error or ProviderError(
+                "wikimedia: every configured term failed."
+            )
+
+        if failed_terms:
+            logger.info(
+                "wikimedia: %d of %d term(s) failed this pass; stored the "
+                "rest rather than discarding the pass.",
+                len(failed_terms),
+                len(terms),
+            )
 
         reels: list[Reel] = []
         skipped_no_licence = 0
@@ -978,6 +1116,84 @@ class WikimediaSource(_BaseSource):
             )
 
         return _sorted_by_timestamp(reels)
+
+    async def _search_with_retry(self, params: dict[str, str], term: str) -> dict:
+        """
+        One Commons search, retried while the answer is "busy".
+
+        CirrusSearch reports saturation as `cirrussearch-too-busy-error`
+        inside a successful HTTP 200 — a queue, not a failure, and its
+        own text is "Please try again later". Riding out a busy minute
+        with a short, growing pause is the difference between a pass that
+        stores twelve terms' worth of new clips and one that stores none.
+
+        Only that one code is retried. Anything else — a bad parameter, a
+        DNS failure, a genuinely malformed response — will fail the same
+        way three times, and retrying it would hold the scheduler slot
+        (`max_instances=1`) for no gain.
+
+        Three attempts at 2s then 4s. The pass as a whole is bounded by
+        `reels_pass_timeout_seconds`, so the worst case here is a small
+        fraction of that budget.
+        """
+        delay = BUSY_RETRY_BASE_SECONDS
+        last_error: ProviderError | None = None
+
+        for attempt in range(BUSY_RETRY_ATTEMPTS):
+            try:
+                payload = await self._get_json(params)
+            except ProviderError as exc:
+                if "too-busy" not in str(exc).lower():
+                    raise
+                last_error = exc
+                if attempt == BUSY_RETRY_ATTEMPTS - 1:
+                    break
+                logger.info(
+                    "wikimedia: Commons is busy for %r, retrying in %.0fs "
+                    "(attempt %d/%d).",
+                    term,
+                    delay,
+                    attempt + 1,
+                    BUSY_RETRY_ATTEMPTS,
+                )
+                await asyncio.sleep(delay)
+                delay *= 2
+                continue
+
+            # A page came back, but is `videoinfo` on it?
+            #
+            # Commons drops that module silently once a request is large
+            # enough — no error, no warning, just absent data — and a
+            # result without it looks perfectly healthy to every check
+            # above. The consequence is not cosmetic: no `derivatives`
+            # means no transcode, so `_best_video_url` falls back to the
+            # original master and the feed starts serving files measured
+            # in hundreds of megabytes.
+            #
+            # So the signature is checked rather than assumed, and the
+            # page is halved and retried once. That turns a future move
+            # of Wikimedia's cliff into "this pass found fewer rows"
+            # instead of "the reels tab started downloading masters".
+            pages = (payload.get("query") or {}).get("pages") or []
+            if isinstance(pages, list) and pages and not any(
+                isinstance(p, dict) and p.get("videoinfo") for p in pages
+            ):
+                smaller = max(10, int(params.get("gsrlimit") or 10) // 2)
+                if smaller < int(params.get("gsrlimit") or 10):
+                    logger.warning(
+                        "wikimedia: Commons returned %d result(s) for %r with "
+                        "no videoinfo at gsrlimit=%s; retrying at %s.",
+                        len(pages),
+                        term,
+                        params.get("gsrlimit"),
+                        smaller,
+                    )
+                    params = {**params, "gsrlimit": str(smaller)}
+                    return await self._search_with_retry(params, term)
+
+            return payload
+
+        raise last_error or ProviderError("wikimedia: search busy.")
 
     def _search_terms(self) -> list[str]:
         """
@@ -1010,7 +1226,41 @@ class WikimediaSource(_BaseSource):
             if not term:
                 continue
 
-            if term.isalnum():
+            # A CATEGORY term, written `cat:Videos of Rain`.
+            #
+            # `intitle:` only reaches files whose TITLE carries the word.
+            # For a subject like "rain" or "floods" almost nothing on
+            # Commons is titled that way — the title is a place, a date or
+            # a uploader's name — so an `intitle:`-only term list can
+            # never fill a reels page. That is what left the category
+            # showing the same Everest footage indefinitely: the 12-term
+            # default was almost entirely Everest, Himalaya and Sagarmatha,
+            # which are three names for one small pool.
+            #
+            # `incategory:` reaches the files a human filed as being about
+            # the subject, which is the constraint actually wanted.
+            # Measured against the live API, tall videos (h>=360) out of a
+            # 30-result page:
+            #
+            #   Videos of Rain        30      Videos of Mountains      27
+            #   Videos of Rivers      30      Videos of Agriculture   29
+            #   Videos of Festivals   30      Videos of Cities        15
+            #   Videos of Floods      30      Videos of the Himalayas   5
+            #
+            # against 19 for the single best title term, `intitle:nepal`.
+            if term.lower().startswith("cat:"):
+                name = term[4:].strip()
+                # Category names legitimately contain spaces and digits.
+                # What must not ride along is CirrusSearch operator
+                # syntax, so this rejects anything that could close the
+                # quoted string or smuggle in a second filter — the same
+                # rule the phrase branch below applies to titles.
+                if not name or len(name) > 80:
+                    continue
+                if any(ch in name for ch in '"\\^~*:<>{}()[]|'):
+                    continue
+                term = f"cat:{name}"
+            elif term.isalnum():
                 if len(term) < 3:
                     continue
             elif " " in term:
@@ -1076,12 +1326,25 @@ class WikimediaSource(_BaseSource):
         almost nothing, so exactly one is used per query — and the
         caller issues one query per configured term, unioning the
         results.
+
+        A `cat:` term becomes `incategory:` instead, which is the same
+        one-constraint-per-query rule pointed at the category tree rather
+        than the file title. `intitle:` and `incategory:` are never
+        combined: they AND together, and a file titled "Rain in Pokhara"
+        that sits in "Videos of Rain" is already found by the weaker of
+        the two.
         """
         parts = ["filetype:video", '-incategory:"Non-free files"']
 
         cleaned = (term or "").strip()
         if cleaned:
-            if cleaned.isalnum() and len(cleaned) > 2:
+            if cleaned.lower().startswith("cat:"):
+                # Quoted for the same reason a phrase is: an unquoted
+                # multi-word category in CirrusSearch is OR'd, so
+                # `incategory:Videos of Rain` matches every video filed
+                # under "Videos", "of", or "Rain".
+                parts.append(f'incategory:"{cleaned[4:].strip()}"')
+            elif cleaned.isalnum() and len(cleaned) > 2:
                 parts.append(f"intitle:{cleaned}")
             elif " " in cleaned and all(w.isalnum() for w in cleaned.split()):
                 # A multi-word phrase. Quoted, because unquoted words in

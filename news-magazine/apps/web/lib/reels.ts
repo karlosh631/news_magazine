@@ -152,15 +152,34 @@ export async function getReels(opts?: { limit?: number }): Promise<ReelFeedResul
     .select(
       "id, source_key, video_url, embed_url, poster_url, title, description, creator_name, creator_url, license_name, license_url, attribution_required, width, height, duration_seconds, published_at, reel_likes(count)"
     )
-    // nullsFirst: false is required, not cosmetic — the same trap the
-    // articles feed documents. PostgreSQL defaults `ORDER BY ... DESC` to
-    // NULLS FIRST, so an undated clip would sit at position 1 and push
-    // every dated one down the feed.
+    /*
+      Order by WHEN WE FETCHED IT, not by when it was published.
+
+      This was `published_at DESC, ingested_at DESC`, and on a feed of
+      Wikimedia clips it produced a page that never changed. A Commons
+      clip's `published_at` is its upload date, which for this subject
+      means 2011 and 2014 Everest footage. Those dates are frozen for
+      ever, so the top of the feed was permanently occupied by whichever
+      clips happened to have the newest upload — and every clip the
+      worker has ingested since sorts BELOW them. A reader could watch
+      the worker add rows all day and the first twelve cards would not
+      move.
+
+      `ingested_at` is monotonic and is what the reader is actually
+      being promised: the newest thing we have on top. It is the same
+      rule the articles feed uses, and for the same reason.
+
+      Note this is arrival order, not novelty order — an evergreen clip
+      discovered for the first time today rightly appears at the top,
+      because from the reader's point of view it is new. That is what
+      makes the page move on every pass.
+
+      `published_at` remains as the tiebreak: providers publish at
+      whole-second resolution, so two clips routinely share a value, and
+      without a second key the order would shuffle between renders.
+    */
+    .order("ingested_at", { ascending: false, nullsFirst: false })
     .order("published_at", { ascending: false, nullsFirst: false })
-    // Providers publish at whole-second resolution, so two clips routinely
-    // share a published_at. Break the tie on when we ingested them, which
-    // is monotonic, so the order never shuffles between renders.
-    .order("ingested_at", { ascending: false })
     // Over-fetched so that filtering out unplayable clips still fills
     // the feed. Asking for exactly `limit` and then discarding rows
     // would shorten the page every time a provider contributed a few.

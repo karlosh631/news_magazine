@@ -223,9 +223,53 @@ class Settings(BaseSettings):
     # with unrelated scientific timelapses — a first pass here stored 30
     # NASA SDO clips. Terms keep the category on subject by default; add
     # your own comma-separated to widen it.
+    #
+    # WHAT THIS LIST CAN AND CANNOT DO
+    # --------------------------------
+    # Every entry below was measured against the live API at the page
+    # size the adapter actually requests (50 results, tall videos only):
+    #
+    #   nepal 50   tharu 48   himalayan 29   kathmandu 8
+    #   langtang 7   janakpur 6   cat:Videos of Mount Everest 6
+    #   cat:Videos of the Himalayas 5   bagmati 2   bhaktapur 1
+    #   pashupatinath 1   bhairahawa 1
+    #
+    # That is roughly 135 files, and the reels table already held 136
+    # rows before this list was written. Commons has no more video of
+    # Nepal than this. The Reels tab is not "not updating" because the
+    # search is too narrow — it is at the ceiling of a keyless source,
+    # and no term list can lift it.
+    #
+    # Generic subject categories were measured too, and are deliberately
+    # NOT used: `cat:Videos of Rain` returns 48 files that are Sonoma
+    # County, `Videos of Rivers` returns 50 from the Adige in Italy,
+    # `Videos of Floods` returns the Czech Republic. Adopting them would
+    # grow the table to ~650 rows of European and Californian B-roll,
+    # which is the same "unrelated clips" failure as the NASA timelapses
+    # this setting exists to prevent, just better photographed.
+    #
+    # So the honest shape is: keep the catalogue on subject, and get
+    # volume from a provider that actually has it. Pexels and Pixabay are
+    # already implemented and already wired into the scheduler — they are
+    # skipped only while `PEXELS_API_KEYS` / `PIXABAY_API_KEYS` are unset.
+    # Setting either one is the whole fix for an always-new feed.
+    #
+    # Terms that LOOK relevant but were measured and rejected, because
+    # the word has a second sense on Commons: `mustang` (the P-51
+    # aircraft), `terai` (a Dutch skier), `tihar` (a rally in India),
+    # `himalaya` (a roller coaster, 0 usable results), `monsoon` (clouds
+    # over Albuquerque). `india` and `delhi` return 50 each but are
+    # largely conference footage; `himalayan` is the cleaner regional
+    # term and is what made the list.
+    #
+    # The list is capped at 12 terms (`WikimediaSource._search_terms`),
+    # which is what keeps one pass to 12 requests against a free API.
+    # Lengthening this string past that cap silently changes nothing, so
+    # choose the best 12 rather than the most.
     reels_search_terms: str | None = (
-        "nepal,nepali,kathmandu,himalaya,everest,terai,pokhara,"
-        "bhaktapur,mount everest,sagarmatha,india nepal,new deli nepal"
+        "nepal,tharu,himalayan,kathmandu,langtang,janakpur,"
+        "bhaktapur,bagmati,pashupatinath,bhairahawa,"
+        "cat:Videos of the Himalayas,cat:Videos of Mount Everest"
     )
     reels_http_timeout: float = 20.0
     # Hard ceiling on one whole reels pass.

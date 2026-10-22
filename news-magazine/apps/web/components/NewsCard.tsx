@@ -3,8 +3,26 @@
 import Link from "next/link";
 import { useEffect, useState, type MouseEvent } from "react";
 
+import { OptimizedImage } from "@/components/OptimizedImage";
 import { formatNewsDate, type SiteLanguage } from "@/lib/date";
 import { withoutSizeSuffix } from "@/lib/image-url";
+
+/**
+ * How wide a card's picture is, as the browser should be told.
+ *
+ * The grid is `grid-cols-1 sm:grid-cols-2 lg:grid-cols-3` inside a
+ * `max-w-7xl` with `px-4`, so a card is the full width on a phone, half of
+ * it from Tailwind's `sm` (640px), and a third from `lg` (1024px) — which
+ * is 400px of 1248 at the widest. `33vw` / `50vw` / `100vw` describes that
+ * closely enough for a srcset and is what decides which width the browser
+ * downloads.
+ *
+ * It is the difference between one picture per card and one per card per
+ * screen. With `sizes` left at its default of `100vw` the browser picks the
+ * 640w rendition for a 400px slot on a desktop — 60% more bytes than the
+ * slot can show, on 24 cards, for nothing.
+ */
+const CARD_IMAGE_SIZES = "(min-width: 1024px) 33vw, (min-width: 640px) 50vw, 100vw";
 
 export type NewsCardArticle = {
   id: string;
@@ -192,15 +210,30 @@ export function NewsCard({
               onClick={handleMediaClick}
             />
           ) : image && !imageFailed ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
+            /*
+              The optimizer, where the host is on the allowlist, and the
+              plain <img> where it is not — components/OptimizedImage.tsx
+              picks between them.
+
+              `onError` is the same handler as before and still walks to the
+              next candidate rendition, so a 404 falls through exactly as it
+              did when this was a bare <img>. Through the optimizer a dead
+              original comes back as a 500 from /_next/image, which the
+              browser raises as the same error event.
+
+              `fill` rather than width/height: the picture is laid out by the
+              aspect-video box around it, which already reserves the space,
+              so the image can never be what moves the page. `referrerPolicy`
+              only survives on the fallback path, where the browser really
+              is talking to the outlet — several Nepali CDNs refuse a
+              request carrying a foreign Referer.
+            */
+            <OptimizedImage
               src={image}
               alt={article.headline}
-              loading="lazy"
-              // Several Nepali CDNs refuse a request carrying a foreign
-              // Referer; sending none lets their images through.
-              referrerPolicy="no-referrer"
+              sizes={CARD_IMAGE_SIZES}
               onError={handleImageError}
+              referrerPolicy="no-referrer"
               className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
             />
           ) : (

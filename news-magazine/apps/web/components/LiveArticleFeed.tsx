@@ -6,6 +6,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { NewsCard } from "@/components/NewsCard";
 import { dropDuplicateStories } from "@/lib/feed-dedup";
 import { dropRepeatedImages } from "@/lib/feed-images";
+import { byNewest, mergeArticles } from "@/lib/feed-merge";
 import type { LatestArticle } from "@/types/database";
 
 /**
@@ -106,33 +107,17 @@ interface FeedCursor {
   id: string;
 }
 
-/** Newest first, with `source_count` breaking ties exactly as the server does. */
 /**
  * Newest first — by when we ARRIVED at the story, not when it was
  * published.
  *
- * This has to be the same order the server uses (`newestFirst` in
- * lib/news.ts). If the server sorts one way and the client another,
- * the list visibly reshuffles on the first poll after every page load,
- * and the reader watches cards jump around for no reason.
- *
- * `ingested_at` first: a story moves up ONCE, when it arrives, and
- * then stays where it is. A story published two minutes ago that we
- * fetched ten minutes ago has been on the page the whole time and must
- * not leap back to the top on every poll. Publication time breaks
- * ties, and orders rows that have no arrival time at all.
+ * `byNewest` lives in lib/feed-merge.ts beside `mergeArticles`, because the
+ * order the list is KEPT in and the way a batch is folded into it are one
+ * decision, and testing the second without the first is how the two drift.
+ * This has to stay the same order the server uses (`newestFirst` in
+ * lib/news.ts): if the server sorts one way and the client another, the list
+ * visibly reshuffles on the first poll after every page load.
  */
-function byNewest(a: LatestArticle, b: LatestArticle): number {
-  const arrivedA = a.ingested_at ? Date.parse(a.ingested_at) : 0;
-  const arrivedB = b.ingested_at ? Date.parse(b.ingested_at) : 0;
-  if (arrivedB !== arrivedA) return arrivedB - arrivedA;
-
-  const left = a.published_at ? Date.parse(a.published_at) : 0;
-  const right = b.published_at ? Date.parse(b.published_at) : 0;
-  if (right !== left) return right - left;
-  return (b.source_count ?? 0) - (a.source_count ?? 0);
-}
-
 export function LiveArticleFeed({
   initialArticles,
   initialCursor = null,
@@ -215,21 +200,38 @@ export function LiveArticleFeed({
   // asks again if the sentinel is still in view. See the effect below.
   const [pageNonce, setPageNonce] = useState(0);
 
-  // A new server-rendered feed (navigation, or an RSC refresh) starts a
-  // new archive: the old cursor points into rows this page no longer
-  // shows. The server hands over the matching one alongside the cards.
+  // The server hands this feed its first page. Everything after that is the
+  // client's to own.
+  //
+  // What this used to do, and why it was the single largest source of layout
+  // shift on the site: `setArticles(initialArticles)`. components/Header.tsx
+  // calls `router.refresh()` every fifteen seconds, which re-renders the
+  // server tree and hands this component a BRAND NEW array holding the SAME
+  // twenty-four stories it already had. Replacing the list with it threw
+  // away the union the polls had been building — the grid collapsed from 60
+  // cards to 24, and the reader watched the page shrink and grow again on a
+  // fifteen-second cycle for as long as the tab was open. One cycle measured
+  // about 0.34 CLS on mobile.
+  //
+  // A refresh of the same route is not a new feed, it is the same feed with
+  // a fresh identity, so it is folded in by `mergeArticles` — which returns
+  // the existing array untouched when there is nothing new, and re-renders
+  // nothing at all. Leaving the route unmounts this component, so a genuine
+  // new feed still starts from the server's rows; the cursor below is only
+  // adopted while this tab has not paged past the first page itself.
   useEffect(() => {
-    setArticles(initialArticles);
-    ids.current = new Set(initialArticles.map((a) => a.id));
-    lastArrivalAt.current = null;
-    setCursor(initialCursor);
-    setHasMore(Boolean(initialCursor));
+    setArticles((current) => mergeArticles(current, initialArticles));
+    ids.current = new Set([...ids.current, ...initialArticles.map((a) => a.id)]);
     setMoreError(null);
-    setLoadedAPage(false);
     setStalled(false);
-    setTotal(null);
     moreInFlight.current = false;
     setPageNonce((n) => n + 1);
+
+    // The archive this tab is walking is the client's, not the server's.
+    // Overwriting the cursor here would drop a reader who had already loaded
+    // three pages back onto page one — the same shift, in a different place.
+    setCursor((current) => current ?? initialCursor);
+    setHasMore((current) => current || Boolean(initialCursor));
   }, [initialArticles, initialCursor]);
 
   // Respect the OS "reduce motion" setting. Reordering the grid under a
@@ -273,17 +275,16 @@ export function LiveArticleFeed({
    * thousand cards deep, `visible` below re-runs both deduplication
    * passes over the whole union, and doing that on every ten-second poll
    * that found nothing would be a visible stall for no reason at all.
+   * The rule itself is `mergeArticles` in lib/feed-merge.ts, which the
+   * reset-on-new-props effect below uses for the same reason.
    */
   const mergeInto = useCallback((fresh: LatestArticle[]) => {
     setArticles((current) => {
-      const byId = new Map<string, LatestArticle>();
-      for (const article of current) byId.set(article.id, article);
-      for (const article of fresh) byId.set(article.id, article);
-
       lastArrivalAt.current = Date.now();
-      if (byId.size === current.length) return current;
-
-      const merged = [...byId.values()].sort(byNewest);
+      const merged = mergeArticles(current, fresh);
+      // Same array back means the poll found nothing new; leave the id set
+      // alone rather than rebuilding it every ten seconds for nothing.
+      if (merged === current) return current;
       ids.current = new Set(merged.map((a) => a.id));
       return merged;
     });
@@ -495,28 +496,37 @@ export function LiveArticleFeed({
     });
   }, []);
 
-  // The header button: re-read the database AND re-compose the grid.
+  // The header's fifteen-second tick lands here.
   //
-  // Both jobs, because a re-read alone leaves the page in the same order
-  // right after it has just re-read — which reads as a button that does
-  // nothing. Reset mode replaces the list with what the database holds
-  // now, so the newest is back at the top, and the rotation then
-  // reshuffles everything below the pinned newest nine.
+  // It used to be a RESET plus a forced rotation: `check(language, true)`
+  // replaced the list wholesale, and `rotate(true)` reshuffled the forty-odd
+  // cards below the pinned nine on top of that. Twice a minute, the whole
+  // grid was rebuilt and re-composed underneath the reader. With
+  // components/Header.tsx's own `router.refresh()` doing the same thing
+  // through the props, the page shrank and grew and reshuffled every fifteen
+  // seconds — measured at 0.34 CLS per cycle on mobile and 0.15 on desktop.
+  //
+  // Now it only re-reads. A poll is a MERGE (`mergeInto`), so a tick that
+  // finds nothing new moves nothing at all, and a tick that finds a new
+  // story moves exactly that card. Rotation stays off by default and is
+  // never forced from here — that is what the rotate interval is for, and
+  // what `news-rotate` below is for.
   useEffect(() => {
     const onManualRefresh = async () => {
-      await check(language, true);
-      lastArrivalAt.current = Date.now() - ROTATE_AFTER_MS;
-      rotate(true);
+      await check(language);
     };
     window.addEventListener("news-refresh", onManualRefresh);
     return () => window.removeEventListener("news-refresh", onManualRefresh);
-  }, [check, language, rotate]);
+  }, [check, language]);
 
-  // The header rotate button does both jobs in one click: fetch whatever
-  // the worker has published since the last poll, then re-compose the
-  // page. Sending only the refresh signal left the grid in the same
-  // order even though it had just re-read the database, which is what
-  // made the button look broken.
+  // The one path that DOES re-compose the page: a request to rotate.
+  //
+  // It re-reads first and then reshuffles, so a reader who asks for movement
+  // gets movement rather than the same grid a moment later. That is safe
+  // here and only here, because it is a deliberate request — a reader who
+  // asked for the page to move cannot be surprised by it moving. The
+  // fifteen-second `news-refresh` tick above is not that request, which is
+  // why it merges instead.
   useEffect(() => {
     const onRotate = async () => {
       await check(language, true);
@@ -525,7 +535,7 @@ export function LiveArticleFeed({
     };
     window.addEventListener("news-rotate", onRotate);
     return () => window.removeEventListener("news-rotate", onRotate);
-  }, [check, language]);
+  }, [check, language, rotate]);
 
   useEffect(() => {
     const timer = window.setInterval(() => void check(language), POLL_MS);

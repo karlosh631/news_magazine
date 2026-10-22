@@ -54,6 +54,33 @@ a {
    `dark:` variants everywhere.
    ============================================================= */
 
+/*
+   `--text-subtle` is the quietest tier, and every `text-gray-400`
+   inherits it — 79 elements on a light page, 56 more on a dark one.
+
+   It was Tailwind's stock gray-400, rgb(156 163 175). On white that
+   is 2.54:1, against a 4.5:1 floor for the 12px meta lines it is
+   actually used for (the outlet name and the timestamp in every card
+   footer). WCAG calls that a failure, and Lighthouse called it 135
+   times.
+
+   The trap is that gray-400 is *by design* the "disabled / placeholder"
+   step, which the contrast rules exempt. It was being asked to carry
+   real information, and nothing in a component said so — so the value
+   had to be fixed in the token, not at the call sites.
+
+   WHY THIS IS THE SAME VALUE AS `--text-muted` IN LIGHT MODE
+   ----------------------------------------------------------
+   AA wants a ratio of at least 4.5:1. `--text-muted` already
+   delivers 4.83:1 on white, which leaves a window of 0.33 to spend on
+   a lighter step. The widest grey that still clears 4.5:1 on white is
+   rgb(117 117 117) — three points below the current muted. A tier you
+   cannot see is not a tier, and inventing one would push the ratio back
+   under the floor. So in light mode the two steps merge and the
+   hierarchy is carried by size and weight instead. Dark mode has room
+   (its surfaces are far darker) and keeps a genuine step: 5.50:1 on
+   the page, 4.99:1 on the footer.
+*/
 :root {
   --surface: 255 255 255;
   --surface-raised: 255 255 255;
@@ -61,7 +88,7 @@ a {
   --border: 229 231 235;
   --text: 17 24 39;
   --text-muted: 107 114 128;
-  --text-subtle: 156 163 175;
+  --text-subtle: 107 114 128;
   --link: 29 78 216;
   --accent: 37 99 235;
 }
@@ -73,7 +100,7 @@ a {
   --border: 45 50 60;
   --text: 237 239 244;
   --text-muted: 156 163 175;
-  --text-subtle: 113 120 134;
+  --text-subtle: 130 136 149;
   --link: 147 197 253;
   --accent: 96 165 250;
 }
@@ -89,17 +116,48 @@ a {
     color: rgb(var(--text));
   }
 
-  /* Remap the neutral scale onto the theme variables. Only the light
-     steps are remapped; Tailwind's 700/800/900 still work as darker
-     greys and stay legible in dark mode, so components keep using the
-     same utility names. */
-  html:not(.dark) {
-    --tw-gray-50: rgb(var(--surface-sunken));
-    --tw-gray-100: rgb(var(--surface-sunken));
-    --tw-gray-200: rgb(var(--border));
-    --tw-gray-300: rgb(var(--border));
-    --tw-gray-400: rgb(var(--text-subtle));
-    --tw-gray-500: rgb(var(--text-muted));
+  /*
+    THE LIGHT-MODE GREY REMAP WAS DEAD CODE.
+
+    This used to set `--tw-gray-*` custom properties, on the theory
+    that Tailwind's utilities read those variables:
+
+        html:not(.dark) { --tw-gray-400: rgb(var(--text-subtle)); }
+
+    They do not. Tailwind v3 compiles its default palette to LITERAL
+    values — the built CSS is literally
+
+        .text-gray-400{--tw-text-opacity:1;
+                       color:rgb(156 163 175/var(--tw-text-opacity))}
+
+    with no `var(--tw-gray-400)` anywhere. Grepping the app for
+    `--tw-gray` now returns nothing but this file's own definitions, so
+    every one of those six properties was written and read by no one.
+    Changing `--text-subtle` therefore changed nothing you could see,
+    which is why the light page kept painting gray-400 at 2.54:1.
+
+    A variable remap only works when `theme.colors` is configured to
+    emit CSS variables (the `rgb(var(--x) / <alpha-value>)` form). It
+    is not, here.
+
+    So the remap has to be a real rule. The `.dark .text-*` overrides
+    further down have always worked, because they are plain selectors
+    with two classes of specificity against Tailwind's one. These carry
+    `html:not(.dark)` to match that, and land at (0,2,1).
+
+    Only the steps whose light value actually DIFFERS from Tailwind's
+    literal are listed. Verified against the compiled palette:
+    gray-50/100/200 are already byte-identical to `--surface-sunken` and
+    `--border`, and gray-500 is exactly `--text-muted`, so remapping
+    them would change no pixel. gray-300 differs but the one place it
+    is used is `dark:text-gray-300`, which this must not touch.
+  */
+  html:not(.dark) .text-gray-400 {
+    color: rgb(var(--text-subtle));
+  }
+
+  html:not(.dark) .text-gray-500 {
+    color: rgb(var(--text-muted));
   }
 
   .dark .bg-white {

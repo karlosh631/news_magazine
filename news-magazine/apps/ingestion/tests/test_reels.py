@@ -2906,6 +2906,203 @@ def test_duplicate_terms_are_collapsed():
     assert len([t for t in terms if t.lower() == "nepal"]) == 1, terms
 
 
+# -------------------------------------------------------------------
+# Category terms
+# -------------------------------------------------------------------
+
+
+def test_a_category_term_becomes_an_incategory_clause():
+    """
+    `cat:Videos of Rain` has to reach `incategory:"Videos of Rain"`.
+
+    Quoted, not bare: CirrusSearch ORs unquoted words, so
+    `incategory:Videos of Rain` matches any video filed under
+    "Videos", "of", or "Rain" — which is most of Commons.
+    """
+    source = _commons("cat:Videos of Rain")
+    expression = source._search_expression("cat:Videos of Rain")
+
+    assert 'incategory:"Videos of Rain"' in expression, expression
+    # It must not also carry an intitle: clause. The two AND together,
+    # and a file titled "Rain in Pokhara" is already found by the
+    # weaker of the two.
+    assert "intitle:" not in expression, expression
+
+
+def test_a_category_name_may_contain_spaces_and_digits():
+    """
+    Commons category names legitimately look like "Videos of Nepal
+    (2015)", so unlike a title term this one is not required to be
+    alphanumeric word by word.
+    """
+    terms = _commons("cat:Videos of Nepal 2015")._search_terms()
+    assert terms == ["cat:Videos of Nepal 2015"], terms
+
+
+def test_a_category_term_carrying_operator_syntax_is_dropped():
+    """
+    The category branch must be as strict as the title branch.
+
+    A quote could close the string and turn the rest of the
+    configuration into a second filter; `\\`, `^`, `~` and `*` are all
+    CirrusSearch operators. Silently dropping the term is correct —
+    dropping it and searching everything is not.
+    """
+    for hostile in (
+        'cat:Videos" filetype:audio',
+        "cat:Videos of Rain\\",
+        "cat:Videos of Rain^",
+        "cat:Videos of Rain~",
+        "cat:Videos of Rain*",
+        "cat:(Videos)",
+        "cat:Videos{}",
+        "cat:",
+    ):
+        terms = _commons(hostile)._search_terms()
+        assert terms == [], f"{hostile!r} was not dropped, got {terms}"
+
+
+def test_title_and_category_terms_coexist_in_one_list():
+    """
+    The default list is a mix, and the scheduler splits on commas and
+    passes the whole thing as one hint. Both shapes have to survive the
+    round trip through `_search_terms`.
+    """
+    source = _commons("nepal,kathmandu,cat:Videos of Rain,cat:Videos of Floods")
+    terms = source._search_terms()
+
+    assert terms == [
+        "nepal",
+        "kathmandu",
+        "cat:Videos of Rain",
+        "cat:Videos of Floods",
+    ], terms
+
+
+def test_each_term_produces_exactly_one_constraint():
+    """
+    The rule that keeps the search from silently widening: a term either
+    contributes a clause or is dropped, and never produces an expression
+    with no hint at all — that unconstrained query is what once put
+    European Space Agency stock in a Nepali feed.
+    """
+    for term in _commons(
+        "nepal,mount everest,cat:Videos of Rain,cat:*,intitle:*"
+    )._search_terms():
+        expression = _commons(term)._search_expression(term)
+        clauses = [
+            p
+            for p in expression.split()
+            if p.startswith(("intitle:", "incategory:"))
+            and not p.startswith("-incategory:")
+        ]
+        assert len(clauses) == 1, f"{term!r} -> {expression}"
+
+
+def test_a_long_term_list_is_not_amputated_mid_word():
+    """
+    The hint used to be sliced to 200 characters.
+
+    That was silently fatal once categories were allowed: a
+    `cat:Videos of Festivals` entry is 23 characters, the shipped
+    12-term default came to 261, and the slice cut it at
+    "cat:Videos of Fest" — which then failed category validation and
+    was dropped. No error, no log line. The Reels tab just quietly
+    stopped receiving festivals, agriculture and markets, and the
+    default term list in config.py could be edited indefinitely
+    without the tail of it ever taking effect.
+
+    So the shipped default has to survive the whole pipeline intact.
+    """
+    from app.config import get_settings
+
+    raw = get_settings().reels_search_terms or ""
+    source = _commons(raw)
+    terms = source._search_terms()
+
+    assert source.hint == raw, "the hint was truncated before parsing"
+    for term in (t for t in raw.split(",") if t.strip()):
+        assert term.strip() in terms, f"{term.strip()!r} never reached the search"
+
+
+def test_the_hint_is_still_bounded():
+    """
+    The slice is a guard against a pasted paragraph becoming a 4KB query
+    parameter, so it must still exist — and it must drop whole terms
+    rather than leave half of one.
+    """
+    source = _commons("cat:" + "Videos of Rain, " * 400)
+
+    assert len(source.hint) <= 1200, len(source.hint)
+    assert not source.hint.endswith("Videos"), source.hint[-60:]
+
+
+def test_the_default_term_list_is_a_mix_and_still_on_topic():
+    """
+    The twelve-term default is the whole reason the Reels tab moved at
+    all, so its shape is pinned here.
+
+    It was twelve place names, five of which were the same mountain,
+    which resolved to one small pool of climbing footage. It is now the
+    measured on-topic maximum: the Nepali and regional place names that
+    actually return Nepali video, plus the two Commons categories that
+    do.
+
+    The generic subject categories were measured and rejected — they
+    return Sonoma County, the Adige in Italy and the Czech Republic —
+    so this list stays place-based on purpose.
+    """
+    from app.config import get_settings
+
+    terms = _commons(get_settings().reels_search_terms)._search_terms()
+    categories = [t for t in terms if t.startswith("cat:")]
+    titles = [t for t in terms if not t.startswith("cat:")]
+
+    assert len(terms) == 12, terms
+    assert len(categories) == 2, terms
+    assert len(titles) == 10, terms
+    assert any(t.lower() == "nepal" for t in titles), terms
+
+    # Every term must be one that was actually measured to return
+    # Nepali or regional video. A term that measures zero is dead
+    # weight: it costs a request every pass and finds nothing.
+    measured = {
+        "nepal",
+        "tharu",
+        "himalayan",
+        "kathmandu",
+        "langtang",
+        "janakpur",
+        "bhaktapur",
+        "bagmati",
+        "pashupatinath",
+        "bhairahawa",
+        "cat:Videos of the Himalayas",
+        "cat:Videos of Mount Everest",
+    }
+    assert set(terms) == measured, sorted(set(terms) ^ measured)
+
+
+def test_no_default_term_is_a_word_with_a_second_meaning():
+    """
+    Commons has a second sense for several of these words, and the
+    wrong sense is what a reader sees.
+
+    Measured: `mustang` returns the P-51 aircraft, `terai` a Dutch
+    skier, `tihar` an Indian rally, `himalaya` a roller coaster (0
+    usable results), `monsoon` clouds over Albuquerque. A term whose
+    dominant sense is not Nepal is a term that fills the Reels tab with
+    things that are not Nepal.
+    """
+    from app.config import get_settings
+
+    terms = _commons(get_settings().reels_search_terms)._search_terms()
+    for banned in ("mustang", "terai", "tihar", "himalaya", "monsoon", "everest"):
+        assert not any(t.lower() == banned for t in terms), (
+            f"{banned!r} has a second sense on Commons and must not be in the list"
+        )
+
+
 def test_the_preferred_rendition_is_high_definition():
     """
     The ceiling was 720, which meant the largest usable transcode was

@@ -172,6 +172,13 @@ async def main() -> int:
         enrich_media=settings.enrich_media,
         gemini_summary=settings.enable_gemini_summary,
         gemini_ranking=settings.enable_gemini_ranking,
+        # The fetch caps, so the ceiling the pipeline is running under
+        # is in the log rather than only in the config file.
+        max_articles_per_source=settings.max_articles_per_source,
+        max_articles_per_cycle=settings.max_articles_per_cycle,
+        cycle_window_seconds=settings.cycle_window_seconds,
+        max_reels_per_provider=settings.max_reels_per_provider,
+        max_reels_per_cycle=settings.max_reels_per_cycle,
     )
 
     stop = asyncio.Event()

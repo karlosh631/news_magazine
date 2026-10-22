@@ -119,6 +119,12 @@ async def main() -> int:
 
             ok += 1
             label = "partial" if data.get("errors") else "ok"
+            if data.get("capped"):
+                # A fetch cap truncated this outlet's poll. The run is
+                # still a success, but stories were left behind, and a
+                # green table that is quietly throwing articles away is
+                # the thing this line exists to prevent.
+                label = f"{label}, capped"
             print(
                 f"{name[:29]:30s} {data['fetched']:6d} {data['new']:5d} "
                 f"{data['duplicates']:5d} {data['rejected']:5d}  {label}"

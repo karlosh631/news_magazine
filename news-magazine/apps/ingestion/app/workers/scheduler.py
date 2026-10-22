@@ -47,7 +47,11 @@ from typing import Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from app.config import get_settings
+from app.config import (
+    DEFAULT_MAX_REELS_PER_CYCLE,
+    DEFAULT_MAX_REELS_PER_PROVIDER,
+    get_settings,
+)
 from app.database import get_db
 from app.services.ingestion import run_source_sync
 
@@ -575,6 +579,52 @@ def _reels_summary(health: Any) -> str:
     return line
 
 
+def reels_per_provider_cap(settings: Any) -> int:
+    """
+    The most clips ONE provider may contribute to a single pass.
+
+    `max_reels_per_provider` is the name; `reels_per_source` was the
+    name before it was renamed to say what it bounds, and a settings
+    object that still carries the old one is honoured. Never below
+    one — a cap of zero would fetch nothing, which is a different
+    setting (turn the feature off) wearing the same clothes.
+    """
+    raw = getattr(settings, "max_reels_per_provider", None)
+    if raw is None:
+        raw = getattr(settings, "reels_per_source", None)
+    if raw is None:
+        raw = DEFAULT_MAX_REELS_PER_PROVIDER
+    try:
+        return max(int(raw or 0), 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def reels_cycle_cap(settings: Any) -> int:
+    """
+    The most clips ONE whole reels pass may fetch, across every
+    provider. Never below one.
+
+    A settings object that does not carry the field falls back to the
+    same default the Settings class declares, not to one — a cap of
+    one would starve every provider but the first.
+    """
+    try:
+        return max(
+            int(
+                getattr(
+                    settings,
+                    "max_reels_per_cycle",
+                    DEFAULT_MAX_REELS_PER_CYCLE,
+                )
+                or 0
+            ),
+            1,
+        )
+    except (TypeError, ValueError):
+        return 1
+
+
 async def _sync_reels() -> None:
     """
     One reels pass, hard-bounded.
@@ -634,7 +684,17 @@ async def _sync_reels_body() -> None:
     settings = get_settings()
 
     try:
-        limit = max(int(settings.reels_per_source or 0), 1)
+        # The two reels caps, read HERE — where the providers are
+        # actually asked — rather than being numbers in a config file
+        # that nothing consults.
+        #
+        # `per_provider_cap` bounds one provider's contribution to one
+        # pass. `cycle_cap` bounds the whole pass, across every
+        # provider: one pass over every provider IS one cycle on the
+        # video side, the way a window of time is one cycle on the
+        # article side.
+        per_provider_cap = reels_per_provider_cap(settings)
+        cycle_cap = reels_cycle_cap(settings)
         terms = [
             t.strip()
             for t in (settings.reels_search_terms or "").replace("\n", ",").split(",")
@@ -720,7 +780,13 @@ async def _sync_reels_body() -> None:
             follow_redirects=True,
             headers={"User-Agent": settings.reels_user_agent},
         ) as client:
-            for source_key, pool in pools:
+            # What this whole pass has fetched so far. The pass's total
+            # cap is spent against it, so the cap counts what was
+            # actually FETCHED rather than what happened to be asked
+            # for.
+            total_fetched = 0
+
+            for index, (source_key, pool) in enumerate(pools):
                 try:
                     # build_source raises KeyError for an unknown key and
                     # returns a ReelSource otherwise — it never returns
@@ -764,6 +830,48 @@ async def _sync_reels_body() -> None:
                             )
                             continue
 
+                    # ---- The budget for this provider ----
+                    #
+                    # Two bounds, both real:
+                    #
+                    #   per_provider_cap — how many clips THIS provider
+                    #     may contribute to the pass.
+                    #   cycle_cap — how many clips the WHOLE pass may
+                    #     fetch, across every provider.
+                    #
+                    # What is left of the pass's budget is shared
+                    # fairly between the providers still to run, so a
+                    # tight budget thins every provider's share rather
+                    # than starving the last one to be asked, which is
+                    # what spending it first-come-first-served does.
+                    #
+                    # The share is a ceiling division, so it is never
+                    # larger than what is actually left, and a provider
+                    # is skipped outright once the budget is spent —
+                    # which is what keeps the pass's total inside the
+                    # cap rather than merely near it.
+                    remaining = max(cycle_cap - total_fetched, 0)
+                    providers_left = max(len(pools) - index, 1)
+
+                    if remaining <= 0:
+                        logger.warning(
+                            "Reels: %s SKIPPED, this pass's budget of %d "
+                            "clip(s) is spent.",
+                            source_key, cycle_cap,
+                        )
+                        continue
+
+                    share = -(-remaining // providers_left)
+                    limit = min(per_provider_cap, share)
+
+                    if limit < per_provider_cap:
+                        logger.warning(
+                            "Reels: %s was given %d of the %d clip(s) left "
+                            "in this pass (per-provider cap %d, pass cap %d).",
+                            source_key, limit, remaining,
+                            per_provider_cap, cycle_cap,
+                        )
+
                     # ingest_reels is written around a whole pass, so one
                     # source at a time still goes in as a one-entry map
                     # and comes back as a one-entry list. That keeps the
@@ -775,6 +883,7 @@ async def _sync_reels_body() -> None:
                         per_source=limit,
                     )
                     health = results[0]
+                    total_fetched += int(getattr(health, "fetched", 0) or 0)
                     _reels_last_run[source_key] = time.monotonic()
 
                     # Record what this pass actually produced, so the

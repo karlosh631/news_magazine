@@ -262,28 +262,26 @@ async def test_the_band_rotates_with_the_hour(monkeypatch):
     rest of the catalogue would never be reached - the pool would be
     bigger than it was, and still frozen.
     """
+    import datetime as _dt
+
     from app.services.reels import providers as providers_module
 
     source = _commons("nepal")
 
-    def _offsets_at(hour: int) -> list[int]:
+    async def _offsets_at(hour: int) -> list[int]:
         class _FixedDatetime:
             @staticmethod
             def now(tz=None):
-                import datetime as _dt
-
                 return _dt.datetime(2026, 10, 22, hour, 0, 0, tzinfo=_dt.timezone.utc)
 
         monkeypatch.setattr(providers_module, "datetime", _FixedDatetime)
         recorder = _Recorder()
         monkeypatch.setattr(source, "_search_with_retry", recorder)
-        import asyncio
-
-        asyncio.get_event_loop().run_until_complete(source._fetch(30))
+        await source._fetch(30)
         return recorder.offsets
 
-    early = _offsets_at(0)
-    later = _offsets_at(1)
+    early = await _offsets_at(0)
+    later = await _offsets_at(1)
 
     assert early != later, (early, later)
     # And the first page is the same either way, because that is where

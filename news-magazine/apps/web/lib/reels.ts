@@ -20,11 +20,24 @@ import type { PostgrestError, SupabaseClient } from "@supabase/supabase-js";
 import { isSupabaseConfigured } from "@/lib/news";
 import { createPublicSupabaseClient } from "@/lib/supabase/server";
 
-/** A vertical feed asks for far fewer clips than the news feed asks for stories. */
-export const REELS_PAGE_SIZE = 12;
+/**
+ * How many clips one feed request asks for.
+ *
+ * It was 12, which meant the panel could report 146 clips in the
+ * catalogue and the page showed a dozen of them with no way to reach
+ * the rest - the reader saw the same twelve for ever and had no
+ * reason to believe the catalogue was bigger.
+ *
+ * The clips are cheap until they are watched: each one is a poster
+ * until it is the active reel, and the player is fetched when the
+ * reader arrives. So a longer list costs a longer scroll and a few
+ * hundred kilobytes of posters, and it means the whole catalogue is
+ * reachable.
+ */
+export const REELS_PAGE_SIZE = 60;
 
 /** Hard ceiling, so a bad caller cannot ask for the whole table. */
-const REELS_MAX_LIMIT = 50;
+const REELS_MAX_LIMIT = 200;
 
 /**
  * Shown whenever the reels tables are not there yet.

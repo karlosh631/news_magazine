@@ -10,50 +10,49 @@
  * together, and testable without a database, is the only way to know
  * they still agree.
  *
- * ARRIVAL, NOT PUBLICATION
- * -------------------------
- * The feed is ordered by `ingested_at` — when WE first saw the story.
- * A publisher can sit on a story for hours before it appears in their
- * feed; when it does appear, it is new to this site and belongs at the
- * top, even though its publication timestamp is older than stories
- * already on the page.
+ * NEWEST NEWS FIRST
+ * ------------------
+ * The feed is ordered by `published_at` — when the story was PUBLISHED
+ * — with `ingested_at` (when we fetched it) as the tiebreaker.
  *
- * The reverse matters just as much. A story published two minutes ago
- * that we fetched ten minutes ago has been on the homepage the whole
- * time; it should not leap back to the top every time the feed polls.
- * Sorting by arrival means a story moves up ONCE, when it arrives, and
- * then stays put.
+ * This used to order by arrival, on the argument that a publisher who
+ * sat on a story for hours makes it new to this site when it finally
+ * appears. The argument is true, and it is also the wrong thing to
+ * show a reader: the top of the homepage was a story published in
+ * JUNE, above today's news, because we had re-fetched it. A feed
+ * whose first cards are four months old reads as broken, and the
+ * reader is right.
  *
- * This used to order by `published_at` while the client sorted by
- * arrival. The two did not contradict each other on the page — the
- * client's sort won — but the WINDOW the server filled was the newest
- * by publication, so a story published hours ago and fetched a minute
- * ago was outside the window and never reached the page at all.
+ * So the newest NEWS is on top, and within one publication moment the
+ * most recently fetched copy wins — which is where the better picture
+ * and the higher outlet count come from.
  */
 
 /** Where the next page of the feed starts. */
 export interface FeedCursor {
   /**
-   * When we first saw the story.
+   * When the story was published.
    *
-   * The whole point of the cursor: it addresses the arrival order the
-   * feed is actually in, not a different one.
+   * The cursor has to address the ordering the query actually runs.
+   * The feed is ordered by publication time, with arrival as the
+   * tiebreaker, so the cursor is on publication time and the id.
    */
-  ingested_at: string;
+  published_at: string;
   /** The tiebreaker, so a page boundary inside a run of identical
-   *  arrival times cannot skip or repeat rows. */
+   *  timestamps cannot skip or repeat rows. */
   id: string;
 }
 
 /**
  * The columns the feed is ordered by, in order.
  *
- * `id` is the tiebreaker. Two stories ingested inside the same
- * transaction share an arrival time exactly, so without a second sort
- * key PostgreSQL is free to return that run in any order it likes.
+ * `id` is the tiebreaker. Several outlets publish inside the same
+ * second, so without a second sort key PostgreSQL is free to return
+ * that run in any order it likes — which makes page boundaries inside
+ * it skip and repeat rows.
  */
 export const FEED_ORDER = [
-  { column: "ingested_at", ascending: false },
+  { column: "published_at", ascending: false },
   { column: "id", ascending: false },
 ] as const;
 
@@ -63,9 +62,9 @@ export const FEED_ORDER = [
  * The comparison is the boolean identity of "strictly below the
  * cursor", written out:
  *
- *   ingested_at < ts  OR  (ingested_at = ts AND id < id)
+ *   published_at < ts  OR  (published_at = ts AND id < id)
  *
- * `id` is the tiebreaker because `ingested_at` is only
+ * `id` is the tiebreaker because `published_at` is only
  * microsecond-resolution and several stories are routinely ingested in
  * the same instant; without it, a page boundary landing inside a run of
  * equal timestamps would skip or repeat those rows.
@@ -82,8 +81,8 @@ export const FEED_ORDER = [
  * than an infinite one.
  */
 export function feedCursorFilter(cursor: FeedCursor | null | undefined): string | null {
-  if (!cursor?.ingested_at) return null;
-  return `ingested_at.lt.${cursor.ingested_at},and(ingested_at.eq.${cursor.ingested_at},id.lt.${cursor.id})`;
+  if (!cursor?.published_at) return null;
+  return `published_at.lt.${cursor.published_at},and(published_at.eq.${cursor.published_at},id.lt.${cursor.id})`;
 }
 
 /**
@@ -94,10 +93,10 @@ export function feedCursorFilter(cursor: FeedCursor | null | undefined): string 
  */
 export function cursorAfter(article: {
   id: string;
-  ingested_at: string | null;
+  published_at: string | null;
 }): FeedCursor | null {
-  if (!article.ingested_at) return null;
-  return { ingested_at: article.ingested_at, id: article.id };
+  if (!article.published_at) return null;
+  return { published_at: article.published_at, id: article.id };
 }
 
 /**
@@ -115,13 +114,13 @@ export function byArrival<
     source_count?: number | null;
   },
 >(a: T, b: T): number {
-  const arrivedA = a.ingested_at ? Date.parse(a.ingested_at) : 0;
-  const arrivedB = b.ingested_at ? Date.parse(b.ingested_at) : 0;
-  if (arrivedB !== arrivedA) return arrivedB - arrivedA;
-
   const left = a.published_at ? Date.parse(a.published_at) : 0;
   const right = b.published_at ? Date.parse(b.published_at) : 0;
   if (right !== left) return right - left;
+
+  const arrivedA = a.ingested_at ? Date.parse(a.ingested_at) : 0;
+  const arrivedB = b.ingested_at ? Date.parse(b.ingested_at) : 0;
+  if (arrivedB !== arrivedA) return arrivedB - arrivedA;
 
   return (b.source_count ?? 0) - (a.source_count ?? 0);
 }

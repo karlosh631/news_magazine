@@ -14,7 +14,19 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# The default fetch caps, named so that a settings object which does
+# not carry the field at all — an older deployment, a test double —
+# falls back to the SAME number the class declares, rather than to a
+# cap of one that would silently stop the pipeline fetching anything.
+DEFAULT_MAX_ARTICLES_PER_SOURCE = 500
+DEFAULT_MAX_ARTICLES_PER_CYCLE = 20_000
+DEFAULT_CYCLE_WINDOW_SECONDS = 900
+DEFAULT_MAX_REELS_PER_PROVIDER = 500
+DEFAULT_MAX_REELS_PER_CYCLE = 5_000
 
 
 class Settings(BaseSettings):
@@ -56,6 +68,66 @@ class Settings(BaseSettings):
     # Floor applied to any sources.poll_interval_seconds. Never poll a
     # single outlet faster than this.
     min_poll_seconds: int = 60
+
+    # ---------------------------------------------------------
+    # Fetch caps
+    #
+    # How much ONE cycle is allowed to pull in.
+    #
+    # Every number in this block is a HARD bound on the number of
+    # items actually fetched and stored, enforced at the point the
+    # work is done — not a target, and not a number nothing reads.
+    # Raise one and the pipeline really does fetch more; lower one
+    # and it really does fetch less. A cap that only exists in a
+    # config file is a lie told to the operator, and this file has
+    # already shipped one of those (`max_concurrent_fetches`).
+    #
+    # WHY A CAP AT ALL
+    # ----------------
+    # A feed is a PAGE, not a stream. An outlet that published 400
+    # stories today serves all 400 in one feed document, and every
+    # one of them would otherwise be normalised, deduped, page-fetched
+    # for its media and stored on the very first poll — which is a
+    # crawl of one publisher rather than a poll of it. The same is
+    # true of the whole pipeline: 27 outlets polled on their own
+    # intervals can put a few thousand entries through the pipeline
+    # in a quarter of an hour, and each one costs a dedup lookup
+    # whether or not it turns out to be a story we have already seen.
+    # ---------------------------------------------------------
+
+    # Per outlet, per poll: the most articles ONE source may
+    # contribute in a single sync.
+    #
+    # 200 is comfortably above what any single Nepali outlet
+    # publishes between two polls, so this does not bite in normal
+    # operation — and it is a real bound when it does. Raise it if an
+    # outlet legitimately publishes more than this between polls.
+    max_articles_per_source: int = DEFAULT_MAX_ARTICLES_PER_SOURCE
+
+    # Across EVERY outlet, in one cycle: the most articles the whole
+    # pipeline may fetch.
+    #
+    # The per-outlet cap alone still allows 27 x 200 = 5,400 articles
+    # in a single poll of every outlet, which is a crawl of 27
+    # publishers rather than a poll of them. This is the number that
+    # keeps the pipeline's total appetite bounded, and it is what a
+    # runaway source — a feed that suddenly republishes its whole
+    # archive — can no longer spend on its own.
+    max_articles_per_cycle: int = DEFAULT_MAX_ARTICLES_PER_CYCLE
+
+    # How long ONE cycle is, in seconds.
+    #
+    # The scheduler has no single pass over every outlet: each source
+    # has its own interval and they are staggered, so "one cycle" is
+    # defined here as a WINDOW rather than a batch. The total cap
+    # above applies within the window, and the window restarts as
+    # soon as the previous one expires — a rate, not a one-shot
+    # allowance.
+    #
+    # 900s is long enough to cover roughly one poll of every outlet
+    # several times over, so the cap is a backstop rather than
+    # something that shapes normal operation.
+    cycle_window_seconds: int = DEFAULT_CYCLE_WINDOW_SECONDS
 
     # ---------------------------------------------------------
     # Retention
@@ -186,7 +258,34 @@ class Settings(BaseSettings):
     # not take the category down.
     # ---------------------------------------------------------
     enable_reels: bool = False
-    reels_per_source: int = 30
+    # Per provider, per pass: the most clips ONE provider may
+    # contribute to a single reels pass.
+    #
+    # Enforced twice, and both are real bounds rather than requests:
+    # the provider adapter is asked for at most this many candidates
+    # (and every adapter additionally clamps that to the page size
+    # its own API allows — 80 for Pexels, 200 for Pixabay, 50 for
+    # YouTube, 25 per search for Wikimedia), and the store is handed
+    # at most this many.
+    #
+    # `REELS_PER_SOURCE` was this knob's earlier name and still
+    # works: a deployment that already sets it keeps its value.
+    max_reels_per_provider: int = Field(
+        default=DEFAULT_MAX_REELS_PER_PROVIDER,
+        validation_alias=AliasChoices(
+            "max_reels_per_provider",
+            "reels_per_source",
+        ),
+    )
+    # Across EVERY provider, in one pass: the most clips the whole
+    # reels pass may fetch.
+    #
+    # One reels pass is one cycle on the video side — the job runs
+    # every provider once, in order — so this is the total cap for
+    # that cycle. The budget is shared fairly between the providers
+    # still to run, so a tight budget thins every provider's share
+    # instead of starving the last one to be asked.
+    max_reels_per_cycle: int = DEFAULT_MAX_REELS_PER_CYCLE
     reels_poll_seconds: int = 300
     # Every five minutes, so the Reels tab moves at a glance rather than
     # every quarter-hour.
@@ -262,10 +361,27 @@ class Settings(BaseSettings):
     # largely conference footage; `himalayan` is the cleaner regional
     # term and is what made the list.
     #
-    # The list is capped at 12 terms (`WikimediaSource._search_terms`),
-    # which is what keeps one pass to 12 requests against a free API.
-    # Lengthening this string past that cap silently changes nothing, so
-    # choose the best 12 rather than the most.
+    # The list is capped at 40 terms (`WikimediaSource._search_terms`),
+    # and a pass asks for SEVERAL PAGES of results per term rather
+    # than one - which is the change that actually made the reels
+    # move. The old behaviour asked Commons for the newest twenty-five
+    # files per term and got the same twenty-five back every time, so
+    # the pool never grew past the newest slice of each term and the
+    # feed stood still. The walk now goes deeper and ROTATES, so a
+    # pass covers the whole catalogue of these terms over the course
+    # of a day.
+    #
+    # Lengthening this string past the cap silently changes nothing,
+    # so choose the terms that measure well rather than the most.
+    #
+    # MEASURED, so the ceiling is not a guess: against the live API,
+    # `intitle:nepal` holds 66 videos, `intitle:tharu` 48,
+    # `intitle:himalayan` 29, `intitle:holi` 31, `intitle:porter` 34,
+    # `intitle:temple` 291, `intitle:festival` 894, and the two
+    # categories hold 5 and 6. The union of the whole Nepali set is a
+    # couple of hundred files, which is what Commons has and not one
+    # more. A hundred thousand reels is not reachable from a keyless
+    # source; it needs Pexels, Pixabay or YouTube.
     reels_search_terms: str | None = (
         "nepal,tharu,himalayan,kathmandu,langtang,janakpur,"
         "bhaktapur,bagmati,pashupatinath,bhairahawa,"

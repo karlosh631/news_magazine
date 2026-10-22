@@ -110,12 +110,12 @@ type Rotate = "off" | "on";
 /** Where the next page of the feed starts. See FeedCursor in lib/news.ts. */
 interface FeedCursor {
   /**
-   * When the story was first fetched, not when it was published.
+   * When the story was published.
    *
-   * The page the feed is showing is ordered by arrival, and the cursor
-   * has to address the same order or it skips rows without saying so.
+   * The feed is ordered by publication time, and the cursor has to
+   * address the same order or it skips rows without saying so.
    */
-  ingested_at: string;
+  published_at: string;
   id: string;
 }
 
@@ -405,7 +405,7 @@ export function LiveArticleFeed({
         t: String(Date.now()),
       });
       if (from) {
-        params.set("ingested_at", from.ingested_at);
+        params.set("published_at", from.published_at);
         params.set("after_id", from.id);
       }
       if (language) params.set("language", language);

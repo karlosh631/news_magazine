@@ -215,8 +215,8 @@ export default async function AdminPage({
           subtitle="what is running, and what switches the rest on"
           className="mt-4"
         >
-          <div className="-mx-1 overflow-x-auto px-1">
-            <table className="w-full min-w-[720px] text-left text-xs">
+          <div>
+            <table className="w-full table-fixed text-left text-xs">
               <caption className="sr-only">
                 Each reels provider, whether it is switched on, how many
                 clips it has contributed, when it last ran, and which
@@ -314,8 +314,8 @@ export default async function AdminPage({
         <div className="mt-4 grid gap-4 lg:grid-cols-2">
           {/* ---- Sources ---- */}
           <Panel title="Outlets" subtitle={`${data.healthySources} of ${data.totalSources} healthy`}>
-            <div className="-mx-1 max-h-[26rem] overflow-auto px-1">
-              <table className="w-full min-w-[560px] text-left text-xs">
+            <div>
+              <table className="w-full table-fixed text-left text-xs">
                 <caption className="sr-only">
                   Every outlet, whether it is healthy, how many articles it
                   has contributed, how often it is polled, and when it last
@@ -406,35 +406,60 @@ export default async function AdminPage({
           {/* ---- Categories ---- */}
           <Panel title="Categories" subtitle="articles by primary category">
             {data.categories.length ? (
-              <ul className="space-y-2">
-                {data.categories
-                  .filter((c) => c.articleCount > 0)
-                  .sort((a, b) => b.articleCount - a.articleCount)
-                  .map((category) => {
-                    const max = Math.max(
-                      ...data.categories.map((c) => c.articleCount),
-                      1
-                    );
-                    return (
-                      <li key={category.id} className="flex items-center gap-3">
-                        <span className="w-28 shrink-0 truncate text-xs text-slate-300">
-                          {category.name}
-                        </span>
-                        <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-800">
-                          <span
-                            className="block h-full rounded-full bg-emerald-500"
-                            style={{
-                              width: `${Math.round((category.articleCount / max) * 100)}%`,
-                            }}
-                          />
-                        </span>
-                        <span className="w-14 shrink-0 text-right text-xs tabular-nums text-slate-400">
-                          {category.articleCount.toLocaleString("en-US")}
-                        </span>
-                      </li>
-                    );
-                  })}
-              </ul>
+              <div>
+                <table className="w-full table-fixed text-left text-xs">
+                  <caption className="sr-only">
+                    Every category, the number of articles in it, and the
+                    share of the largest category.
+                  </caption>
+                  <thead>
+                    <tr className="border-b border-slate-800 text-[10px] uppercase tracking-wider text-slate-500">
+                      <th scope="col" className="py-2 pr-3 font-medium">
+                        Category
+                      </th>
+                      <th scope="col" className="w-20 py-2 pr-3 text-right font-medium">
+                        Articles
+                      </th>
+                      <th scope="col" className="w-16 py-2 text-right font-medium">
+                        Share
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/70">
+                    {data.categories
+                      .filter((c) => c.articleCount > 0)
+                      .sort((a, b) => b.articleCount - a.articleCount)
+                      .map((category) => {
+                        const max = Math.max(
+                          ...data.categories.map((c) => c.articleCount),
+                          1
+                        );
+                        return (
+                          <tr
+                            key={category.id}
+                            className="transition-colors hover:bg-slate-800/30"
+                          >
+                            <th
+                              scope="row"
+                              className="py-2 pr-3 text-left font-normal text-slate-300"
+                            >
+                              {category.name}
+                            </th>
+                            <td className="py-2 pr-3 text-right tabular-nums text-slate-300">
+                              {category.articleCount.toLocaleString("en-US")}
+                            </td>
+                            <td className="py-2 text-right tabular-nums text-slate-500">
+                              {Math.round(
+                                (category.articleCount / max) * 100
+                              )}
+                              %
+                            </td>
+                          </tr>
+                        );
+                      })}
+                  </tbody>
+                </table>
+              </div>
             ) : (
               <Empty>No categories yet.</Empty>
             )}
@@ -472,6 +497,83 @@ export default async function AdminPage({
               </ol>
             ) : (
               <Empty>No articles yet.</Empty>
+            )}
+          </Panel>
+
+          {/* ---- The top of the feed ---- */}
+          <Panel
+            title="Top of the feed"
+            subtitle="newest fetched first — what the reader sees"
+          >
+            {data.latestArticles.length ? (
+              <div>
+                <table className="w-full table-fixed text-left text-xs">
+                  <caption className="sr-only">
+                    The stories at the top of the homepage, newest fetched
+                    first, with the time each was fetched and published.
+                  </caption>
+                  <thead>
+                    <tr className="border-b border-slate-800 text-[10px] uppercase tracking-wider text-slate-500">
+                      <th scope="col" className="py-2 pr-3 font-medium">
+                        Headline
+                      </th>
+                      <th scope="col" className="py-2 pr-3 font-medium">
+                        Outlet
+                      </th>
+                      <th scope="col" className="py-2 pr-3 font-medium">
+                        Fetched
+                      </th>
+                      <th scope="col" className="py-2 font-medium">
+                        Published
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/70">
+                    {data.latestArticles.map((article) => (
+                      <tr
+                        key={article.id}
+                        className="transition-colors hover:bg-slate-800/30"
+                      >
+                        <th scope="row" className="max-w-[22rem] py-2 pr-3 text-left font-normal">
+                          <Link
+                            href={`/article/${article.slug}`}
+                            title={article.headline}
+                            className="block truncate font-medium text-slate-200 underline-offset-2 hover:text-white hover:underline"
+                          >
+                            {article.headline}
+                          </Link>
+                          {!article.hasImage ? (
+                            <span className="mt-0.5 block text-[10px] uppercase tracking-wider text-amber-400">
+                              No picture
+                            </span>
+                          ) : null}
+                        </th>
+                        <td className="py-2 pr-3 text-slate-400">
+                          {article.source ?? "—"}
+                        </td>
+                        <td className="whitespace-nowrap py-2 pr-3 tabular-nums text-slate-400">
+                          {article.ingestedAt
+                            ? new Date(article.ingestedAt)
+                                .toISOString()
+                                .replace("T", " ")
+                                .slice(5, 16)
+                            : "—"}
+                        </td>
+                        <td className="whitespace-nowrap py-2 tabular-nums text-slate-500">
+                          {article.publishedAt
+                            ? new Date(article.publishedAt)
+                                .toISOString()
+                                .replace("T", " ")
+                                .slice(5, 16)
+                            : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <Empty>No published articles yet.</Empty>
             )}
           </Panel>
 
@@ -578,28 +680,61 @@ function BarChart({
   const max = Math.max(...buckets.map((b) => b.count), 1);
   const total = buckets.reduce((sum, b) => sum + b.count, 0);
 
+  // Every few bars gets a label, so the axis can be read without
+  // twenty-four of them colliding. The old version labelled only the
+  // first and the last, which left the middle of the chart a mystery.
+  const labelEvery = Math.max(1, Math.round(buckets.length / 4));
+
   return (
     <div>
       <div className="flex h-28 items-end gap-[2px]">
-        {buckets.map((bucket) => (
+        {buckets.map((bucket, index) => (
           <div
             key={bucket.key}
-            className="group relative flex-1"
-            title={`${bucket.label}: ${bucket.count}`}
+            className="group relative h-full flex-1"
+            title={`${bucket.label}: ${bucket.count.toLocaleString("en-US")}`}
           >
+            {/*
+              The bar's height is a PERCENTAGE, and a percentage
+              resolves against the parent's height. The parent used to
+              be a flex item with no height of its own, so it was zero
+              and every bar was zero with it - which is why the chart
+              showed its axis labels and its total and nothing else.
+              `h-full` gives it the full height of the `h-28` row, and
+              the bar can finally be a fraction of something.
+            */}
             <div
-              className={`w-full rounded-t-sm ${ACCENTS[accent] ?? ACCENTS.sky} ${
-                bucket.count === 0 ? "opacity-20" : "opacity-80"
-              }`}
-              style={{ height: `${Math.max((bucket.count / max) * 100, 2)}%` }}
+              className={`absolute inset-x-0 bottom-0 rounded-t-sm ${
+                ACCENTS[accent] ?? ACCENTS.sky
+              } ${bucket.count === 0 ? "opacity-20" : "opacity-80"}`}
+              style={{ height: `${Math.max((bucket.count / max) * 100, 1)}%` }}
             />
+            {/* The number, on hover. Without it the chart is a shape
+                with no values on it. */}
+            <span className="pointer-events-none absolute -top-5 left-1/2 hidden -translate-x-1/2 whitespace-nowrap rounded bg-slate-950 px-1.5 py-0.5 text-[10px] tabular-nums text-slate-200 group-hover:block">
+              {bucket.count}
+            </span>
           </div>
         ))}
       </div>
-      <div className="mt-2 flex justify-between text-[10px] tabular-nums text-slate-600">
+      <div className="mt-2 flex items-center justify-between text-[10px] tabular-nums text-slate-600">
         <span>{buckets[0]?.label}</span>
-        <span>{total.toLocaleString("en-US")} total</span>
+        <span className="text-slate-500">
+          {total.toLocaleString("en-US")} total
+        </span>
         <span>{buckets[buckets.length - 1]?.label}</span>
+      </div>
+      {/* The intermediate labels, under their own bars, so the axis
+          reads as a scale rather than as two endpoints. */}
+      <div className="mt-0.5 flex text-[10px] tabular-nums text-slate-700">
+        {buckets.map((bucket, index) => (
+          <span
+            key={bucket.key}
+            className="flex-1 text-center first:text-left last:text-right"
+          >
+            {index % labelEvery === 0 ? bucket.label : ""}
+          </span>
+        ))}
       </div>
     </div>
   );

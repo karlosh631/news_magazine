@@ -444,6 +444,29 @@ class OnDemandSearcher:
         title = sanitize_headline(article.headline)
         excerpt = sanitize_excerpt(article.excerpt) or None
 
+        # WHEN THIS STORY ARRIVED IS NOT WHEN WE RE-FETCHED IT
+        # ---------------------------------------------------
+        # The feed is ordered by `ingested_at` - when we FIRST saw the
+        # story - and a resurrected row was stamping it with the
+        # current time. So a story published in JANUARY 2025, pulled
+        # back out of the database because somebody searched for it,
+        # arrived with a brand-new arrival time and jumped to the very
+        # top of the homepage, above the news of the day.
+        #
+        # That is the wrong answer to the question the feed answers. A
+        # resurrected story is an OLD story that has been re-fetched on
+        # demand; the reader is not seeing it for the first time, and
+        # putting it at the top says otherwise.
+        #
+        # The publication time is the best available answer for when we
+        # first saw it - it is when the story was written, which for a
+        # story that was in the database before the retention window
+        # pruned it is within a short distance of when it was fetched.
+        # The row still carries `resurrected_at` and `last_seen_at` for
+        # the current time, so "we just re-fetched this" is still
+        # recorded; it simply is not what the feed orders by.
+        published_at = article.published_at or datetime.now(timezone.utc).isoformat()
+
         image = None
         if not image_validated:
             # Validation did not run, so the only evidence available is
@@ -513,8 +536,8 @@ class OnDemandSearcher:
             "title_normalized": normalize_title(title),
             "content_hash": raw_metadata.get("content_hash") or token_fingerprint(title),
             "source_article_url": article.source_article_url,
-            "published_at": article.published_at or datetime.now(timezone.utc).isoformat(),
-            "ingested_at": datetime.now(timezone.utc).isoformat(),
+            "published_at": published_at,
+            "ingested_at": published_at,
             "last_seen_at": datetime.now(timezone.utc).isoformat(),
             "resurrected_at": datetime.now(timezone.utc).isoformat(),
             "scrape_query": query,

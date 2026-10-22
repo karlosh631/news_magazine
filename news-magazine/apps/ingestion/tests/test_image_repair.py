@@ -207,3 +207,55 @@ def test_the_row_always_has_the_image_columns(live_image):
     assert "featured_image_url" in row
     assert "image_highres_url" in row
     assert row["featured_image_url"] == row["image_highres_url"]
+
+
+class TestArrivalTime:
+    """
+    A RESURRECTED STORY DOES NOT ARRIVE AT THE TOP OF THE FEED
+    -------------------------------------------------------
+    The feed is ordered by `ingested_at` - when we FIRST saw the
+    story. The resurrection path was stamping that column with the
+    current time, so a story published in January 2025, pulled back
+    out of the database because somebody searched for it, arrived with
+    a brand-new arrival time and jumped to the very top of the
+    homepage, above the news of the day.
+
+    That is the wrong answer to the question the feed answers. A
+    resurrected story is an OLD story that has been re-fetched on
+    demand, and putting it at the top says otherwise.
+    """
+
+    def test_a_resurrected_story_keeps_its_publication_time_as_its_arrival(self):
+        service = _service()
+        published = "2025-01-02T13:30:00+00:00"
+
+        row = service._build_row(
+            _article(published_at=published),
+            _extracted(REAL_PHOTOGRAPH),
+            "movie review",
+            live_image=REAL_PHOTOGRAPH,
+            image_validated=True,
+        )
+
+        assert row["ingested_at"] == published
+        assert row["published_at"] == published
+
+    def test_the_re_fetch_is_still_recorded(self):
+        """
+        "We just re-fetched this" is worth knowing. It is simply not
+        what the feed orders by.
+        """
+        service = _service()
+        published = "2025-01-02T13:30:00+00:00"
+
+        row = service._build_row(
+            _article(published_at=published),
+            _extracted(REAL_PHOTOGRAPH),
+            "movie review",
+            live_image=REAL_PHOTOGRAPH,
+            image_validated=True,
+        )
+
+        assert row["resurrected_at"] is not None
+        assert row["last_seen_at"] is not None
+        assert row["ingested_at"] != row["resurrected_at"]

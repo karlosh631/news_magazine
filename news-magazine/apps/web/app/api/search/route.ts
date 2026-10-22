@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
+import { recordEvent } from "@/lib/analytics-events";
 import { searchArticles } from "@/lib/news";
 
 /**
@@ -69,6 +70,24 @@ export async function POST(request: Request) {
       { status: 503 }
     );
   }
+
+  /*
+    The search event.
+
+    `analytics_events` had a table, an index, an insert-only policy and
+    a panel on the dashboard, and nothing ever wrote to it. A panel
+    that says "No reader events recorded yet" for ever is a panel that
+    teaches the operator to ignore it, so the events have to be real.
+
+    A search is the second half of what a reader does here, and it is
+    the more interesting half: a view says a story was opened, a
+    search says somebody was looking for something the homepage was
+    not showing them.
+  */
+  void recordEvent("search", {
+    query: parsed.data.query,
+    resultCount: result.articles.length,
+  });
 
   return NextResponse.json({
     query: parsed.data.query,

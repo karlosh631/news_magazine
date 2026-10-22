@@ -176,6 +176,20 @@ export function Header({ categories }: { categories: NavCategory[] }) {
       if (document.hidden) return;
       if (window.getSelection()?.toString()) return;
 
+      // The admin panel is NOT auto-refreshed.
+      //
+      // It is a page of numbers that change as the worker runs, so
+      // refreshing it every fifteen seconds moved the whole page under
+      // the operator's hands: the counts changed, the charts redrew to
+      // a different shape, and the rows they were reading shifted
+      // down. A dashboard that moves while it is being read cannot be
+      // read.
+      //
+      // The panel carries its own "generated at" timestamp, and the
+      // refresh button in the header still works, so the operator
+      // decides when it updates.
+      if (pathname === "/admin" || pathname === "/login") return;
+
       setReloading(true);
       router.refresh();
       // Same signal the refresh button sends, so the client-side feed
@@ -189,7 +203,7 @@ export function Header({ categories }: { categories: NavCategory[] }) {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, [router, searchOpen, menuOpen]);
+  }, [router, searchOpen, menuOpen, pathname]);
 
   useEffect(() => {
     const query = searchQuery.trim();

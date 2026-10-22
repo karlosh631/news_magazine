@@ -120,6 +120,26 @@ export type TopArticle = {
   publishedAt: string | null;
 };
 
+/**
+ * A story at the top of the feed, as the feed sees it.
+ *
+ * The feed is ordered by ARRIVAL - when we first saw the story - and
+ * not by publication time, and the difference is the whole point: a
+ * publisher can sit on a story for hours before filing it in their
+ * feed, and when it does appear it is new to this site. So the panel
+ * that shows "the top articles" has to order by arrival too, or it
+ * answers a different question from the one the reader is asking.
+ */
+export type LatestArticleRow = {
+  id: string;
+  slug: string;
+  headline: string;
+  source: string | null;
+  publishedAt: string | null;
+  ingestedAt: string | null;
+  hasImage: boolean;
+};
+
 export type ReelsSourceRow = {
   sourceKey: string;
   enabled: boolean;
@@ -149,6 +169,7 @@ export type AdminData = {
   sources: SourceRow[];
   categories: CategoryRow[];
   topArticles: TopArticle[];
+  latestArticles: LatestArticleRow[];
   reelsSources: ReelsSourceRow[];
   recentErrors: ErrorRow[];
   filters: AdminFilters;
@@ -547,6 +568,42 @@ export async function getAdminData(filters: AdminFilters): Promise<AdminData> {
     degraded.push("top articles");
   }
 
+  // ---- The top of the feed ----------------------------------------------
+  //
+  // The same order the reader sees: arrival, not publication. This is
+  // the panel that answers "what is at the top of the homepage right
+  // now", and it is deliberately a SELECT rather than a count, because
+  // a list of headlines is what makes a mistake visible - a story
+  // published in January sitting at the top of the feed is a fact you
+  // can see, and "0 articles" is not.
+  const latestArticles: LatestArticleRow[] = [];
+  try {
+    const { data, error } = await supabase
+      .from("articles")
+      .select(
+        "id, slug, headline, source_name_snapshot, published_at, ingested_at, featured_image_url"
+      )
+      .eq("status", "published")
+      .is("duplicate_of", null)
+      .order("ingested_at", { ascending: false, nullsFirst: false })
+      .limit(15);
+    if (error) throw error;
+
+    for (const row of (data ?? []) as any[]) {
+      latestArticles.push({
+        id: row.id,
+        slug: row.slug,
+        headline: row.headline,
+        source: row.source_name_snapshot,
+        publishedAt: row.published_at,
+        ingestedAt: row.ingested_at,
+        hasImage: Boolean(row.featured_image_url),
+      });
+    }
+  } catch {
+    degraded.push("latest articles");
+  }
+
   // ---- Reels sources ----------------------------------------------------
 
   const reelsSources: ReelsSourceRow[] = [];
@@ -688,6 +745,7 @@ export async function getAdminData(filters: AdminFilters): Promise<AdminData> {
     sources,
     categories,
     topArticles,
+    latestArticles,
     reelsSources,
     recentErrors,
     filters,

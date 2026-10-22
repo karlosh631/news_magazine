@@ -17,6 +17,7 @@ import { StoryDialog } from "@/components/StoryDialog";
 import {
   DRIFT_PX_PER_SEC,
   driftOffsetAfter,
+  isColumnHeld,
   isDriftHeld,
   shouldDriftRun,
 } from "@/lib/drift";
@@ -131,6 +132,7 @@ function AutoScrollColumn({
   paused,
   reduceMotion,
   label,
+  side,
   onOpenStory,
 }: {
   articles: LatestArticle[];
@@ -138,13 +140,26 @@ function AutoScrollColumn({
   reduceMotion: boolean;
   label: string;
   /**
+   * Which side of the reels this column is on.
+   *
+   * A story opened from this column opens IN this column, and only
+   * this column stops moving while it is open. The other column keeps
+   * drifting and the reel keeps playing, so the page stays alive
+   * around the story the reader is reading.
+   */
+  side: "left" | "right";
+  /**
    * Open a story in place, over the feed, instead of navigating to it.
    *
    * The columns are the one place on the site where a headline is the
    * only way from the current page to a story, and following it used to
    * throw the reader out of the video they were watching.
    */
-  onOpenStory?: (article: NewsCardArticle, trigger: HTMLElement) => void;
+  onOpenStory?: (
+    article: NewsCardArticle,
+    trigger: HTMLElement,
+    side: "left" | "right"
+  ) => void;
 }) {
   const trackRef = useRef<HTMLDivElement | null>(null);
   const copyRef = useRef<HTMLDivElement | null>(null);
@@ -288,8 +303,13 @@ function AutoScrollColumn({
           article={article}
           onImageUnavailable={markImageless}
           // A headline in a drifting column opens the story over the
-          // feed rather than navigating away from it.
-          onOpen={onOpenStory}
+          // feed rather than navigating away from it, and opens it in
+          // the column it was clicked in.
+          onOpen={
+            onOpenStory
+              ? (article, trigger) => onOpenStory(article, trigger, side)
+              : undefined
+          }
         />
       ))}
     </div>
@@ -375,12 +395,26 @@ export function ReelsFeed({
     to the exact card that was clicked.
   */
   const [openStory, setOpenStory] = useState<NewsCardArticle | null>(null);
+  /**
+   * Which column the open story belongs to.
+   *
+   * The story opens IN its column, and only its column stops moving.
+   * The other column keeps drifting and the reel keeps playing, so
+   * the page stays alive around the story rather than going quiet
+   * behind a modal.
+   */
+  const [storySide, setStorySide] = useState<"left" | "right" | null>(null);
   const storyTriggerRef = useRef<HTMLElement | null>(null);
   const backgroundRef = useRef<HTMLDivElement | null>(null);
 
   const openStoryInPlace = useCallback(
-    (article: NewsCardArticle, trigger: HTMLElement) => {
+    (
+      article: NewsCardArticle,
+      trigger: HTMLElement,
+      side: "left" | "right"
+    ) => {
       storyTriggerRef.current = trigger;
+      setStorySide(side);
       setOpenStory(article);
     },
     []
@@ -442,6 +476,43 @@ export function ReelsFeed({
    * so nothing would ever play.
    */
   const itemRefs = useRef(new Set<HTMLElement>());
+
+  /*
+    THE FEED ROTATES
+    ----------------
+    The catalogue is finite — it is whatever the worker has stored, and
+    for Wikimedia that is a couple of hundred Nepal clips — but the
+    feed does not end. When the reader reaches the last clip, the feed
+    goes back to the first one, so the page is endless in the way a
+    playlist is: you can keep scrolling and you keep seeing clips, and
+    the ones you have already watched come round again.
+
+    A feed that simply STOPS is a page that says "you have reached the
+    end", and on a vertical video feed that is an invitation to leave.
+    The rotation is the difference between a feed and a list.
+
+    The dwell matters. The wrap happens a couple of seconds after the
+    last clip becomes the active one, not the instant it does: the
+    reader has to be given time to see the clip they scrolled to
+    before the page takes them back to the top.
+
+    Both layouts are reset, because both exist in the DOM and the
+    reader is looking at one of them.
+  */
+  const feedRefs = useRef(new Set<HTMLDivElement>());
+  const lastReelId = reels.length ? reels[reels.length - 1]?.id : null;
+
+  useEffect(() => {
+    if (!lastReelId || activeId !== lastReelId) return;
+
+    const timer = window.setTimeout(() => {
+      for (const container of feedRefs.current) {
+        container?.scrollTo({ top: 0, behavior: "auto" });
+      }
+    }, 2500);
+
+    return () => window.clearTimeout(timer);
+  }, [activeId, lastReelId]);
 
   // Respect the OS "reduce motion" setting. Perpetual scrolling is one of
   // the things it exists to switch off, so the columns become ordinary
@@ -605,6 +676,13 @@ export function ReelsFeed({
   const renderFeed = (key: "mobile" | "desktop") => (
     <div
       key={key}
+      ref={(element) => {
+        // Registered so the rotation can send both layouts back to the
+        // top. The inactive one has no height, but it is still in the
+        // DOM and the reader will be looking at it after a resize.
+        if (element) feedRefs.current.add(element);
+        else feedRefs.current.delete(element as unknown as HTMLDivElement);
+      }}
       className={`${FEED_SCROLL} ${key === "mobile" ? "lg:hidden" : "hidden lg:block"}`}
       // Keyboard paging between reels, so the feed is not mouse-only.
       tabIndex={0}
@@ -645,6 +723,27 @@ export function ReelsFeed({
     reduceMotion,
   });
 
+  /**
+   * Whether a particular column is held still.
+   *
+   * Only the column the story was opened in stops. The other one
+   * keeps drifting, and so do the reels - the reader is reading one
+   * story, and the rest of the page carries on around them.
+   */
+  const columnHeld = useCallback(
+    (side: "left" | "right") =>
+      isColumnHeld(
+        {
+          manuallyPaused: driftPaused,
+          storyOpen: openStory !== null,
+          reduceMotion,
+        },
+        side,
+        storySide
+      ),
+    [driftPaused, openStory, reduceMotion, storySide]
+  );
+
   return (
     /*
       `h-full` because both layouts inside are `h-full`, and a
@@ -675,9 +774,10 @@ export function ReelsFeed({
         <div className="hidden lg:grid lg:h-full lg:grid-cols-[minmax(0,1fr)_minmax(0,420px)_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)] lg:items-stretch lg:gap-6 lg:px-6 lg:py-4">
           <DriftingColumn
             articles={leftArticles}
-            paused={driftHeld}
+            paused={columnHeld("left")}
             reduceMotion={reduceMotion}
             label="Latest news"
+            side="left"
             onOpenStory={openStoryInPlace}
           />
 
@@ -691,9 +791,10 @@ export function ReelsFeed({
 
           <DriftingColumn
             articles={rightArticles}
-            paused={driftHeld}
+            paused={columnHeld("right")}
             reduceMotion={reduceMotion}
             label="Latest news"
+            side="right"
             onOpenStory={openStoryInPlace}
           />
         </div>
@@ -725,6 +826,7 @@ export function ReelsFeed({
       {openStory && (
         <StoryDialog
           article={openStory}
+          side={storySide}
           onClose={closeStory}
           returnFocusTo={storyTriggerRef.current}
           background={backgroundRef.current}

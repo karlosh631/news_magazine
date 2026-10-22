@@ -157,6 +157,12 @@ jobs:
             echo "DEDUP_WINDOW_HOURS=12"
             echo "FUZZY_TITLE_THRESHOLD=78"
             echo "MIN_POLL_SECONDS=60"
+            # The fetch caps. Every one is a hard bound on the number of
+            # articles/clips actually fetched and stored in one cycle,
+            # enforced where the work is done — not a target.
+            echo "MAX_ARTICLES_PER_SOURCE=200"
+            echo "MAX_ARTICLES_PER_CYCLE=20000"
+            echo "CYCLE_WINDOW_SECONDS=900"
             # ENABLE_GEMINI_SUMMARY has no caller in services/ingestion.py
             # (synthesize_summary is unwired), so it is left false rather
             # than implying a behaviour that does not exist.
@@ -177,7 +183,11 @@ jobs:
             # SKIPPED when their key is absent.
             echo "ENABLE_REELS=true"
             echo "REELS_POLL_SECONDS=300"
-            echo "REELS_PER_SOURCE=30"
+            # Per provider, per pass, and across the whole pass. This was
+            # REELS_PER_SOURCE, which still works; the new name says
+            # what it bounds.
+            echo "MAX_REELS_PER_PROVIDER=100"
+            echo "MAX_REELS_PER_CYCLE=500"
             # The optional stock providers. Empty is fine — the keyless
             # one still fills the category.
             echo "PEXELS_API_KEYS=${PEXELS_API_KEYS:-}"

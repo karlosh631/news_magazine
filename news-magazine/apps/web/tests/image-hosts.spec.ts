@@ -163,11 +163,24 @@ test.describe("merging a batch into a running feed", () => {
     expect(merged[0]!.source_count).toBe(1);
   });
 
-  test("arrival time outranks publication time", () => {
-    // A story fetched ten minutes after publication has been on the page the
-    // whole time; it must not leap to the top on every poll.
-    const older = story("old", "2026-10-20T08:00:00Z", "2026-10-20T11:00:00Z");
-    const newer = story("new", "2026-10-20T10:00:00Z", "2026-10-20T09:00:00Z");
-    expect([older, newer].sort(byNewest).map((a) => a.id)).toEqual(["new", "old"]);
+  test("the newest news comes first, whatever order we fetched it in", () => {
+    // The reader asked for the latest news on top, and this is the
+    // regression that stopped it: a story published hours ago but
+    // re-fetched a moment ago used to outrank the news of the day.
+    const publishedEarlier = story("early", "2026-10-20T10:00:00Z", "2026-10-20T08:00:00Z");
+    const publishedLater = story("late", "2026-10-20T08:00:00Z", "2026-10-20T11:00:00Z");
+    expect(
+      [publishedEarlier, publishedLater].sort(byNewest).map((a) => a.id)
+    ).toEqual(["late", "early"]);
+  });
+
+  test("within one publication moment, the copy fetched last wins", () => {
+    // Two outlets file the same story in the same second; the copy we
+    // fetched last is the one with the better picture.
+    const fetchedFirst = story("first", "2026-10-20T08:00:00Z", "2026-10-20T09:00:00Z");
+    const fetchedLast = story("last", "2026-10-20T08:30:00Z", "2026-10-20T09:00:00Z");
+    expect(
+      [fetchedFirst, fetchedLast].sort(byNewest).map((a) => a.id)
+    ).toEqual(["last", "first"]);
   });
 });

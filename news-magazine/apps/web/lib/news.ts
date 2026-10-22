@@ -379,16 +379,20 @@ function applyCursor<T extends { or: (filter: string) => T }>(
  */
 function newestFirst(rows: LatestArticle[]): LatestArticle[] {
   return [...rows].sort((a, b) => {
+    // The newest NEWS first. The client sorts the same way — see
+    // `byNewest` in lib/feed-merge.ts — and the two have to agree or
+    // the page visibly reshuffles on the first poll after every load.
+    const left = a.published_at ? Date.parse(a.published_at) : 0;
+    const right = b.published_at ? Date.parse(b.published_at) : 0;
+    if (right !== left) return right - left;
+
+    // The tiebreaker: the most recently fetched copy of the same
+    // moment, so the better picture and the higher outlet count end
+    // up on the card the reader sees.
     const arrivedA = a.ingested_at ? Date.parse(a.ingested_at) : 0;
     const arrivedB = b.ingested_at ? Date.parse(b.ingested_at) : 0;
     if (arrivedB !== arrivedA) return arrivedB - arrivedA;
 
-    // A row with no arrival time — an older database that predates the
-    // column, or a resurrected row — falls back to publication time
-    // rather than sorting as if it were from 1970.
-    const left = a.published_at ? Date.parse(a.published_at) : 0;
-    const right = b.published_at ? Date.parse(b.published_at) : 0;
-    if (right !== left) return right - left;
     return (b.source_count ?? 0) - (a.source_count ?? 0);
   });
 }
@@ -429,10 +433,9 @@ async function languageSelect({
       .eq("status", "published")
       .is("duplicate_of", null)
       .eq("language", lang)
-      // Arrival order, for the same reason as the unfiltered select:
-      // the window is the top of the feed, and the feed is ordered by
-      // when we first saw the story. See directSelect.
-      .order("ingested_at", { ascending: false, nullsFirst: false })
+      // Newest news first, for the same reason as the unfiltered
+      // select: the window is the top of the feed. See directSelect.
+      .order("published_at", { ascending: false, nullsFirst: false })
       // The tiebreaker for the keyset cursor. Deterministic, so a page
       // boundary inside a run of identical timestamps cannot skip or
       // repeat rows — see applyCursor.
@@ -614,29 +617,28 @@ async function directSelect({
     )
     .eq("status", "published")
     .is("duplicate_of", null)
-    // ARRIVAL ORDER, NOT PUBLICATION ORDER
-    // ------------------------------------
+    // NEWEST NEWS FIRST
+    // ------------------
     // The window this query fills is the top of the feed, and the feed
-    // is ordered by when we ARRIVED at the story. Ordering the window
-    // by publication time instead meant the newest-fetched story was
-    // only on the page if it also happened to be among the newest
-    // published — a story a publisher sat on for five hours, fetched a
-    // minute ago, fell outside the window and never appeared at all.
-    // The reader asked for the most recently FETCHED story on top, and
-    // the query has to agree with the sort the client applies.
+    // is ordered by when the story was PUBLISHED. Ordering it by
+    // arrival instead meant the window was the most recently FETCHED
+    // rows — which, with a re-fetched old story in the database, put a
+    // story published in June at the top of the homepage, above the
+    // news of the day.
+    //
+    // The reader asked for the latest news of the very date, and that
+    // is what this is.
     //
     // nullsFirst: false is required, not cosmetic. PostgreSQL defaults
     // `ORDER BY ... DESC` to NULLS FIRST, so any article with no
-    // arrival time would sort ABOVE every dated one — an undated row
-    // takes position 1 and the newest real story is pushed down the
-    // page.
-    .order("ingested_at", { ascending: false, nullsFirst: false })
+    // published_at sorts ABOVE every dated one — an undated row takes
+    // position 1 and the newest real story is pushed down the page.
+    .order("published_at", { ascending: false, nullsFirst: false })
     // The keyset tiebreaker, and a determinism fix in its own right.
-    // Two stories ingested in the same transaction share an arrival
-    // time exactly, so without a second sort key PostgreSQL is free to
-    // return that run in any order it likes — which made page
-    // boundaries inside such a run skip and repeat rows. See
-    // applyCursor.
+    // Several outlets publish inside the same second, so without a
+    // second sort key PostgreSQL is free to return that run in any
+    // order it likes — which made page boundaries inside such a run
+    // skip and repeat rows. See applyCursor.
     .order("id", { ascending: false })
     // Over-fetched so that dropping duplicates can backfill with the next
     // story down instead of leaving a hole. See DEDUP_HEADROOM.

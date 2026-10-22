@@ -64,6 +64,7 @@ import logging
 import os
 import re
 import socket
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -71,6 +72,11 @@ from typing import Any
 
 import httpx
 
+from app.config import (
+    DEFAULT_CYCLE_WINDOW_SECONDS,
+    DEFAULT_MAX_ARTICLES_PER_CYCLE,
+    DEFAULT_MAX_ARTICLES_PER_SOURCE,
+)
 from app.database import get_db
 from app.services.adapters import build_adapter
 from app.sources.html_listing import HtmlListingAdapter
@@ -297,8 +303,29 @@ class IngestionResult:
     # Non-zero on a steady-state deployment means the category rules
     # changed and the stored rows are catching up.
     recategorized: int = 0
+    # Whether a fetch cap truncated this poll, which cap did it, and
+    # how many articles it threw away.
+    #
+    # A cap is NOT a failure: the run is still a success and the
+    # articles that were in range were stored normally. It is
+    # recorded because a poll that quietly throws stories away looks
+    # exactly like a poll that found nothing new, and the only place
+    # that distinction survives is a number somebody can read.
+    capped: bool = False
+    cap_reason: str | None = None
+    cap_dropped: int = 0
     dedup_detail: str = ""
     error_details: list[dict] = field(default_factory=list)
+
+    def note_cap(self, reason: str, dropped: int) -> None:
+        """Record that a fetch cap truncated this poll."""
+        if dropped <= 0:
+            return
+        self.capped = True
+        self.cap_dropped += dropped
+        self.cap_reason = (
+            reason if not self.cap_reason else f"{self.cap_reason},{reason}"
+        )
 
     def as_dict(self) -> dict:
         return {
@@ -313,6 +340,9 @@ class IngestionResult:
             "images_dropped": self.images_dropped,
             "images_repaired": self.images_repaired,
             "recategorized": self.recategorized,
+            "capped": self.capped,
+            "cap_reason": self.cap_reason,
+            "cap_dropped": self.cap_dropped,
             "dedup_detail": self.dedup_detail,
         }
 
@@ -1849,6 +1879,213 @@ async def _finish_sync_log(db, sync_log_id, status, result: IngestionResult) -> 
         logger.exception("Failed to update sync log %s", sync_log_id)
 
 
+async def _log_cap(
+    db, source_id, sync_log_id, reason: str, limit: int, dropped: int
+) -> None:
+    """
+    Record a fetch cap that truncated a poll, where an operator can see it.
+
+    A cap is not a failure — the run stays a success, and the
+    articles that were in range were stored normally — but a poll that
+    quietly throws stories away is indistinguishable from a poll that
+    found nothing new. The log line is the first place it shows up;
+    the `source_errors` row is the second, and it is the one the
+    admin dashboard reads.
+
+    The error_type is `fetch_capped` rather than something that reads
+    like a fault, and the message says what it is, because a red line
+    on a dashboard that means "you fetched too much" is a very
+    different problem from a red line that means "the publisher is
+    down".
+    """
+    message = (
+        f"Fetch cap '{reason}' reached: {dropped} article(s) were not "
+        f"fetched this poll (limit {limit}). Raise the cap if this "
+        f"outlet's feed is being truncated."
+    )
+    logger.warning("[%s] %s", source_id, message)
+
+    try:
+        await db_call(
+            lambda: db.table("source_errors")
+            .insert(
+                {
+                    "source_id": source_id,
+                    "sync_log_id": sync_log_id,
+                    "error_type": "fetch_capped",
+                    "message": message[:5000],
+                    "context": {
+                        "cap": reason,
+                        "limit": limit,
+                        "dropped": dropped,
+                    },
+                }
+            )
+            .execute()
+        )
+    except Exception:
+        logger.exception("Failed to write the fetch-cap notice to the database")
+
+
+# =============================================================
+# FETCH CAPS
+#
+# How much one cycle is allowed to pull in.
+#
+# Two bounds, both of them real:
+#
+#   max_articles_per_source — how many articles ONE outlet may
+#       contribute in one poll.
+#   max_articles_per_cycle  — how many articles the WHOLE pipeline
+#       may fetch across every outlet in one cycle.
+#
+# Neither is a number in a config file that nothing reads: both are
+# applied to the list of entries the poll is about to work through, so
+# the articles past the cap are never normalised, never deduped, never
+# page-fetched and never stored.
+#
+# A CYCLE IS A WINDOW, NOT A BATCH
+# --------------------------------
+# The scheduler has no single pass over every outlet — each source has
+# its own interval and they are staggered — so "one cycle" is a fixed
+# stretch of time within which the total cap applies. The window
+# restarts as soon as the previous one expires, which makes the cap a
+# rate rather than a one-shot allowance. The alternative, a cap that
+# resets on a timer the operator has to keep in step with the
+# scheduler, is a cap that is wrong whenever the two drift apart.
+# =============================================================
+
+# The shortest a cycle window may be. A window of zero would mean the
+# budget is never spent and the total cap would never bind — which is
+# the opposite of what a cap is for.
+MIN_CYCLE_WINDOW_SECONDS = 60
+
+
+class CycleBudget:
+    """
+    The total number of articles one cycle may fetch, across every outlet.
+
+    The reservation is taken BEFORE the work is done, so two outlets
+    racing for the last few slots cannot both take them. What is left
+    is reported back to the caller, which is what actually bounds the
+    work.
+
+    NO LOCK, AND THAT IS DELIBERATE
+    -------------------------------
+    The whole check-and-update is synchronous, and asyncio never
+    preempts a coroutine that is not awaiting, so the section is
+    atomic with respect to every other coroutine in this process. A
+    lock would buy nothing — and it would bind the budget to whichever
+    event loop first contended for it, which is a trap for anything
+    that runs the pipeline in more than one loop.
+    """
+
+    def __init__(self) -> None:
+        self._window_started: float = 0.0
+        self._used: int = 0
+
+    async def reserve(
+        self, wanted: int, limit: int, window_seconds: int
+    ) -> int:
+        """
+        How many of `wanted` articles this cycle may still have.
+
+        Returns 0 when the cycle's allowance is spent. `limit` and
+        `window_seconds` are passed in rather than read from settings
+        so that the budget has no hidden dependency on the environment
+        it happens to be running in.
+        """
+        if wanted <= 0:
+            return 0
+
+        now = time.monotonic()
+
+        if now - self._window_started >= window_seconds:
+            # A new window. The previous one's spending is gone.
+            self._window_started = now
+            self._used = 0
+
+        remaining = max(limit - self._used, 0)
+        granted = min(wanted, remaining)
+        self._used += granted
+        return granted
+
+    async def used(self, limit: int, window_seconds: int) -> int:
+        """How much of this cycle's allowance is already spent."""
+        now = time.monotonic()
+        if now - self._window_started >= window_seconds:
+            return 0
+        return self._used
+
+    def reset(self) -> None:
+        """Forget the current window entirely. For tests."""
+        self._window_started = 0.0
+        self._used = 0
+
+
+#: The one budget the process shares. Every caller of run_source_sync —
+#: the scheduler, the cron entry point and the manual trigger — spends
+#: from the same pot, because they are all fetching from the same
+#: publishers.
+cycle_budget = CycleBudget()
+
+
+def reset_cycle_budget() -> None:
+    """Start a fresh cycle. Used by tests, and by explicit boundaries."""
+    cycle_budget.reset()
+
+
+def per_source_cap(settings) -> int:
+    """
+    The per-outlet article cap, never below one.
+
+    A settings object that does not carry the field at all falls back
+    to the SAME default the Settings class declares — not to one,
+    which would silently stop the pipeline fetching anything.
+    """
+    return max(
+        int(
+            getattr(
+                settings,
+                "max_articles_per_source",
+                DEFAULT_MAX_ARTICLES_PER_SOURCE,
+            )
+            or 0
+        ),
+        1,
+    )
+
+
+def per_cycle_cap(settings) -> int:
+    """The whole-pipeline article cap for one cycle, never below one."""
+    return max(
+        int(
+            getattr(
+                settings,
+                "max_articles_per_cycle",
+                DEFAULT_MAX_ARTICLES_PER_CYCLE,
+            )
+            or 0
+        ),
+        1,
+    )
+
+
+def cycle_window(settings) -> int:
+    """How long one cycle lasts, never below MIN_CYCLE_WINDOW_SECONDS."""
+    return max(
+        int(
+            getattr(
+                settings,
+                "cycle_window_seconds",
+                DEFAULT_CYCLE_WINDOW_SECONDS,
+            )
+            or 0
+        ),
+        MIN_CYCLE_WINDOW_SECONDS,
+    )
+
+
 # =============================================================
 # MAIN SOURCE SYNC
 # =============================================================
@@ -1927,6 +2164,48 @@ async def run_source_sync(
     try:
         raw = await adapter.fetch()
         entries = adapter.parse(raw)
+
+        # ---- Fetch caps ----
+        #
+        # Two bounds, both applied to the LIST the poll is about to
+        # work through — so an article past the cap is never
+        # normalised, never deduped, never page-fetched for its media
+        # and never stored. This is the difference between a cap and a
+        # number in a config file.
+        #
+        # The per-outlet cap bounds what ONE source may contribute in
+        # one poll. The per-cycle cap bounds what the WHOLE pipeline
+        # may fetch across every outlet in one cycle; the per-outlet
+        # cap alone still allows 27 x 200, which is a crawl of 27
+        # publishers rather than a poll of them.
+        #
+        # Both truncate the TAIL of the list, and a feed is newest
+        # first, so what goes is the oldest — which is exactly the
+        # material the next poll would have found duplicate anyway.
+        source_cap = per_source_cap(settings)
+        cycle_cap = per_cycle_cap(settings)
+        window = cycle_window(settings)
+
+        offered = len(entries)
+        if offered > source_cap:
+            dropped = offered - source_cap
+            entries = entries[:source_cap]
+            result.note_cap("max_articles_per_source", dropped)
+            await _log_cap(
+                db, source_id, sync_log_id, "max_articles_per_source",
+                source_cap, dropped,
+            )
+
+        allowed = await cycle_budget.reserve(len(entries), cycle_cap, window)
+        if allowed < len(entries):
+            dropped = len(entries) - allowed
+            entries = entries[:allowed]
+            result.note_cap("max_articles_per_cycle", dropped)
+            await _log_cap(
+                db, source_id, sync_log_id, "max_articles_per_cycle",
+                cycle_cap, dropped,
+            )
+
         result.fetched = len(entries)
         articles = adapter.validate(adapter.normalize(entries))
 

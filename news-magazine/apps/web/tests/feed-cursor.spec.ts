@@ -12,111 +12,131 @@ import {
  *
  * WHY THESE EXIST
  * ---------------
- * The reader asked, repeatedly, for the most recently FETCHED story to
- * be at the top of the homepage. The page already sorted by arrival —
- * `lib/feed-merge.ts` does it on the client — but the QUERY that
- * filled the window was ordered by publication time, so the two
- * disagreed:
+ * The reader asked, repeatedly, for the latest news to be at the top of
+ * every page. It was not, and the reason was a rule that sounded
+ * right and was not.
  *
- *   the window was the newest stories by PUBLICATION,
- *   the page showed the newest of those by ARRIVAL.
+ * The feed was ordered by ARRIVAL — when WE fetched the story — on the
+ * argument that a publisher who sat on a story for hours makes it new
+ * to this site when it finally appears. The argument is true. It is
+ * also the wrong thing to show somebody who opened a news site: the
+ * top of the homepage was a story published in JUNE, sitting above
+ * today's news, because we had re-fetched it.
  *
- * The newest-arrived story was only on the page if it also happened to
- * be among the newest published. A publisher who sat on a story for
- * five hours before filing it in their feed produced a story that was
- * new to this site and invisible on it, and no amount of sorting
- * client-side could bring it back — it was never in the window.
- *
- * The order and the cursor are ONE decision. The cursor has to
- * address the same ordering the query runs, or the page boundary
- * falls in the wrong place and stories are silently lost — no error,
- * no empty page, just rows the reader never sees.
+ * The order is therefore: the newest NEWS first, by publication time,
+ * and within one publication moment the most recently fetched copy
+ * first. The cursor addresses the same pair of columns, because a
+ * cursor on any other column puts the page boundary in the wrong
+ * place and the reader silently loses stories.
  */
 
 test.describe("the feed's order", () => {
-  test("the window is the newest by arrival, not by publication", () => {
+  test("the window is the newest by publication, not by arrival", () => {
     expect(FEED_ORDER.map((entry) => entry.column)).toEqual([
-      "ingested_at",
+      "published_at",
       "id",
     ]);
     expect(FEED_ORDER.every((entry) => entry.ascending === false)).toBe(true);
   });
 
-  test("arrival outranks publication", () => {
-    // Fetched a minute ago, published five hours ago. It is new to this
-    // site, so it belongs on top.
-    const justFetched = {
-      ingested_at: "2026-10-22T10:00:00.000Z",
-      published_at: "2026-10-22T05:00:00.000Z",
-      source_count: 1,
-    };
-    const justPublished = {
+  test("the newest news comes first", () => {
+    // Published ten minutes ago beats published an hour ago, whatever
+    // order we happened to fetch them in.
+    const publishedNow = {
       ingested_at: "2026-10-22T09:00:00.000Z",
-      published_at: "2026-10-22T09:59:00.000Z",
+      published_at: "2026-10-22T10:00:00.000Z",
       source_count: 1,
     };
-
-    expect(byNewest(justFetched, justPublished)).toBeLessThan(0);
-    expect(byNewest(justPublished, justFetched)).toBeGreaterThan(0);
-  });
-
-  test("a story moves up once, when it arrives, and then stays put", () => {
-    // Published two minutes ago but fetched ten minutes ago. It has
-    // been on the page the whole time, so it must NOT leap back above
-    // a story that arrived after it.
-    const earlier = {
-      ingested_at: "2026-10-22T09:50:00.000Z",
-      published_at: "2026-10-22T09:58:00.000Z",
-      source_count: 1,
-    };
-    const later = {
-      ingested_at: "2026-10-22T09:59:00.000Z",
+    const publishedEarlier = {
+      ingested_at: "2026-10-22T10:00:00.000Z",
       published_at: "2026-10-22T09:00:00.000Z",
       source_count: 1,
     };
 
-    expect(byNewest(later, earlier)).toBeLessThan(0);
+    expect(byArrival(publishedNow, publishedEarlier)).toBeLessThan(0);
+    expect(byArrival(publishedEarlier, publishedNow)).toBeGreaterThan(0);
   });
 
-  test("a row with no arrival time falls back to publication time", () => {
+  test("a story published in June does not outrank one published today", () => {
+    // The regression in one assertion: this is what the top of the
+    // homepage looked like, and it is what the reader was looking at.
+    const oldButJustFetched = {
+      ingested_at: "2026-10-22T10:00:00.000Z",
+      published_at: "2026-06-17T14:29:00.000Z",
+      source_count: 1,
+    };
+    const newStory = {
+      ingested_at: "2026-10-22T09:00:00.000Z",
+      published_at: "2026-10-22T09:30:00.000Z",
+      source_count: 1,
+    };
+
+    expect(byArrival(newStory, oldButJustFetched)).toBeLessThan(0);
+  });
+
+  test("within one moment, the most recently fetched copy wins", () => {
+    // Two outlets file the same story in the same second. The copy we
+    // fetched last is the one with the better picture.
+    const fetchedFirst = {
+      ingested_at: "2026-10-22T09:00:00.000Z",
+      published_at: "2026-10-22T10:00:00.000Z",
+      source_count: 1,
+    };
+    const fetchedLast = {
+      ingested_at: "2026-10-22T10:00:00.000Z",
+      published_at: "2026-10-22T10:00:00.000Z",
+      source_count: 1,
+    };
+
+    expect(byArrival(fetchedLast, fetchedFirst)).toBeLessThan(0);
+  });
+
+  test("a row with no publication time falls back to arrival", () => {
     // An older database, or a resurrected row. It must not sort as if
     // it were from 1970.
-    const undated = {
-      ingested_at: null,
-      published_at: "2026-10-22T09:00:00.000Z",
+    const undated: {
+      ingested_at: string | null;
+      published_at: string | null;
+      source_count: number | null;
+    } = {
+      ingested_at: "2026-10-22T09:00:00.000Z",
+      published_at: null,
       source_count: 1,
     };
-    const dated = {
-      ingested_at: "2026-10-22T10:00:00.000Z",
-      published_at: "2026-10-22T05:00:00.000Z",
+    const dated: typeof undated = {
+      ingested_at: "2026-10-22T08:00:00.000Z",
+      published_at: "2026-10-22T10:00:00.000Z",
       source_count: 1,
     };
 
-    expect(byNewest(dated, undated)).toBeLessThan(0);
+    expect(byArrival(dated, undated)).toBeLessThan(0);
   });
 });
 
 test.describe("the keyset cursor", () => {
   const cursor = {
-    ingested_at: "2026-10-22T10:00:00.123456+00:00",
+    published_at: "2026-10-22T10:00:00.123456+00:00",
     id: "0f7c1a2b-3d4e-5f60-7182-93a4b5c6d7e8",
   };
 
-  test("it addresses arrival time and the tiebreaker", () => {
+  test("it addresses publication time and the tiebreaker", () => {
     const filter = feedCursorFilter(cursor);
 
     expect(filter).not.toBeNull();
-    expect(filter).toContain(`ingested_at.lt.${cursor.ingested_at}`);
-    expect(filter).toContain(`ingested_at.eq.${cursor.ingested_at}`);
+    expect(filter).toContain(`published_at.lt.${cursor.published_at}`);
+    expect(filter).toContain(`published_at.eq.${cursor.published_at}`);
     expect(filter).toContain(`id.lt.${cursor.id}`);
   });
 
-  test("it does not address publication time", () => {
-    // A publication-time cursor addresses a different ordering than
-    // the one the query runs. Applying it would skip rows silently.
+  test("it addresses the same column the feed is ordered by", () => {
+    // A cursor on any other column puts the page boundary in the
+    // wrong place, and the reader loses stories with no error and no
+    // empty page — just rows that were never shown.
     const filter = feedCursorFilter(cursor) ?? "";
 
-    expect(filter).not.toContain("published_at");
+    expect(FEED_ORDER[0]?.column).toBe("published_at");
+    expect(filter).toContain("published_at");
+    expect(filter).not.toContain("ingested_at");
   });
 
   test("it carries no wrapping pair of its own", () => {
@@ -140,45 +160,29 @@ test.describe("the keyset cursor", () => {
   test("a cursor that addresses nothing yields no filter", () => {
     expect(feedCursorFilter(null)).toBeNull();
     expect(feedCursorFilter(undefined)).toBeNull();
-    expect(feedCursorFilter({ ingested_at: "", id: cursor.id })).toBeNull();
+    expect(feedCursorFilter({ published_at: "", id: cursor.id })).toBeNull();
   });
 
-  test("the cursor for a row is its arrival time and its id", () => {
+  test("the cursor for a row is its publication time and its id", () => {
     expect(
       cursorAfter({
         id: "0f7c1a2b-3d4e-5f60-7182-93a4b5c6d7e8",
-        ingested_at: "2026-10-22T10:00:00.123456+00:00",
+        published_at: "2026-10-22T10:00:00.123456+00:00",
       })
     ).toEqual({
-      ingested_at: "2026-10-22T10:00:00.123456+00:00",
+      published_at: "2026-10-22T10:00:00.123456+00:00",
       id: "0f7c1a2b-3d4e-5f60-7182-93a4b5c6d7e8",
     });
   });
 
-  test("a row with no arrival time ends the archive", () => {
+  test("a row with no publication time ends the archive", () => {
     // NULLs sort last, so nothing can follow one. The feed reports the
     // end of the archive rather than an infinite one.
     expect(
       cursorAfter({
         id: "0f7c1a2b-3d4e-5f60-7182-93a4b5c6d7e8",
-        ingested_at: null,
+        published_at: null,
       })
     ).toBeNull();
   });
 });
-
-/** The comparator, named the way the tests read. */
-function byNewest(
-  a: {
-    ingested_at: string | null;
-    published_at: string | null;
-    source_count: number;
-  },
-  b: {
-    ingested_at: string | null;
-    published_at: string | null;
-    source_count: number;
-  }
-): number {
-  return byArrival(a, b);
-}

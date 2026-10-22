@@ -44,20 +44,42 @@ export type FeedOrder = {
   source_count?: number | null;
 };
 
-/** Newest first — by when we ARRIVED at the story, not when it was published. */
+/**
+ * Newest first — by when the story was PUBLISHED, with arrival as the
+ * tiebreaker.
+ *
+ * WHY PUBLICATION TIME COMES FIRST
+ * --------------------------------
+ * This used to sort by arrival time first, on the argument that a
+ * publisher who sat on a story for hours makes it new to this site
+ * when it finally appears. That argument is true and it is also the
+ * wrong thing to show a reader.
+ *
+ * The reader opened a news site. The top of it was a story published
+ * in JUNE, sitting above today's news, because we had re-fetched it.
+ * A feed whose first three cards are four months old does not read as
+ * "up to date" however defensible the rule behind it is - it reads as
+ * broken, and the reader is right.
+ *
+ * So the order is: the newest NEWS first, by publication time, and
+ * within one publication moment the most recently fetched copy first.
+ * That is what "the latest" means to somebody looking at a news
+ * site, and it still gives the arrival time a job: two outlets file
+ * the same story in the same second, and the copy we fetched last is
+ * the one with the better picture.
+ */
 export function byNewest<T extends FeedOrder>(a: T, b: T): number {
-  // `ingested_at` first: a story moves up ONCE, when it arrives, and then
-  // stays where it is. A story published two minutes ago that we fetched ten
-  // minutes ago has been on the page the whole time and must not leap back to
-  // the top on every poll. Publication time breaks ties, and orders rows
-  // that have no arrival time at all.
+  const left = a.published_at ? Date.parse(a.published_at) : 0;
+  const right = b.published_at ? Date.parse(b.published_at) : 0;
+  if (right !== left) return right - left;
+
+  // The tiebreaker: the most recently fetched copy of the same moment
+  // wins, so the better picture and the higher outlet count end up on
+  // the card the reader sees.
   const arrivedA = a.ingested_at ? Date.parse(a.ingested_at) : 0;
   const arrivedB = b.ingested_at ? Date.parse(b.ingested_at) : 0;
   if (arrivedB !== arrivedA) return arrivedB - arrivedA;
 
-  const left = a.published_at ? Date.parse(a.published_at) : 0;
-  const right = b.published_at ? Date.parse(b.published_at) : 0;
-  if (right !== left) return right - left;
   return (b.source_count ?? 0) - (a.source_count ?? 0);
 }
 

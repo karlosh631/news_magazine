@@ -93,7 +93,14 @@ export default async function CategoryPage({ params }: Props) {
    * is untouched, and no other slug can reach it.
    */
   if (slug === "reels") {
-    const reels = await getReels();
+    // The whole catalogue, not a page of it.
+    //
+    // The panel reports how many clips are stored, and the page used
+    // to show twelve of them with no way to reach the rest — so a
+    // reader saw the same twelve for ever and had no reason to
+    // believe the catalogue was any bigger. The feed now rotates
+    // through everything it is given.
+    const reels = await getReels({ limit: 120 });
 
     if (reels.reels.length === 0) {
       return (

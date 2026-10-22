@@ -69,11 +69,25 @@ import {
  */
 export function StoryDialog({
   article,
+  side,
   onClose,
   returnFocusTo,
   background,
 }: {
   article: NewsCardArticle;
+  /**
+   * Which column the story was opened from.
+   *
+   * The story opens IN that column, not over the middle of the page.
+   * A reader who clicks a headline on the left is reading a story
+   * about the left-hand news, and a panel that drops into the middle
+   * of the screen - over the video they were watching, between the
+   * two columns - says "this is a modal" rather than "this is the
+   * story you clicked".
+   *
+   * Null means there is no column, and the story is centred.
+   */
+  side?: "left" | "right" | null;
   onClose: () => void;
   /**
    * The card that opened the story. The focus goes back to it when the
@@ -241,7 +255,28 @@ export function StoryDialog({
       instead.
     */
     <div
-      className="fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-sm sm:p-6"
+      className={
+        side
+          ? // IN A COLUMN.
+            //
+            // The story belongs to the column it was clicked in, so it
+            // opens there - and the rest of the page is left alone.
+            // There is no dimming over the whole screen: the reel
+            // keeps playing and the other column keeps drifting, so
+            // the page carries on around the story being read.
+            //
+            // On a phone there are no side columns at all, so the
+            // story is centred there exactly as it always was. The
+            // column layout only starts at the `lg` breakpoint, where
+            // the three-column grid does.
+            "fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto p-4 sm:p-6 " +
+            (side === "left"
+              ? "lg:justify-start lg:pl-6"
+              : "lg:justify-end lg:pr-6")
+          : // No column: the story is the whole page's business, and
+            // the backdrop dims it.
+            "fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-sm sm:p-6"
+      }
       onClick={(event) => {
         // A click on the backdrop closes the story. A click that
         // started inside the panel did not, so the target is checked:
@@ -261,7 +296,19 @@ export function StoryDialog({
         // it is a dialog rather than announcing a button.
         tabIndex={-1}
         onKeyDown={handleKeyDown}
-        className="relative flex max-h-[calc(100dvh-2rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white text-gray-900 shadow-2xl focus:outline-none dark:bg-gray-900 dark:text-gray-100"
+        className={
+          side
+            ? // The column's own width.
+              //
+              // The reels page is a three-column grid: a 420px middle
+              // column, a 24px gap and a 24px page margin on each side
+              // of it. So a side column ends 234px short of the
+              // middle of the screen, and the panel is bounded by
+              // that - the story fills the column it was clicked in
+              // and does not spill over the video.
+              "relative flex max-h-[calc(100dvh-2rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white text-gray-900 shadow-2xl focus:outline-none lg:max-w-[calc(50%-14.625rem)] dark:bg-gray-900 dark:text-gray-100"
+            : "relative flex max-h-[calc(100dvh-2rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white text-gray-900 shadow-2xl focus:outline-none dark:bg-gray-900 dark:text-gray-100"
+        }
       >
         {/* ================= HEAD ================= */}
         <div className="flex items-start justify-between gap-4 border-b border-gray-200 p-5 dark:border-gray-700">

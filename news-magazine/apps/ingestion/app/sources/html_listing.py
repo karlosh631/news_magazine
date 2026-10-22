@@ -49,6 +49,7 @@ from urllib.parse import urljoin, urlparse
 import feedparser
 import httpx
 
+from app.config import DEFAULT_MAX_ARTICLES_PER_SOURCE
 from app.services.dedup import normalize_title, token_fingerprint
 from app.services.sanitizer import sanitize_excerpt, sanitize_headline
 from app.sources.base import NormalizedArticle, SourceAdapter
@@ -79,6 +80,14 @@ _TAG_RE = re.compile(r"<[^>]+>")
 
 _HEADLINE_MIN_CHARS = 18
 _HEADLINE_MAX_CHARS = 300
+
+#: How many cards one listing page may contribute.
+#:
+#: The listing page is read whole, so this is the page size this
+#: adapter works at. It is a bound on the outlet's own markup; the
+#: operator's per-outlet fetch cap is applied on top of it, and the
+#: smaller of the two wins.
+LISTING_PAGE_LIMIT = 80
 
 _LAZY_ATTRS = ("data-src", "data-original", "data-lazy-src", "data-srcset", "srcset")
 
@@ -203,7 +212,36 @@ class HtmlListingAdapter(SourceAdapter):
             )
 
         # Newest first, because the rest of the pipeline assumes order.
-        return entries[:80]
+        #
+        # Bounded twice: the listing page's own page size, and the
+        # operator's per-outlet fetch cap. The cap is the same number
+        # the pipeline applies after parsing, so lowering it lowers
+        # the work THIS adapter does as well as the work the pipeline
+        # does with the result — a cap that only bound the pipeline
+        # would still let the adapter read a thousand cards off the
+        # page and throw all but fifty of them away.
+        return entries[:self._listing_limit()]
+
+    def _listing_limit(self) -> int:
+        """
+        How many cards this listing page may contribute.
+
+        The smaller of the page's own size and the configured per-outlet
+        fetch cap. A settings object without the field falls back to
+        the same default the Settings class declares, not to one.
+        """
+        cap = max(
+            int(
+                getattr(
+                    self.settings,
+                    "max_articles_per_source",
+                    DEFAULT_MAX_ARTICLES_PER_SOURCE,
+                )
+                or 0
+            ),
+            1,
+        )
+        return min(LISTING_PAGE_LIMIT, cap)
 
     def _parse_card(
         self,

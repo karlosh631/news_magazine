@@ -4,6 +4,7 @@ import { renderToString } from "react-dom/server";
 
 import {
   driftOffsetAfter,
+  isColumnHeld,
   isDriftHeld,
   shouldDriftRun,
 } from "@/lib/drift";
@@ -405,5 +406,57 @@ test.describe("the story is a real dialog", () => {
   test("the outlet's own story is still offered", () => {
     const html = renderedDialog();
     expect(html).toContain(story.source_article_url!);
+  });
+});
+
+/**
+ * THE STORY OPENS IN ITS OWN COLUMN
+ * ---------------------------------
+ * The reader asked for the story to open where it was clicked, not in
+ * a panel over the middle of the screen.
+ *
+ * The middle of the screen is the video. A story that drops into the
+ * middle covers the thing the reader was watching, and it covers it
+ * between the two columns it belongs to - so it says "this is a modal
+ * that has taken over" rather than "this is the story you clicked".
+ *
+ * And only the column the story came from stops moving. The other one
+ * keeps drifting and the reel keeps playing, so the page stays alive
+ * around the story being read.
+ */
+test.describe("the story opens in its own column", () => {
+  const OPEN = { manuallyPaused: false, storyOpen: true, reduceMotion: false };
+  const CLOSED = { manuallyPaused: false, storyOpen: false, reduceMotion: false };
+
+  test("a story in the left column holds only the left column", () => {
+    expect(isColumnHeld(OPEN, "left", "left")).toBe(true);
+    expect(isColumnHeld(OPEN, "right", "left")).toBe(false);
+  });
+
+  test("a story in the right column holds only the right column", () => {
+    expect(isColumnHeld(OPEN, "right", "right")).toBe(true);
+    expect(isColumnHeld(OPEN, "left", "right")).toBe(false);
+  });
+
+  test("with no story, neither column is held", () => {
+    expect(isColumnHeld(CLOSED, "left", null)).toBe(false);
+    expect(isColumnHeld(CLOSED, "right", null)).toBe(false);
+  });
+
+  test("the reader's own pause holds both columns", () => {
+    const paused = { manuallyPaused: true, storyOpen: false, reduceMotion: false };
+    expect(isColumnHeld(paused, "left", null)).toBe(true);
+    expect(isColumnHeld(paused, "right", null)).toBe(true);
+  });
+
+  test("reduced motion holds both columns", () => {
+    const still = { manuallyPaused: false, storyOpen: false, reduceMotion: true };
+    expect(isColumnHeld(still, "left", null)).toBe(true);
+    expect(isColumnHeld(still, "right", null)).toBe(true);
+  });
+
+  test("a story with no column holds both", () => {
+    expect(isColumnHeld(OPEN, "left", null)).toBe(true);
+    expect(isColumnHeld(OPEN, "right", null)).toBe(true);
   });
 });

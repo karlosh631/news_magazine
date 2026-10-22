@@ -58,6 +58,31 @@ export function isDriftHeld(hold: DriftHold): boolean {
 }
 
 /**
+ * Whether ONE column is being held still.
+ *
+ * A story opened from the left column opens IN the left column, and
+ * only the left column stops: the other one keeps drifting and the
+ * reel keeps playing, so the page carries on around the story the
+ * reader is reading. Holding both columns — which is what a plain
+ * "is anything open?" check does — stops the whole page for a story
+ * that is only covering half of it.
+ *
+ * A story with no column (there is none today, but the type allows
+ * it) holds both, because there is no column to say which one it
+ * belongs to.
+ */
+export function isColumnHeld(
+  hold: DriftHold,
+  side: "left" | "right",
+  storySide: "left" | "right" | null
+): boolean {
+  if (hold.manuallyPaused || hold.reduceMotion) return true;
+  if (!hold.storyOpen) return false;
+  if (storySide === null) return true;
+  return storySide === side;
+}
+
+/**
  * Whether the columns may move on this frame.
  *
  * The hover case is here because grabbing a headline to read it is not

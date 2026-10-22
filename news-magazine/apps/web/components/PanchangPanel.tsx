@@ -1,4 +1,4 @@
-import type { Panchang } from "@/lib/daily-info";
+import type { Panchang, RashifalSign } from "@/lib/daily-info";
 
 /**
  * The day's almanac, in full.
@@ -24,10 +24,13 @@ import type { Panchang } from "@/lib/daily-info";
  */
 export function PanchangPanel({
   panchang,
+  signs = [],
   weekday,
   weekdayNe,
 }: {
   panchang: Panchang | null;
+  /** The twelve horoscopes for the day. */
+  signs?: RashifalSign[];
   weekday: string;
   weekdayNe: string;
 }) {
@@ -92,6 +95,69 @@ export function PanchangPanel({
           />
         </dl>
       </section>
+
+      {/* ---- The twelve signs ---- */}
+      {signs.length ? (
+        <section className="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-900">
+          <h3 className="text-sm font-bold text-gray-900 dark:text-gray-100">
+            आजको राशिफल
+          </h3>
+          <p className="text-[11px] text-gray-400 dark:text-gray-500">
+            today&rsquo;s horoscope, for every sign
+          </p>
+          <ul className="mt-4 grid gap-4 sm:grid-cols-2">
+            {signs.map((sign) => (
+              <li
+                key={sign.sign}
+                className="rounded-lg border border-gray-200 p-4 dark:border-gray-700"
+              >
+                <div className="flex items-baseline gap-2">
+                  {sign.emoji ? (
+                    <span aria-hidden="true" className="text-lg">
+                      {sign.emoji}
+                    </span>
+                  ) : null}
+                  <span className="text-sm font-bold text-gray-900 dark:text-gray-100">
+                    {sign.nameNe ?? sign.name ?? sign.slug ?? `Sign ${sign.sign}`}
+                  </span>
+                  {sign.name ? (
+                    <span className="text-[11px] text-gray-400 dark:text-gray-500">
+                      {sign.name}
+                    </span>
+                  ) : null}
+                  {sign.initials ? (
+                    <span className="text-[11px] text-gray-400 dark:text-gray-500">
+                      {sign.initials}
+                    </span>
+                  ) : null}
+                </div>
+                {sign.advice ? (
+                  <p className="mt-2 text-xs leading-relaxed text-gray-600 dark:text-gray-300">
+                    {sign.advice}
+                  </p>
+                ) : null}
+                {sign.luckyColour || sign.luckyNumber ? (
+                  <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
+                    {sign.luckyColour ? (
+                      <>
+                        <span className="sr-only">Lucky colour: </span>
+                        शुभ रंग {sign.luckyColour}
+                      </>
+                    ) : null}
+                    {sign.luckyColour && sign.luckyNumber ? " · " : null}
+                    {sign.luckyNumber ? (
+                      <>
+                        <span className="sr-only">Lucky number: </span>
+                        शुभ अंक {sign.luckyNumber}
+                      </>
+                    ) : null}
+                  </p>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
 
       {/* ---- The windows ---- */}
       <div className="grid gap-4 md:grid-cols-2">

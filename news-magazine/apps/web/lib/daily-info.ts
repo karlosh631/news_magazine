@@ -11,7 +11,6 @@ import { createPublicSupabaseClient } from "@/lib/supabase/server";
  *   - the tithi, the nakshatra, the yoga and the karana
  *   - sunrise, sunset and the length of the day
  *   - the windows the panchang calls शुभ and अशुभ
- *   - the weather in Kathmandu
  *
  * WHY THE PANCHANG COMES FROM THE DATABASE
  * -----------------------------------------
@@ -32,23 +31,10 @@ import { createPublicSupabaseClient } from "@/lib/supabase/server";
  * NOTHING HERE MAY BREAK A PAGE
  * -----------------------------
  * Every part of this is optional. The table may not exist yet (the
- * migration is not applied), the row may not be there yet (the worker
- * has not run), and the weather service may be down. In each of those
- * cases the caller shows what it has and stops — it never throws and
- * never holds a page up.
+ * migration is not applied) and the row may not be there yet (the
+ * worker has not run). In each of those cases the caller shows what
+ * it has and stops — it never throws and never holds a page up.
  */
-
-/** Kathmandu, for the weather. */
-const KATHMANDU = { latitude: 27.7172, longitude: 85.324 };
-
-/**
- * How long the weather is cached for.
- *
- * Half an hour. The weather does not change in the time it takes to
- * notice, and this is read on every page, so an uncached call would
- * be a call per page view.
- */
-const WEATHER_REVALIDATE_SECONDS = 1800;
 
 export type Panchang = {
   /** The Gregorian day this row is FOR, `YYYY-MM-DD`. */
@@ -86,17 +72,6 @@ export type Panchang = {
   sourceUrl: string | null;
 };
 
-export type Weather = {
-  /** Degrees Celsius. */
-  temperature: number | null;
-  /** A short English description, e.g. "Clear". */
-  description: string | null;
-  /** A short Nepali description, e.g. "स्पष्ट". */
-  descriptionNe: string | null;
-  /** An icon key: "clear" | "cloud" | "rain" | "snow" | "storm" | "fog". */
-  icon: "clear" | "cloud" | "rain" | "snow" | "storm" | "fog" | null;
-};
-
 export type DailyInfo = {
   /** Today in Kathmandu, `YYYY-MM-DD`. */
   today: string;
@@ -104,7 +79,6 @@ export type DailyInfo = {
   weekday: string;
   weekdayNe: string;
   panchang: Panchang | null;
-  weather: Weather | null;
 };
 
 /** Today's date in Kathmandu. Kathmandu is UTC+05:45 all year. */
@@ -119,63 +93,6 @@ const WEEKDAYS_EN = [
 const WEEKDAYS_NE = [
   "आइतबार", "सोमबार", "मंगलबार", "बुधबार", "बिहिबार", "शुक्रबार", "शनिबार",
 ];
-
-/**
- * The WMO weather codes, in the three shapes the site needs.
- *
- * The codes are the international standard, so this table is not a
- * guess — but the Nepali words are, and a wrong word in a header is
- * visible on every page of the site, so each one is the ordinary
- * Nepali for the thing.
- */
-const WEATHER_CODES: Record<
-  number,
-  { en: string; ne: string; icon: Weather["icon"] }
-> = {
-  0: { en: "Clear", ne: "स्पष्ट", icon: "clear" },
-  1: { en: "Mostly clear", ne: "प्रायः स्पष्ट", icon: "clear" },
-  2: { en: "Partly cloudy", ne: "आंशिक बदल", icon: "cloud" },
-  3: { en: "Overcast", ne: "बदल", icon: "cloud" },
-  45: { en: "Fog", ne: "हावा", icon: "fog" },
-  48: { en: "Rime fog", ne: "हावा", icon: "fog" },
-  51: { en: "Light drizzle", ne: "हल्का झिरपिर", icon: "rain" },
-  53: { en: "Drizzle", ne: "झिरपिर", icon: "rain" },
-  55: { en: "Heavy drizzle", ne: "गह्रौं झिरपिर", icon: "rain" },
-  56: { en: "Freezing drizzle", ne: "जम्ने झिरपिर", icon: "rain" },
-  57: { en: "Freezing drizzle", ne: "जम्ने झिरपिर", icon: "rain" },
-  61: { en: "Light rain", ne: "हल्का पानी", icon: "rain" },
-  63: { en: "Rain", ne: "पानी", icon: "rain" },
-  65: { en: "Heavy rain", ne: "गह्रौं पानी", icon: "rain" },
-  66: { en: "Freezing rain", ne: "जम्ने पानी", icon: "rain" },
-  67: { en: "Freezing rain", ne: "जम्ने पानी", icon: "rain" },
-  71: { en: "Light snow", ne: "हल्का हिम", icon: "snow" },
-  73: { en: "Snow", ne: "हिम", icon: "snow" },
-  75: { en: "Heavy snow", ne: "गह्रौं हिम", icon: "snow" },
-  77: { en: "Snow grains", ne: "हिम", icon: "snow" },
-  80: { en: "Rain showers", ne: "पानी", icon: "rain" },
-  81: { en: "Rain showers", ne: "पानी", icon: "rain" },
-  82: { en: "Violent rain showers", ne: "तीव्र पानी", icon: "rain" },
-  85: { en: "Snow showers", ne: "हिम", icon: "snow" },
-  86: { en: "Snow showers", ne: "हिम", icon: "snow" },
-  95: { en: "Thunderstorm", ne: "आँधी", icon: "storm" },
-  96: { en: "Thunderstorm with hail", ne: "आँधी", icon: "storm" },
-  99: { en: "Thunderstorm with hail", ne: "आँधी", icon: "storm" },
-};
-
-/**
- * What the weather is doing, from the WMO code.
- *
- * Exported so it can be tested: the codes are a table of a hundred
- * entries, and a typo in one of them is a wrong word in the header of
- * every page on the site.
- */
-export function describeWeatherCode(code: number): {
-  en: string;
-  ne: string;
-  icon: Weather["icon"];
-} | null {
-  return WEATHER_CODES[code] ?? null;
-}
 
 function asString(value: unknown): string | null {
   if (value === null || value === undefined) return null;
@@ -279,50 +196,10 @@ const readCachedPanchang = unstable_cache(
 );
 
 /**
- * The weather in Kathmandu.
- *
- * Open-Meteo, which needs no key and no account. A weather API that
- * needs a key is a weather API that stops working when the key
- * expires, and a header that stops working is a broken site.
- */
-async function readWeather(): Promise<Weather | null> {
-  try {
-    const url = new URL("https://api.open-meteo.com/v1/forecast");
-    url.searchParams.set("latitude", String(KATHMANDU.latitude));
-    url.searchParams.set("longitude", String(KATHMANDU.longitude));
-    url.searchParams.set("current", "temperature_2m,weather_code,is_day");
-    url.searchParams.set("timezone", "Asia/Kathmandu");
-
-    const response = await fetch(url.toString(), {
-      next: { revalidate: WEATHER_REVALIDATE_SECONDS },
-    });
-    if (!response.ok) return null;
-
-    const payload = (await response.json()) as {
-      current?: { temperature_2m?: number; weather_code?: number };
-    };
-
-    const current = payload.current;
-    if (!current || typeof current.temperature_2m !== "number") return null;
-
-    const described = WEATHER_CODES[current.weather_code ?? 0];
-
-    return {
-      temperature: Math.round(current.temperature_2m),
-      description: described?.en ?? null,
-      descriptionNe: described?.ne ?? null,
-      icon: described?.icon ?? "clear",
-    };
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Everything the header shows.
  *
- * Never throws. A missing almanac and a missing weather each cost the
- * header one piece, and the rest of the header is unaffected.
+ * Never throws. A missing almanac costs the caller the almanac, and
+ * nothing else.
  */
 export async function getDailyInfo(now: Date = new Date()): Promise<DailyInfo> {
   const today = kathmanduToday(now);
@@ -334,17 +211,13 @@ export async function getDailyInfo(now: Date = new Date()): Promise<DailyInfo> {
   const kathmandu = new Date(now.getTime() + (5 * 60 + 45) * 60 * 1000);
   const weekdayIndex = kathmandu.getUTCDay();
 
-  const [panchang, weather] = await Promise.all([
-    readCachedPanchang(today),
-    readWeather(),
-  ]);
+  const panchang = await readCachedPanchang(today);
 
   return {
     today,
     weekday: WEEKDAYS_EN[weekdayIndex] ?? "",
     weekdayNe: WEEKDAYS_NE[weekdayIndex] ?? "",
     panchang,
-    weather,
   };
 }
 
@@ -359,4 +232,83 @@ export async function getPanchangFor(
 ): Promise<Panchang | null> {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
   return readCachedPanchang(date);
+}
+
+export type RashifalSign = {
+  /** The sign, 1 to 12: 1 is मेष (Aries), 12 is मीन (Pisces). */
+  sign: number;
+  /** The source's own slug for the sign. */
+  slug: string | null;
+  /** The sign's name, in English and in Nepali. */
+  name: string | null;
+  nameNe: string | null;
+  /** The zodiac symbol and the letter initials the source prints. */
+  emoji: string | null;
+  initials: string | null;
+  /** Today's advice for this sign, verbatim. */
+  advice: string | null;
+  /** The lucky colour and the lucky number. */
+  luckyColour: string | null;
+  luckyNumber: string | null;
+};
+
+/**
+ * The twelve horoscopes for a day.
+ *
+ * This is the राशिफल proper - the twelve signs, each with its own
+ * advice - and it is a DIFFERENT thing from the panchang above. The
+ * panchang is one row for the day; this is twelve rows for the day,
+ * one per sign, because a sign is a thing with its own name, its own
+ * advice and its own lucky number, and somebody asking for "today's
+ * Scorpio" is asking a different question from somebody asking for
+ * "today's tithi".
+ *
+ * Null when the table is not there or the day has not been fetched.
+ * Both are ordinary states.
+ */
+async function readRashifal(date: string): Promise<RashifalSign[]> {
+  try {
+    const supabase = createPublicSupabaseClient();
+    const { data, error } = await supabase
+      .from("daily_rashifal")
+      .select(
+        "sign, sign_slug, sign_name, sign_name_ne, sign_emoji, initials, " +
+          "advice, lucky_colour, lucky_number"
+      )
+      .eq("panchang_date", date)
+      .order("sign", { ascending: true });
+
+    if (error || !data) return [];
+
+    return ((data ?? []) as unknown[]).map((raw) => {
+      const row = raw as Record<string, unknown>;
+      return {
+        sign: asNumber(row.sign) ?? 0,
+        slug: asString(row.sign_slug),
+        name: asString(row.sign_name),
+        nameNe: asString(row.sign_name_ne),
+        emoji: asString(row.sign_emoji),
+        initials: asString(row.initials),
+        advice: asString(row.advice),
+        luckyColour: asString(row.lucky_colour),
+        luckyNumber: asString(row.lucky_number),
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+const readCachedRashifal = unstable_cache(
+  async (date: string) => readRashifal(date),
+  ["daily-rashifal"],
+  { revalidate: 3600 }
+);
+
+/**
+ * The twelve horoscopes for a day, for the Rashifal page.
+ */
+export async function getRashifalFor(date: string): Promise<RashifalSign[]> {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return [];
+  return readCachedRashifal(date);
 }

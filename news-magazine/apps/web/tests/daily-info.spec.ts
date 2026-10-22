@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { describeWeatherCode, kathmanduToday } from "../lib/daily-info";
+import { kathmanduToday } from "../lib/daily-info";
 
 /**
  * The day's information in the header.
@@ -42,42 +42,5 @@ test.describe("today, in Nepal", () => {
     // UTC and a server in Sydney must agree.
     const utc = new Date("2026-10-22T18:30:00Z");
     expect(kathmanduToday(utc)).toBe("2026-10-23");
-  });
-});
-
-test.describe("the weather codes", () => {
-  test("every code has a word in both languages", () => {
-    // A missing code would leave the strip with a temperature and no
-    // description, on every page of the site.
-    for (const code of [0, 1, 2, 3, 45, 48, 51, 53, 55, 61, 63, 65, 71, 73, 75, 80, 95, 96, 99]) {
-      const described = describeWeatherCode(code);
-      expect(described, `code ${code}`).not.toBeNull();
-      expect(described?.en.length, `code ${code}`).toBeGreaterThan(0);
-      expect(described?.ne.length, `code ${code}`).toBeGreaterThan(0);
-      expect(described?.icon, `code ${code}`).not.toBeNull();
-    }
-  });
-
-  test("clear is clear", () => {
-    expect(describeWeatherCode(0)?.icon).toBe("clear");
-    expect(describeWeatherCode(1)?.icon).toBe("clear");
-  });
-
-  test("rain is rain and snow is snow", () => {
-    expect(describeWeatherCode(61)?.icon).toBe("rain");
-    expect(describeWeatherCode(65)?.icon).toBe("rain");
-    expect(describeWeatherCode(71)?.icon).toBe("snow");
-    expect(describeWeatherCode(75)?.icon).toBe("snow");
-  });
-
-  test("a storm is a storm", () => {
-    expect(describeWeatherCode(95)?.icon).toBe("storm");
-    expect(describeWeatherCode(99)?.icon).toBe("storm");
-  });
-
-  test("an unknown code has no word rather than a wrong one", () => {
-    // Guessing at a code we do not know would put a wrong word in the
-    // header. Saying nothing is better.
-    expect(describeWeatherCode(9999)).toBeNull();
   });
 });

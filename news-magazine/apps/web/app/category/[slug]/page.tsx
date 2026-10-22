@@ -5,7 +5,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { LiveArticleFeed } from "@/components/LiveArticleFeed";
 import { PanchangPanel } from "@/components/PanchangPanel";
 import { ReelsFeed } from "@/components/ReelsFeed";
-import { getPanchangFor, kathmanduToday } from "@/lib/daily-info";
+import { getPanchangFor, getRashifalFor, kathmanduToday } from "@/lib/daily-info";
 import { getCategories, getLatestArticles } from "@/lib/news";
 import { getReels } from "@/lib/reels";
 import { SITE_NAME, SITE_URL } from "@/lib/site";
@@ -102,13 +102,18 @@ export default async function CategoryPage({ params }: Props) {
     // a day by the worker, stored, and read here - so the page shows
     // what the almanac actually says, not something computed on the
     // spot.
-    const panchang = await getPanchangFor(kathmanduToday());
+    const today = kathmanduToday();
+    const [panchang, signs] = await Promise.all([
+      getPanchangFor(today),
+      getRashifalFor(today),
+    ]);
 
     return (
       <main className="min-h-screen">
         <section className="mx-auto w-full max-w-3xl px-4 py-8 sm:px-6 lg:px-8">
           <PanchangPanel
             panchang={panchang}
+            signs={signs}
             weekday={new Date(`${kathmanduToday()}T00:00:00Z`).toLocaleDateString(
               "en-GB",
               { weekday: "long", timeZone: "UTC" }

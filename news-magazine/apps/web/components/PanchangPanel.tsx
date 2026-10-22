@@ -1,0 +1,167 @@
+import type { Panchang } from "@/lib/daily-info";
+
+/**
+ * The day's almanac, in full.
+ *
+ * WHAT IT IS
+ * ----------
+ * The panchang is the five limbs of the Nepali almanac — the tithi,
+ * the nakshatra, the yoga and the karana, and the paksha the tithi
+ * falls in — plus the sun's times and the windows the almanac calls
+ * शुभ and अशुभ.
+ *
+ * It is the same information the Nepali calendar prints, for the
+ * current day, on a page the reader can check against their own
+ * almanac.
+ *
+ * NOTHING IN IT IS INVENTED
+ * --------------------------
+ * Every value here was fetched by the ingestion worker from the
+ * source that publishes the almanac, and stored. If the worker has
+ * not run, the panel says so rather than showing a blank where a
+ * date should be — a panel with an empty field is honest, and a panel
+ * with a computed-from-nothing date is a lie.
+ */
+export function PanchangPanel({
+  panchang,
+  weekday,
+  weekdayNe,
+}: {
+  panchang: Panchang | null;
+  weekday: string;
+  weekdayNe: string;
+}) {
+  if (!panchang) {
+    return (
+      <div className="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-900">
+        <h2 className="text-lg font-bold text-gray-900 dark:text-gray-100">
+          आजको पञ्चाङ
+        </h2>
+        <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+          Today&rsquo;s almanac has not been fetched yet. It is fetched once
+          a day and stored, so this page fills itself the next time the
+          worker runs.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* ---- The day ---- */}
+      <section className="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-900">
+        <p className="text-xs font-semibold uppercase tracking-widest text-gray-400 dark:text-gray-500">
+          आजको पञ्चाङ
+        </p>
+        <h2 className="mt-1 font-headline text-2xl font-bold text-gray-900 dark:text-gray-100">
+          {panchang.bsLabel ?? panchang.date}
+        </h2>
+        <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+          {panchang.weekdayNe ?? weekdayNe}
+          {panchang.weekday ? ` · ${panchang.weekday}` : ""}
+        </p>
+
+        {/* The five limbs. */}
+        <dl className="mt-5 grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3">
+          <Limb label="तिथि" value={panchang.tithiFull ?? panchang.tithi} />
+          <Limb label="नक्षत्र" value={panchang.nakshatra} />
+          <Limb label="योग" value={panchang.yoga} />
+          <Limb label="करण" value={panchang.karana} />
+          <Limb label="पक्ष" value={panchang.paksha} />
+          <Limb label="चन्द्र कला" value={panchang.moonPhase} />
+        </dl>
+      </section>
+
+      {/* ---- The sun ---- */}
+      <section className="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-900">
+        <h3 className="text-sm font-bold text-gray-900 dark:text-gray-100">
+          सूर्य
+        </h3>
+        <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3">
+          <Limb label="सूर्योदय" value={panchang.sunrise} />
+          <Limb label="सूर्यास्त" value={panchang.sunset} />
+          <Limb
+            label="दिनको लम्बाइ"
+            value={
+              panchang.dayLengthMinutes !== null
+                ? `${Math.floor(panchang.dayLengthMinutes / 60)} घण्टा ${
+                    panchang.dayLengthMinutes % 60
+                  } मिनेट`
+                : null
+            }
+          />
+        </dl>
+      </section>
+
+      {/* ---- The windows ---- */}
+      <div className="grid gap-4 md:grid-cols-2">
+        <WindowList
+          title="शुभ समय"
+          subtitle="the auspicious windows"
+          entries={panchang.auspicious}
+          tone="good"
+        />
+        <WindowList
+          title="अशुभ समय"
+          subtitle="the inauspicious windows"
+          entries={panchang.inauspicious}
+          tone="bad"
+        />
+      </div>
+    </div>
+  );
+}
+
+function Limb({ label, value }: { label: string; value: string | null }) {
+  return (
+    <div>
+      <dt className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">
+        {label}
+      </dt>
+      <dd className="mt-0.5 text-sm font-medium text-gray-900 dark:text-gray-100">
+        {value ?? "—"}
+      </dd>
+    </div>
+  );
+}
+
+function WindowList({
+  title,
+  subtitle,
+  entries,
+  tone,
+}: {
+  title: string;
+  subtitle: string;
+  entries: string[];
+  tone: "good" | "bad";
+}) {
+  return (
+    <section className="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-900">
+      <h3 className="text-sm font-bold text-gray-900 dark:text-gray-100">
+        {title}
+      </h3>
+      <p className="text-[11px] text-gray-400 dark:text-gray-500">{subtitle}</p>
+      {entries.length ? (
+        <ul className="mt-3 space-y-1.5">
+          {entries.map((entry, index) => (
+            <li
+              key={`${entry}-${index}`}
+              className={`flex items-baseline justify-between gap-3 rounded px-2 py-1 text-sm ${
+                tone === "good"
+                  ? "bg-emerald-50 text-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200"
+                  : "bg-red-50 text-red-900 dark:bg-red-950/40 dark:text-red-200"
+              }`}
+            >
+              <span>{entry}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-3 text-sm text-gray-400 dark:text-gray-500">
+          Not published for today.
+        </p>
+      )}
+    </section>
+  );
+}

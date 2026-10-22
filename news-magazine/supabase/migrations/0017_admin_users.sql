@@ -82,6 +82,28 @@ alter table admin_sessions enable row level security;
 
 -- No SELECT policy at all: the anon key reads nothing.
 
+-- The policies are DROPPED first and then recreated.
+--
+-- PostgreSQL has no `create policy if not exists`, so a migration that
+-- is run twice dies on the second run with
+--
+--   ERROR: 42710: policy "admin_users_service_write" for table
+--   "admin_users" already exists
+--
+-- and - this is the part that matters - the error stops the script.
+-- The operator's migration runner had already applied 0017 once, so
+-- the re-run aborted here and everything after it in the file never
+-- happened. A migration that only works the first time it is run is
+-- not a migration.
+--
+-- Dropping first is safe here precisely because these policies deny
+-- everything: they are `using (false) with check (false)`, so between
+-- the drop and the recreate the table has NO policy, which for the
+-- service-role key is indistinguishable (it bypasses RLS entirely) and
+-- for everyone else is a closed door rather than an open one.
+drop policy if exists "admin_users_service_write" on admin_users;
+drop policy if exists "admin_sessions_service_write" on admin_sessions;
+
 create policy "admin_users_service_write" on admin_users
   for all using (false) with check (false);
 

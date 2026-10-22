@@ -474,8 +474,17 @@ export async function getAdminData(filters: AdminFilters): Promise<AdminData> {
       const id = (row as any).source_id;
       if (id) counts.set(id, (counts.get(id) ?? 0) + 1);
     }
+    // The last sync that FINISHED, not the one in flight.
+    //
+    // A source that is being polled right now has a row with the
+    // status "running", and the panel showed that as the source's
+    // state - so a working outlet read as "running" rather than
+    // "healthy", and the operator had no way to tell the two apart.
+    // A running sync is not a state; it is an absence of a result.
     for (const row of syncs as any[]) {
-      if (row.source_id && !latestSync.has(row.source_id)) {
+      if (!row.source_id) continue;
+      if (row.status === "running") continue;
+      if (!latestSync.has(row.source_id)) {
         latestSync.set(row.source_id, row);
       }
     }
@@ -585,6 +594,15 @@ export async function getAdminData(filters: AdminFilters): Promise<AdminData> {
       )
       .eq("status", "published")
       .is("duplicate_of", null)
+      // The same order the reader sees: the newest NEWS first, by
+      // publication time, with the arrival time as the tiebreaker.
+      //
+      // It used to order by arrival alone, which is not what the feed
+      // does - and the panel's title said "what the reader sees",
+      // which made the disagreement a lie. A panel that shows a
+      // different order from the page it is describing is worse than
+      // no panel.
+      .order("published_at", { ascending: false, nullsFirst: false })
       .order("ingested_at", { ascending: false, nullsFirst: false })
       .limit(15);
     if (error) throw error;

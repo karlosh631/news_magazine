@@ -73,7 +73,7 @@ def _page(titles: list[str]) -> dict:
                                     "value": "https://creativecommons.org/licenses/by-sa/4.0/"
                                 },
                                 "Artist": {"value": "A Photographer"},
-                                "ImageDescription": {"value": "A street in Kathmandu."},
+                                "ImageDescription": {"value": "A street in Kathmandu, Nepal."},
                             },
                         }
                     ],
@@ -119,7 +119,7 @@ def _page(titles: list[str]) -> dict:
 
 def _full_page(index: int) -> dict:
     """A page that is completely full, so the walk does not stop early."""
-    return _page([f"clip-{index}-{n}" for n in range(COMMONS_MAX_PAGE_SIZE)])
+    return _page([f"Nepal clip {index}-{n}" for n in range(COMMONS_MAX_PAGE_SIZE)])
 
 
 class _Recorder:
@@ -200,7 +200,7 @@ async def test_a_short_page_ends_the_walk_for_that_term(monkeypatch):
     after them is asking for nothing, so the walk stops.
     """
     source = _commons("nepal")
-    recorder = _Recorder(pages=_page(["only", "two", "of", "them"]))
+    recorder = _Recorder(pages=_page(["Nepal only", "Nepal two", "Nepal of", "Nepal them"]))
     monkeypatch.setattr(source, "_search_with_retry", recorder)
 
     await source._fetch(30)

@@ -2,7 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { Header } from "@/components/Header";
 import { RouteFooter } from "@/components/RouteFooter";
-import { DailyInfoStrip } from "@/components/DailyInfoStrip";
+import { getDailyInfo } from "@/lib/daily-info";
 import { getCategories } from "@/lib/news";
 import { themeScript } from "@/components/ThemeToggle";
 import { SITE_NAME, SITE_URL, SITE_LOGO } from "@/lib/site";
@@ -100,6 +100,22 @@ export default async function RootLayout({
   // admin operation rather than a code change.
   const allCategories = await getCategories();
 
+  /*
+    The day's date, almanac and weather, for the header.
+
+    It is fetched HERE and handed to the header rather than rendered as
+    a row of its own. A row under the header is a row of its own: it
+    costs 30px of every screen, it pushes the news down, and it is one
+    more thing between the reader and the headlines. In the header
+    there is space for it and there is not for a new row.
+
+    Nothing in it can break the page. The almanac may not have been
+    fetched yet, the worker may not have run, and the weather service
+    may be down; each of those costs the header a piece and nothing
+    else. Both reads are cached.
+  */
+  const dailyInfo = await getDailyInfo();
+
   // Six in the nav, and that is a space decision rather than a content
   // one: all twelve wrapped onto two lines and broke every word
   // mid-syllable on desktop. Reels is appended last so the five that
@@ -112,6 +128,7 @@ export default async function RootLayout({
     "technology",
     "world",
     "reels",
+    "rashifal",
   ];
   const categories = NAV_ORDER.map((slug) => allCategories.find((c) => c.slug === slug))
     .filter((c): c is NonNullable<typeof c> => Boolean(c))
@@ -130,23 +147,7 @@ export default async function RootLayout({
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>
       <body className="flex min-h-screen flex-col bg-white text-gray-900 antialiased font-body">
-        <Header categories={categories} />
-        {/*
-          The day's information: the date in Gregorian and Bikram
-          Sambat, the tithi, sunrise and sunset, and the weather in
-          Kathmandu.
-
-          It is a strip rather than a card, and it is not an article:
-          there is no picture and no headline, because there is no
-          story here. A Nepali reader checks the date and the tithi
-          before they read the news, and the header was making them
-          go somewhere else for it.
-
-          Every part of it is optional. If the almanac has not been
-          fetched, or the weather service is down, the strip shows
-          what it has and stops - it can never take a page down.
-        */}
-        <DailyInfoStrip />
+        <Header categories={categories} dailyInfo={dailyInfo} />
         {/*
           No <main> wrapper here. Every page renders its own <main>,
           and a <main> nested inside another <main> is invalid HTML —

@@ -3,7 +3,9 @@ import { notFound } from "next/navigation";
 
 import { EmptyState } from "@/components/EmptyState";
 import { LiveArticleFeed } from "@/components/LiveArticleFeed";
+import { PanchangPanel } from "@/components/PanchangPanel";
 import { ReelsFeed } from "@/components/ReelsFeed";
+import { getPanchangFor, kathmanduToday } from "@/lib/daily-info";
 import { getCategories, getLatestArticles } from "@/lib/news";
 import { getReels } from "@/lib/reels";
 import { SITE_NAME, SITE_URL } from "@/lib/site";
@@ -92,6 +94,45 @@ export default async function CategoryPage({ params }: Props) {
    * This is the ONLY branch that reads differently. Everything after it
    * is untouched, and no other slug can reach it.
    */
+  if (slug === "rashifal") {
+    // The day's almanac.
+    //
+    // A Nepali reader checks the panchang before they read the news,
+    // and the site had nowhere to put it. The values are fetched once
+    // a day by the worker, stored, and read here - so the page shows
+    // what the almanac actually says, not something computed on the
+    // spot.
+    const panchang = await getPanchangFor(kathmanduToday());
+
+    return (
+      <main className="min-h-screen">
+        <section className="mx-auto w-full max-w-3xl px-4 py-8 sm:px-6 lg:px-8">
+          <PanchangPanel
+            panchang={panchang}
+            weekday={new Date(`${kathmanduToday()}T00:00:00Z`).toLocaleDateString(
+              "en-GB",
+              { weekday: "long", timeZone: "UTC" }
+            )}
+            weekdayNe=""
+          />
+          {panchang?.sourceUrl ? (
+            <p className="mt-4 text-[11px] text-gray-400 dark:text-gray-500">
+              Source:{" "}
+              <a
+                href={panchang.sourceUrl}
+                rel="noopener noreferrer nofollow"
+                target="_blank"
+                className="underline underline-offset-2 hover:text-gray-600 dark:hover:text-gray-300"
+              >
+                {panchang.sourceUrl}
+              </a>
+            </p>
+          ) : null}
+        </section>
+      </main>
+    );
+  }
+
   if (slug === "reels") {
     // The whole catalogue, not a page of it.
     //
@@ -100,7 +141,7 @@ export default async function CategoryPage({ params }: Props) {
     // reader saw the same twelve for ever and had no reason to
     // believe the catalogue was any bigger. The feed now rotates
     // through everything it is given.
-    const reels = await getReels({ limit: 120 });
+    const reels = await getReels({ limit: 200 });
 
     if (reels.reels.length === 0) {
       return (

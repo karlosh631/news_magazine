@@ -130,6 +130,60 @@ class Settings(BaseSettings):
     cycle_window_seconds: int = DEFAULT_CYCLE_WINDOW_SECONDS
 
     # ---------------------------------------------------------
+    # RSS feed paging
+    #
+    # A WordPress feed serves a fixed number of items: the site's
+    # "posts_per_rss" option, which is 10 for most WordPress sites
+    # and 5 for several Nepali ones. The operator wants more than
+    # the ten.
+    #
+    # MEASURED 2026-10-22 on the live Nepali feeds, which is why
+    # there are two knobs here and not one:
+    #
+    #   posts_per_page=100   changes NOTHING. The item count and the
+    #                        first item are identical with and
+    #                        without it on every WordPress feed
+    #                        tested (10 of 10). WordPress builds the
+    #                        main feed's query with posts_per_page
+    #                        pinned to the posts_per_rss option and
+    #                        ignores the query string. It is still
+    #                        asked for, because it costs nothing and
+    #                        it does help any site that does honour
+    #                        it.
+    #
+    #   paged=2, paged=3     DO work. They return the NEXT page of
+    #                        items -- older stories, the same count
+    #                        per page. This is the only mechanism
+    #                        measured that actually gets more items
+    #                        out of a WordPress feed.
+    #
+    # Paging costs one extra request per page per poll, and this
+    # codebase's first rule is to be a polite client, so paging is
+    # OFF by default. One page is today's behaviour exactly: one
+    # request, one document, the same articles.
+    #
+    # Only KNOWN WordPress hosts get either parameter. A feed that
+    # is not WordPress is fetched exactly as it was, because neither
+    # parameter means anything to a non-WordPress server.
+    # ---------------------------------------------------------
+
+    # How many items to ask a WordPress feed for. 0 = do not ask.
+    rss_page_size: int = 100
+
+    # The query parameter WordPress is asked with. Changeable because
+    # a site running a feed plugin may use a different name.
+    rss_page_size_param: str = "posts_per_page"
+
+    # How many pages of a feed to request and merge. 1 = only the
+    # first page, which is what the worker did before this existed.
+    rss_feed_pages: int = 1
+
+    # Comma-separated hosts that run WordPress, added to the built-in
+    # list in app/sources/generic_rss.py. The operator can extend
+    # that list without a deploy.
+    rss_wordpress_hosts: str | None = None
+
+    # ---------------------------------------------------------
     # Retention
     # ---------------------------------------------------------
     # Articles are deleted this long after publication. A pruned story
@@ -404,6 +458,28 @@ class Settings(BaseSettings):
     reels_user_agent: str = (
         "NepalNewsMagazineReels/1.0 (+https://new24hr.vercel.app)"
     )
+
+    # ---------------------------------------------------------
+    # Panchang (optional)
+    #
+    # The Nepali almanac in the site header: today's Bikram Sambat
+    # date, the tithi, the nakshatra, sunrise and sunset, and the
+    # windows the panchang calls auspicious and inauspicious.
+    #
+    # This is its own pipeline with its own table. It is not an
+    # article, it is never deduplicated against articles, and it
+    # cannot affect an outlet poll.
+    #
+    # The job runs hourly because the Bikram Sambat date rolls over at
+    # midnight NEPALI time, and an almanac that is six hours stale is
+    # an almanac for the wrong day. It is cheap in spite of the
+    # cadence: the pass resolves today's date from one small page
+    # and only downloads the large per-day page when the day has
+    # actually changed - which is once.
+    # ---------------------------------------------------------
+    enable_panchang: bool = True
+    panchang_poll_seconds: int = 3600
+    panchang_http_timeout_seconds: float = 20.0
 
     # ---------------------------------------------------------
     # Logging

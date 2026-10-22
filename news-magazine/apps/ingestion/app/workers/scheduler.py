@@ -391,6 +391,7 @@ async def _periodic_refresh() -> None:
             await _close_orphaned_sync_logs()
             await refresh_jobs()
             _register_reels_job()
+            _register_panchang_job()
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -980,6 +981,117 @@ def _register_reels_job() -> None:
 
 
 # =============================================================
+# PANCHANG
+#
+# The Nepali almanac: today's Bikram Sambat date, the tithi, the
+# nakshatra, sunrise and sunset, and the auspicious and inauspicious
+# time windows.
+#
+# A pipeline of its own, like the reels job and for the same reason:
+# it has its own table, its own service and its own job, and it
+# shares this scheduler and nothing else. The almanac is not an
+# article - it is never normalised, never validated, never
+# deduplicated against the outlets - so a day when the panchang
+# source is down must cost the header one line and the news pipeline
+# nothing at all.
+#
+# The job NEVER raises. A panchang that cannot be fetched is logged
+# and skipped, and the next pass runs exactly as it would have if
+# this one had thrown.
+# =============================================================
+
+PANCHANG_JOB_ID = "ingest-panchang"
+
+
+async def _sync_panchang() -> None:
+    """
+    One panchang pass: fetch today's almanac and store it.
+
+    Never raises into the scheduler. A source that is down, a page
+    that has changed shape, a database that is unreachable - each of
+    them is a missing header and none of them is a reason to stop
+    the worker that is polling twenty-seven newsrooms.
+    """
+    # Imported here rather than at module scope, for the same reason
+    # the reels job imports its package inside the function: the
+    # almanac is an optional feature and importing it at module load
+    # would make it a hard start-up dependency for the whole
+    # scheduler.
+    from app.services.panchang import sync_panchang
+
+    try:
+        panchang = await sync_panchang(get_db())
+    except asyncio.CancelledError:
+        # Teardown, not a failure. See _sync_one.
+        raise
+    except Exception:
+        logger.exception(
+            "Panchang: pass failed; the scheduler keeps running."
+        )
+        return
+
+    if panchang is None:
+        logger.info("Panchang: nothing stored this pass.")
+    else:
+        logger.info(
+            "Panchang: stored %s (%s), tithi %s, nakshatra %s.",
+            panchang.bs_label or panchang.bs_key,
+            panchang.ad_date.isoformat(),
+            panchang.tithi,
+            panchang.nakshatra,
+        )
+
+
+def _register_panchang_job() -> None:
+    """
+    Make the panchang job exist, or not exist, according to the
+    setting.
+
+    Called at startup and again on every registry refresh, so turning
+    the almanac off does not need a redeploy. Disabling explicitly
+    REMOVES the job rather than simply declining to add it: a
+    process started with the almanac on must not keep polling the
+    source after the operator has turned it off.
+    """
+    settings = get_settings()
+    scheduler = get_scheduler()
+
+    existing = None
+    try:
+        existing = scheduler.get_job(PANCHANG_JOB_ID)
+    except Exception:
+        logger.debug("Could not read the panchang job; assuming it is absent")
+
+    if not settings.enable_panchang:
+        if existing:
+            try:
+                existing.remove()
+                logger.info("Scheduler: panchang job removed (enable_panchang is off).")
+            except Exception:
+                logger.exception("Could not remove the panchang job")
+        return
+
+    interval = max(int(settings.panchang_poll_seconds or 0), MIN_POLL_SECONDS)
+
+    try:
+        scheduler.add_job(
+            _sync_panchang,
+            trigger=IntervalTrigger(seconds=interval),
+            id=PANCHANG_JOB_ID,
+            replace_existing=True,   # pick up a changed interval
+            max_instances=1,        # never two almanac passes at once
+            coalesce=True,          # collapse missed runs into one
+            misfire_grace_time=120,
+            next_run_time=datetime.now(timezone.utc)
+            + timedelta(seconds=_stagger(PANCHANG_JOB_ID)),
+        )
+    except Exception:
+        # The outlets are already scheduled; failing to add an
+        # optional job is a warning, not a reason to refuse to start.
+        logger.exception("Scheduler: could not schedule the panchang job")
+
+
+# =============================================================
 # LIFECYCLE
 # =============================================================
 
@@ -1033,6 +1145,12 @@ async def start() -> bool:
     # Optional and keyed separately from the outlets: a project that
     # never enables reels must not gain a job because of it.
     _register_reels_job()
+
+    # The same for the Nepali almanac. It is its own pipeline, with
+    # its own table and its own service, and a project that does not
+    # show a panchang in its header must not gain a job because of
+    # it either.
+    _register_panchang_job()
 
     return scheduled > 0
 

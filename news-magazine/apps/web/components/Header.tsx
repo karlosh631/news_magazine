@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { SearchModal } from "@/components/SearchModal";
+import type { DailyInfo } from "@/lib/daily-info";
 
 /**
  * Navigation categories.
@@ -14,6 +15,23 @@ import { SearchModal } from "@/components/SearchModal";
  * five categories were unreachable and any new category needed a code
  * change to appear in the nav.
  */
+/**
+ * A glyph per kind of sky.
+ *
+ * Characters rather than images on purpose: an icon font would be
+ * another request, another thing to load, and another way for the
+ * header to look broken while the page is still loading. The glyphs
+ * are in the reader's own font and they are already there.
+ */
+const WEATHER_ICON: Record<string, string> = {
+  clear: "☀",
+  cloud: "☁",
+  rain: "☂",
+  snow: "❄",
+  storm: "⚡",
+  fog: "🌫",
+};
+
 export type NavCategory = {
   slug: string;
   name_en: string;
@@ -82,7 +100,21 @@ function ReloadIcon({ spinning }: { spinning: boolean }) {
   );
 }
 
-export function Header({ categories }: { categories: NavCategory[] }) {
+export function Header({
+  categories,
+  dailyInfo,
+}: {
+  categories: NavCategory[];
+  /**
+   * The day's date, almanac and weather.
+   *
+   * Rendered IN the header, in the space between the navigation and
+   * the search box, rather than as a row of its own: a row under the
+   * header is a row of its own, and it costs 30px of every screen and
+   * pushes the news down.
+   */
+  dailyInfo?: DailyInfo | null;
+}) {
   const router = useRouter();
   const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -322,6 +354,53 @@ export function Header({ categories }: { categories: NavCategory[] }) {
             );
           })}
         </nav>
+
+        {/*
+          The day's information, in the space the header had.
+
+          It sits between the navigation and the search box, so it
+          costs the page no height and no row. The tithi and the
+          weather are the two things a Nepali reader checks before
+          they read the news, and they were nowhere on the site.
+
+          Hidden on a phone: there is no space for it between the logo
+          and the menu button, and a header that has to scroll
+          horizontally to show the date is worse than no date.
+        */}
+        {dailyInfo ? (
+          <div className="hidden shrink-0 items-center gap-3 text-[11px] text-gray-500 xl:flex dark:text-gray-400">
+            {dailyInfo.panchang?.bsLabel ? (
+              <span className="whitespace-nowrap">
+                {dailyInfo.panchang.bsLabel}
+                {dailyInfo.panchang.tithi
+                  ? ` · ${dailyInfo.panchang.tithiFull ?? dailyInfo.panchang.tithi}`
+                  : ""}
+              </span>
+            ) : (
+              <span className="whitespace-nowrap">
+                {new Date(`${dailyInfo.today}T00:00:00Z`).toLocaleDateString(
+                  "en-GB",
+                  { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }
+                )}
+              </span>
+            )}
+            {dailyInfo.weather ? (
+              <span className="flex items-center gap-1 whitespace-nowrap">
+                <span aria-hidden="true">
+                  {WEATHER_ICON[dailyInfo.weather.icon ?? "clear"]}
+                </span>
+                {dailyInfo.weather.temperature !== null ? (
+                  <span className="tabular-nums">
+                    {dailyInfo.weather.temperature}°C
+                  </span>
+                ) : null}
+                {dailyInfo.weather.description ? (
+                  <span>{dailyInfo.weather.description}</span>
+                ) : null}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
 
         <div className="flex items-center gap-2">
           <form onSubmit={handleSearchSubmit} className="hidden sm:block">

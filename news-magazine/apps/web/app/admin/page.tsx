@@ -503,14 +503,15 @@ export default async function AdminPage({
           {/* ---- The top of the feed ---- */}
           <Panel
             title="Top of the feed"
-            subtitle="newest fetched first — what the reader sees"
+            subtitle="the newest news first — what the reader sees"
           >
             {data.latestArticles.length ? (
               <div>
                 <table className="w-full table-fixed text-left text-xs">
                   <caption className="sr-only">
-                    The stories at the top of the homepage, newest fetched
-                    first, with the time each was fetched and published.
+                    The stories at the top of the homepage, newest
+                    published first, with the time each was fetched and
+                    published.
                   </caption>
                   <thead>
                     <tr className="border-b border-slate-800 text-[10px] uppercase tracking-wider text-slate-500">

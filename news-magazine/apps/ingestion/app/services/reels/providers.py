@@ -225,6 +225,72 @@ MASTER_SIZE_LIMIT_BYTES = 40 * 1024 * 1024
 #: exactly how a project gets its API access withdrawn.
 USER_AGENT = "NewsMagazineReels/1.0"
 
+#: The words that mean a clip is about Nepal.
+#:
+#: The search is a constraint, not a guarantee: a file in the "Videos of
+#: Mount Everest" category can be about something else entirely, and a
+#: file whose title merely carries the word can be about a different
+#: country. Left unchecked, the catalogue fills up with NASA timelapses
+#: and Australian skydiving, and the reels feed stops being about Nepal.
+#:
+#: The list is deliberately generous. A false positive costs one clip
+#: that is probably relevant anyway; a false negative costs a clip the
+#: reader was never going to want in a Nepali news feed.
+_NEPAL_TERMS = re.compile(
+    r"|".join(
+        (
+            # The country and its people, in the spellings Commons uses.
+            r"nepal|nepali|नेपाल|नेपाली",
+            # The mountains and the ranges.
+            r"himalaya|himalayan|everest|sagarmatha|annapurna|langtang|machhapuchhre|"
+            r"manaslu|dhaulagiri|cho oyu|shisha pambma|kanchenjunga|"
+            r"k2|gokyo|tillicho|khumbu|gandaki|upper gandaki|"
+            r"barun|macchu|pirinchi|sugar bowl",
+            # The places.
+            r"kathmandu|valley|bhaktapur|patan|lalitpur|kirtipur|budhanilkantha|"
+            r"changunarayan|thamel|pashupati|pashupatinath|pasupatinath|"
+            r"boudha|boudhanath|swayambhu|swayambhunath|machhendranath|"
+            r"pokhara|chitwan|lumbini|janakpur|bhairahawa|biratnagar|"
+            r"birgunj|dharan|butwal|hetauda|banglamukhi|dhangadhi|"
+            r"mustang|manang|dolpo|mugu|humla|pyan|surkhet|darchula|"
+            r"bajura|dolakha|khotang|sindhuli|makalu|tehri|uttarakhand|"
+            r"koshi|karnali|madhes|terai|bagmati|gandaki|"
+            r"narayani|mahakali|rapti|sunkoshi|western nepal|eastern nepal|"
+            r"sagarmatha zone|koshi zone|gandaki province|karnali province|"
+            r"sudurpashchim|lumbini province|koshi province|madhesh|siraha|"
+            r"saptari|dhanusha|mahottari|rajbiraj",
+            # The peoples and the cultures.
+            r"tharu|newar|newari|sherpa|tamang|limbu|magar|chepang|rai|"
+            r"monastery|monasteries|gompa|stupa|chaitya|chorten|dharmachakra|"
+            r"prayer flag|mandala|monk|monks|lama|"
+            r"dashain|tihar|holi|chhath|bihai|magh sankranti|losar|"
+            r"kathmandu durbar|patan durbar|bhaktapur durbar|"
+            r"pashupati temple|muktinath|manakamana|"
+            r"nagarkot|nawakot|daman|namche|namche bazaar|"
+            r"pokhara valley|annapurna circuit|chitwan national park|"
+            r"sagarmatha national park|maya devi|"
+            r"kumbum|rastriya ban|rasa|rasoi|kukhri|sel|bhats",
+        )
+    ),
+    re.IGNORECASE,
+)
+
+
+def _mentions_nepal(title: str, description: str) -> bool:
+    """
+    Whether this clip is about Nepal.
+
+    The title and the description are checked TOGETHER, and either one
+    answering is enough. "Landing and taking off at the most dangerous
+    airport in the world" is Lukla, and its title does not say so —
+    its description does. A clip whose title says "Nepal" and whose
+    description is blank is still a clip about Nepal.
+    """
+    haystack = f"{title or ''} {description or ''}".lower()
+    if not haystack.strip():
+        return False
+    return _NEPAL_TERMS.search(haystack) is not None
+
 
 class ProviderError(RuntimeError):
     """
@@ -1524,6 +1590,27 @@ class WikimediaSource(_BaseSource):
             _plain_text(meta.get("ImageDescription"))
             or _plain_text(meta.get("ObjectName"))
         )
+
+        # IS THIS ABOUT NEPAL?
+        # ----------------------
+        # The search is a constraint, not a guarantee. A file in the
+        # "Videos of Mount Everest" category can be about something
+        # else entirely, and a file whose title merely carries the word
+        # can be about a different country. The categories hold enough
+        # incidental material that a feed built straight from them
+        # fills up with NASA timelapses and Australian skydiving.
+        #
+        # So the clip is checked against the subject before it is
+        # stored. A clip with no Nepal signal in its title OR its
+        # description is dropped.
+        #
+        # "OR" rather than "AND" on purpose: "Landing and taking off
+        # at the most dangerous airport in the world" is Lukla, and
+        # its title does not say so - its description does. And a
+        # clip whose title says "Nepal" and whose description is blank
+        # is still a clip about Nepal.
+        if not _mentions_nepal(file_name, description):
+            return None, "off_topic"
 
         timestamp = (videoinfo or {}).get("timestamp") or (imageinfo or {}).get("timestamp")
         published_at = _iso(timestamp) or _iso(meta.get("DateTimeOriginal"))

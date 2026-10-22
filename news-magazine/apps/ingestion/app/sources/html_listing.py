@@ -269,7 +269,19 @@ class HtmlListingAdapter(SourceAdapter):
         base_url: str,
         exclude_re: re.Pattern,
     ) -> dict | None:
-        link_tag = card.select_one(config.get("link") or "a[href]")
+        # A card may be a CONTAINER holding the link, or the link
+        # itself. The second shape is what most modern card markup
+        # uses -- the whole card is one <a> wrapping the image and
+        # the headline -- and the seeded `item` selectors in migration
+        # 0008 are written in exactly that shape. But BeautifulSoup's
+        # select_one() only searches DESCENDANTS, so an <a> card used
+        # to find no link inside itself and every card was dropped,
+        # which left the adapter silently falling back to its anchor
+        # heuristic and ignoring the operator's selector entirely.
+        link_sel = config.get("link") or "a[href]"
+        link_tag = card.select_one(link_sel)
+        if link_tag is None and getattr(card, "name", None) == "a" and card.get("href"):
+            link_tag = card
         if not link_tag or not link_tag.get("href"):
             return None
 
@@ -281,6 +293,15 @@ class HtmlListingAdapter(SourceAdapter):
         if urlparse(link).scheme not in {"http", "https"}:
             return None
 
+        # `title` must exist before it is tested. A selector_config
+        # that names an `item` but no `title` -- which is the shape
+        # every seeded outlet in migration 0008 uses -- used to reach
+        # the `if not title` line below with `title` never assigned,
+        # and raised UnboundLocalError on the first card whose `item`
+        # selector actually matched. The listing then failed with an
+        # error that read like a broken site rather than a broken
+        # config.
+        title = ""
         if config.get("title"):
             title_tag = card.select_one(config["title"])
             title = _plain_text(title_tag.get_text(" ")) if title_tag else ""

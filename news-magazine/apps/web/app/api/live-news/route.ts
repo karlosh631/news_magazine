@@ -76,24 +76,34 @@ function readLimit(raw: string | null): number {
 }
 
 /**
- * Where the reader left off, from `published_at` + `after_id`.
+ * Where the reader left off, from `ingested_at` + `after_id`.
  *
  * Absent on the first request, and rejected outright when either half is
  * missing or malformed — a cursor that silently degrades to "the newest
  * page" would make the reader's second page repeat the first.
+ *
+ * THE OLD `published_at` PARAMETER IS IGNORED, NOT HONOURED
+ * ----------------------------------------------------------
+ * The cursor used to address the feed by publication time. The feed is
+ * ordered by arrival, so a publication-time cursor addresses a
+ * different ordering than the one the query runs, and applying it would
+ * skip rows silently — worse than ignoring it. A tab that was open
+ * across the change still sends the old parameter; it is answered with
+ * the top of the feed, which is a page the reader already has, rather
+ * than with a page that is quietly wrong.
  */
 function readCursor(url: URL): FeedCursor | null {
   const id = url.searchParams.get("after_id");
-  const publishedAt = url.searchParams.get("published_at");
+  const ingestedAt = url.searchParams.get("ingested_at");
 
-  if (!id || !publishedAt) return null;
-  if (!UUID.test(id) || !TIMESTAMP.test(publishedAt)) return null;
+  if (!id || !ingestedAt) return null;
+  if (!UUID.test(id) || !TIMESTAMP.test(ingestedAt)) return null;
 
   // Carried verbatim, never round-tripped through a Date: PostgreSQL
   // timestamps carry microseconds and `Date` carries milliseconds, so
   // re-serialising would truncate the cursor and drop every row in the
   // truncated sliver.
-  return { id, published_at: publishedAt };
+  return { id, ingested_at: ingestedAt };
 }
 
 export async function GET(request: Request) {

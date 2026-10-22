@@ -103,7 +103,13 @@ type Rotate = "off" | "on";
 
 /** Where the next page of the feed starts. See FeedCursor in lib/news.ts. */
 interface FeedCursor {
-  published_at: string;
+  /**
+   * When the story was first fetched, not when it was published.
+   *
+   * The page the feed is showing is ordered by arrival, and the cursor
+   * has to address the same order or it skips rows without saying so.
+   */
+  ingested_at: string;
   id: string;
 }
 
@@ -359,11 +365,16 @@ export function LiveArticleFeed({
    * everything already on screen exactly like a poll is — the `visible`
    * memo does not know, and does not care, which call produced a row.
    */
-  const loadMore = useCallback(async () => {
+  const loadMore = useCallback(async (override?: FeedCursor | null) => {
     if (moreInFlight.current) return;
     moreInFlight.current = true;
     setLoadingMore(true);
     setMoreError(null);
+
+    // The cursor this request pages from. An override lets the retry
+    // button start again from the newest page without the state
+    // update having landed first.
+    const from = override === undefined ? cursor : override;
 
     try {
       const params = new URLSearchParams({
@@ -371,9 +382,9 @@ export function LiveArticleFeed({
         total: "1",
         t: String(Date.now()),
       });
-      if (cursor) {
-        params.set("published_at", cursor.published_at);
-        params.set("after_id", cursor.id);
+      if (from) {
+        params.set("ingested_at", from.ingested_at);
+        params.set("after_id", from.id);
       }
       if (language) params.set("language", language);
 
@@ -390,27 +401,38 @@ export function LiveArticleFeed({
       const fresh = payload.articles ?? [];
       const next = payload.next_cursor ?? null;
 
-      // A cursor that did not move means the server handed back the page
-      // we were already standing on. That should be impossible — it is
-      // what the cursor exists to prevent — but if it ever happened the
-      // reader would sit in an endless loop of requests for rows they
-      // already have, so the honest response is to stop and say so.
+      // THE END OF THE ARCHIVE IS NOT A STALL
+      // --------------------------------------
+      // The server answers with the next cursor, or with null when the
+      // rows below this page are exhausted. Those are two different
+      // answers and they used to be treated as one: `next === null` set
+      // the stall flag, so a reader who simply scrolled to the end of
+      // the archive was told "the archive did not advance, reload the
+      // page" — and reloading produced exactly the same end of the
+      // archive, so the message was both wrong and unactionable.
+      //
+      // A genuine stall is the other case: the server handed back a
+      // cursor identical to the one we sent, so the next request would
+      // ask for the same page again, forever. That is a real fault and
+      // it is worth saying so — but it is recoverable, and the reader
+      // gets a button rather than an instruction to reload.
+      const reachedEnd = next === null;
       const cursorStalled =
-        next === null || (cursor !== null && next.id === cursor.id);
+        !reachedEnd && from !== null && next.id === from.id;
 
       setTotal(payload.total ?? null);
       setCursor(next);
       // An empty page is the end of the road whatever the server claimed,
       // so the button stops appearing rather than inviting a reader to
       // tap it forever.
-      setHasMore(!cursorStalled && fresh.length > 0);
+      setHasMore(!reachedEnd && !cursorStalled && fresh.length > 0);
       setStalled(cursorStalled);
       setLoadedAPage(true);
 
       if (fresh.length > 0) mergeInto(fresh);
       // Only re-arm the observer when there is genuinely somewhere new to
       // go, or a stalled page would retrigger itself.
-      if (!cursorStalled) setPageNonce((n) => n + 1);
+      if (!reachedEnd && !cursorStalled) setPageNonce((n) => n + 1);
     } catch {
       // The cursor is left where it was, so a retry asks for the same
       // page rather than skipping it.
@@ -420,6 +442,21 @@ export function LiveArticleFeed({
       setLoadingMore(false);
     }
   }, [cursor, language, mergeInto]);
+
+  /**
+   * Start the archive again from the newest page.
+   *
+   * Used after a genuine stall. The merge keeps every story already on
+   * screen, so re-asking for the first page cannot duplicate anything —
+   * it only re-requests the page that did not advance, which may well
+   * work the second time.
+   */
+  const retryArchive = useCallback(() => {
+    setStalled(false);
+    setMoreError(null);
+    setHasMore(true);
+    void loadMore(null);
+  }, [loadMore]);
 
   // Automatic loading when the sentinel scrolls into view.
   //
@@ -616,7 +653,9 @@ export function LiveArticleFeed({
     if (loadingMore) return "Loading more stories…";
     if (moreError) return moreError;
     if (stalled) {
-      return "Stopped here — the archive did not advance. Reload the page to try again.";
+      // A real fault, and a recoverable one: the server returned the
+      // page we were already standing on, so the cursor did not move.
+      return "The server sent back the same page, so the archive could not be paged any further. Try again.";
     }
     if (hasMore) {
       return total === null
@@ -681,6 +720,20 @@ export function LiveArticleFeed({
                 so both must survive a toggle of `hasMore`. */}
             <div ref={sentinelRef} aria-hidden="true" className="h-px w-full" />
           </>
+        )}
+
+        {/* The only case where the reader is asked to do something rather
+            than simply told what happened. Reloading would throw away
+            every story already loaded, so the retry asks for the page
+            again instead — the merge keeps what is on screen. */}
+        {stalled && !loadingMore && (
+          <button
+            type="button"
+            onClick={retryArchive}
+            className="inline-flex min-h-[44px] items-center rounded-lg border border-gray-300 bg-white px-5 text-sm font-semibold text-gray-800 transition hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-2 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100 dark:hover:bg-gray-800 dark:focus-visible:ring-blue-400 dark:focus-visible:ring-offset-black"
+          >
+            Try again
+          </button>
         )}
 
         {/* One sentence, announced once. `role="status"` is polite by

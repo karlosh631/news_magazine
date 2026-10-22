@@ -13,6 +13,11 @@
 import "server-only";
 
 import { dropDuplicateStories } from "@/lib/feed-dedup";
+import {
+  cursorAfter as feedCursorAfter,
+  feedCursorFilter,
+  type FeedCursor,
+} from "@/lib/feed-cursor";
 import { dropImageless, dropRepeatedImages } from "@/lib/feed-images";
 import { createPublicSupabaseClient } from "@/lib/supabase/server";
 import type { LatestArticle, SearchResult } from "@/types/database";
@@ -108,15 +113,19 @@ export interface FeedResult {
  * have reached and a keyset cannot, and it is reported as the end of the
  * archive rather than as an infinite feed.
  */
-export interface FeedCursor {
-  published_at: string;
-  id: string;
-}
+/**
+ * Where the next page of the feed starts.
+ *
+ * Re-exported from `lib/feed-cursor.ts`, which is the single
+ * definition: the order the feed is shown in and the cursor that
+ * pages through it are one decision, and this file is `server-only`
+ * so it cannot be the place the rule is tested.
+ */
+export type { FeedCursor } from "@/lib/feed-cursor";
 
 /** The cursor for whatever page of the feed ends at `article`. */
 function cursorAfter(article: LatestArticle): FeedCursor | null {
-  if (!article.published_at) return null;
-  return { published_at: article.published_at, id: article.id };
+  return feedCursorAfter(article);
 }
 
 /** An empty result, for every early return that is not a successful read. */
@@ -319,14 +328,13 @@ function applyCursor<T extends { or: (filter: string) => T }>(
   query: T,
   cursor: FeedCursor | null
 ): T {
-  // An undated cursor addresses nothing: NULLs sort last, so there is no
-  // row below it to compare against.
-  if (!cursor?.published_at) return query;
+  // The filter itself lives in lib/feed-cursor.ts, beside the ordering
+  // it has to agree with. See that file for why the two cannot drift
+  // apart, and for the PostgREST parenthesis rule.
+  const filter = feedCursorFilter(cursor);
+  if (!filter) return query;
 
-  const timestamp = cursor.published_at;
-  return query.or(
-    `published_at.lt.${timestamp},and(published_at.eq.${timestamp},id.lt.${cursor.id})`
-  );
+  return query.or(filter);
 }
 
 /**
@@ -421,7 +429,10 @@ async function languageSelect({
       .eq("status", "published")
       .is("duplicate_of", null)
       .eq("language", lang)
-      .order("published_at", { ascending: false, nullsFirst: false })
+      // Arrival order, for the same reason as the unfiltered select:
+      // the window is the top of the feed, and the feed is ordered by
+      // when we first saw the story. See directSelect.
+      .order("ingested_at", { ascending: false, nullsFirst: false })
       // The tiebreaker for the keyset cursor. Deterministic, so a page
       // boundary inside a run of identical timestamps cannot skip or
       // repeat rows — see applyCursor.
@@ -603,17 +614,29 @@ async function directSelect({
     )
     .eq("status", "published")
     .is("duplicate_of", null)
+    // ARRIVAL ORDER, NOT PUBLICATION ORDER
+    // ------------------------------------
+    // The window this query fills is the top of the feed, and the feed
+    // is ordered by when we ARRIVED at the story. Ordering the window
+    // by publication time instead meant the newest-fetched story was
+    // only on the page if it also happened to be among the newest
+    // published — a story a publisher sat on for five hours, fetched a
+    // minute ago, fell outside the window and never appeared at all.
+    // The reader asked for the most recently FETCHED story on top, and
+    // the query has to agree with the sort the client applies.
+    //
     // nullsFirst: false is required, not cosmetic. PostgreSQL defaults
     // `ORDER BY ... DESC` to NULLS FIRST, so any article with no
-    // published_at sorts ABOVE every dated one — an undated row takes
-    // position 1 and the newest real story is pushed down the page.
-    // latest_articles() specified `nulls last`; this must say it too.
-    .order("published_at", { ascending: false, nullsFirst: false })
+    // arrival time would sort ABOVE every dated one — an undated row
+    // takes position 1 and the newest real story is pushed down the
+    // page.
+    .order("ingested_at", { ascending: false, nullsFirst: false })
     // The keyset tiebreaker, and a determinism fix in its own right.
-    // Several outlets publish inside the same second, so without a
-    // second sort key PostgreSQL is free to return that run in any order
-    // it likes — which made page boundaries inside such a run skip and
-    // repeat rows. See applyCursor.
+    // Two stories ingested in the same transaction share an arrival
+    // time exactly, so without a second sort key PostgreSQL is free to
+    // return that run in any order it likes — which made page
+    // boundaries inside such a run skip and repeat rows. See
+    // applyCursor.
     .order("id", { ascending: false })
     // Over-fetched so that dropping duplicates can backfill with the next
     // story down instead of leaving a hole. See DEDUP_HEADROOM.

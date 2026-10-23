@@ -259,6 +259,10 @@ export function LiveArticleFeed({
     });
   }, []);
 
+  // The stories that arrived after the page was painted, so the card
+  // can mark them. A live feed that changes silently is
+  // indistinguishable from a live feed that is broken.
+  const [newIds, setNewIds] = useState<Set<string>>(() => new Set());
   const ids = useRef(new Set(initialArticles.map((a) => a.id)));
   const lastArrivalAt = useRef<number | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
@@ -354,6 +358,16 @@ export function LiveArticleFeed({
   const mergeInto = useCallback((fresh: LatestArticle[]) => {
     setArticles((current) => {
       lastArrivalAt.current = Date.now();
+      // Which stories are new to the page, so the card can say so.
+      const known = new Set(current.map((a) => a.id));
+      const arrivals = fresh.filter((a) => !known.has(a.id));
+      if (arrivals.length > 0) {
+        setNewIds((previous) => {
+          const next = new Set(previous);
+          for (const arrival of arrivals) next.add(arrival.id);
+          return next;
+        });
+      }
       const merged = mergeArticles(current, fresh);
       // Same array back means the poll found nothing new; leave the id set
       // alone rather than rebuilding it every ten seconds for nothing.
@@ -829,6 +843,7 @@ export function LiveArticleFeed({
             article={article}
             language={language ?? "en"}
             onImageUnavailable={markImageless}
+            isNew={newIds.has(article.id)}
             /*
               The first card's picture is the page's Largest Contentful
               Paint, and the browser only finds that out after it has

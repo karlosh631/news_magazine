@@ -106,6 +106,7 @@ export function mergeArticles<T extends FeedOrder>(
 ): T[] {
   if (fresh.length === 0) return current as T[];
 
+  const known = new Set(current.map((article) => article.id));
   const byId = new Map<string, T>();
   for (const article of current) byId.set(article.id, article);
   for (const article of fresh) byId.set(article.id, article);
@@ -113,5 +114,37 @@ export function mergeArticles<T extends FeedOrder>(
   // Nothing new: hand back the same array so React does not re-render.
   if (byId.size === current.length) return current as T[];
 
-  return [...byId.values()].sort(byNewest);
+  /*
+    A NEW STORY GOES ON TOP AND PUSHES THE PAGE DOWN
+    -------------------------------------------------
+    This is the one thing the reader asked for, and it is what a live
+    news feed is FOR: a story that arrives now appears at the top,
+    and the stories that were there move down.
+
+    The order is by ARRIVAL for the new arrivals, not by publication
+    time. A publisher that posted an hour ago and whose story the
+    worker only just reached is new to this site, and putting it where
+    its publication time says would hide it in the middle of the page
+    - which is exactly what the reader was seeing: nothing seemed to
+    happen.
+
+    The stories already on screen KEEP their places. A poll that
+    returns the same hundred rows every ten seconds must not reshuffle
+    the page under the reader, and the header's own refresh (which
+    re-renders the server tree every fifteen seconds) arrives as the
+    same rows in a new array - so only the rows that are genuinely
+    new may move.
+  */
+  const arrivals = fresh.filter((article) => !known.has(article.id));
+
+  const kept = current.map((article) => byId.get(article.id) ?? article);
+
+  if (arrivals.length === 0) {
+    // The same stories, in a new array. Keep the order the reader is
+    // already looking at, and take the fresh copy of each row (it may
+    // carry a newer picture or a newer source count).
+    return kept;
+  }
+
+  return [...arrivals, ...kept];
 }

@@ -192,10 +192,19 @@ export function NewsCard({
   onImageUnavailable,
   onOpen,
   priority = false,
+  isNew = false,
 }: {
   article: NewsCardArticle;
   language?: SiteLanguage;
   onImageUnavailable?: (articleId: string) => void;
+  /**
+   * This story arrived after the page was painted.
+   *
+   * The card says so, because a live feed that changes silently is
+   * indistinguishable from a live feed that is broken: the reader
+   * cannot tell "nothing new" from "the new thing is not showing".
+   */
+  isNew?: boolean;
   /**
    * This card's picture is the page's Largest Contentful Paint.
    *
@@ -418,6 +427,19 @@ export function NewsCard({
               </span>
             </div>
           )}
+
+          {/*
+            THE NEW BADGE
+
+            The story arrived after the reader's page was painted. It
+            is at the top because it is new, and this says so - a
+            silent change is a change nobody notices.
+          */}
+          {isNew ? (
+            <span className="absolute left-3 top-3 z-10 rounded-full bg-blue-600 px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest text-white shadow">
+              New
+            </span>
+          ) : null}
 
           {/*
             THE PLAY BADGE

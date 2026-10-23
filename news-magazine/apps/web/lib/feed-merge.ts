@@ -69,17 +69,19 @@ export type FeedOrder = {
  * the one with the better picture.
  */
 export function byNewest<T extends FeedOrder>(a: T, b: T): number {
-  // The NEWEST FETCHED first, exactly as the server orders it (see
-  // `newestFirst` in lib/news.ts). Arrival is what the site knows
-  // first-hand, and it is the order that does not change when the
-  // reader scrolls or the page re-renders.
-  const arrivedA = a.ingested_at ? Date.parse(a.ingested_at) : 0;
-  const arrivedB = b.ingested_at ? Date.parse(b.ingested_at) : 0;
-  if (arrivedB !== arrivedA) return arrivedB - arrivedA;
-
+  // The NEWEST NEWS first, exactly as the server orders it (see
+  // `newestFirst` in lib/news.ts). The two have to agree or the page
+  // visibly reshuffles on the first poll after every load.
   const left = a.published_at ? Date.parse(a.published_at) : 0;
   const right = b.published_at ? Date.parse(b.published_at) : 0;
   if (right !== left) return right - left;
+
+  // The tiebreaker: the most recently fetched copy of the same moment
+  // wins, so the better picture and the higher outlet count end up on
+  // the card the reader sees.
+  const arrivedA = a.ingested_at ? Date.parse(a.ingested_at) : 0;
+  const arrivedB = b.ingested_at ? Date.parse(b.ingested_at) : 0;
+  if (arrivedB !== arrivedA) return arrivedB - arrivedA;
 
   // The tiebreaker: the outlet that carried the story most often ends
   // up on the card the reader sees.
@@ -138,16 +140,61 @@ export function mergeArticles<T extends FeedOrder>(
     same rows in a new array - so only the rows that are genuinely
     new may move.
   */
-  const arrivals = fresh.filter((article) => !known.has(article.id));
+  /*
+    WHAT COUNTS AS AN ARRIVAL
+    -------------------------
+    A row is an arrival when it is NOT on the page yet AND it is
+    NEWER than the newest row the page is showing.
+
+    The second half matters. The poll asks for a hundred rows and the
+    page carries thirty-six of them, so sixty-four rows come back that
+    the page has never shown - and they are the ARCHIVE, not news.
+    Treating them as arrivals put sixty-four older stories on top of
+    the page every ten seconds, which is exactly what a reader saw:
+    the newest story, then a pile of old ones, then the page again.
+
+    A hard refresh made it worse: the page came from the cache and was
+    a minute behind, so the poll's whole answer looked new.
+
+    So the arrivals are the rows that are genuinely ahead of the page,
+    and everything else keeps the order it had.
+  */
+  const newestOnPage = current[0];
+  const newestPublished = newestOnPage?.published_at
+    ? Date.parse(newestOnPage.published_at)
+    : 0;
+
+  const isAhead = (article: T) => {
+    if (!article.published_at) return false;
+    const published = Date.parse(article.published_at);
+    if (Number.isNaN(published)) return false;
+    return published > newestPublished;
+  };
+
+  const arrivals = fresh.filter(
+    (article) => !known.has(article.id) && isAhead(article)
+  );
 
   const kept = current.map((article) => byId.get(article.id) ?? article);
 
+  // Everything else - the page's own rows and the archive the poll
+  // brought back - in one list, newest news first.
+  const rest = fresh.filter((article) => !arrivals.includes(article));
+  const restIds = new Set(rest.map((article) => article.id));
+  const tail = [
+    ...rest,
+    ...kept.filter((article) => !restIds.has(article.id)),
+  ].sort(byNewest);
+
   if (arrivals.length === 0) {
-    // The same stories, in a new array. Keep the order the reader is
-    // already looking at, and take the fresh copy of each row (it may
-    // carry a newer picture or a newer source count).
-    return kept;
+    // Nothing arrived ahead of the page. The union is still the union:
+    // a story the page had not mounted takes its place in the order
+    // rather than being dropped. The first early return above already
+    // handled the case where the poll found nothing at all, and that
+    // one hands back the SAME array so React skips the re-render.
+    return tail;
   }
 
-  return [...arrivals, ...kept];
+  // The arrivals on top, pushing the page down.
+  return [...arrivals, ...tail];
 }

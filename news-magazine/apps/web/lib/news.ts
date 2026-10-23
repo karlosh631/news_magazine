@@ -397,28 +397,30 @@ function applyCursor<T extends { or: (filter: string) => T }>(
  */
 function newestFirst(rows: LatestArticle[]): LatestArticle[] {
   return [...rows].sort((a, b) => {
-    // THE NEWEST FETCHED FIRST.
+    // THE NEWEST NEWS FIRST.
     //
-    // The reader asked for this in as many words: the story the site
-    // has just brought in goes to the top, and the ones that were
-    // there move down. Arrival is what the site knows first-hand, and
-    // it is the order that does not change when the reader scrolls or
-    // the page re-renders.
+    // Publication time, not arrival time. The pipeline reads five
+    // pages of every feed, so it fetches a lot of the ARCHIVE - and
+    // ordering by arrival put those hours-old stories at the top of
+    // the page, because they were fetched last. The reader saw an
+    // eleven o'clock story and, under it, a nine o'clock one that had
+    // simply arrived a moment ago.
     //
-    // Publication time is the tiebreaker: two stories fetched in the
-    // same second are ordered by when the publisher published them,
-    // and then by how many outlets carried them.
-    //
-    // The client sorts the same way — see `byNewest` in
-    // lib/feed-merge.ts — and the two have to agree or the page
-    // visibly reshuffles on the first poll after every load.
-    const arrivedA = a.ingested_at ? Date.parse(a.ingested_at) : 0;
-    const arrivedB = b.ingested_at ? Date.parse(b.ingested_at) : 0;
-    if (arrivedB !== arrivedA) return arrivedB - arrivedA;
-
+    // The newest NEWS is what a reader opens a news site for, and the
+    // client's merge puts a story that arrives on top as it arrives
+    // (see `mergeArticles` in lib/feed-merge.ts), so both rules hold
+    // at once: the page is the newest news, and a new arrival goes
+    // to the top of it.
     const left = a.published_at ? Date.parse(a.published_at) : 0;
     const right = b.published_at ? Date.parse(b.published_at) : 0;
     if (right !== left) return right - left;
+
+    // The tiebreaker: the most recently fetched copy of the same
+    // moment wins, so the better picture and the higher outlet count
+    // end up on the card the reader sees.
+    const arrivedA = a.ingested_at ? Date.parse(a.ingested_at) : 0;
+    const arrivedB = b.ingested_at ? Date.parse(b.ingested_at) : 0;
+    if (arrivedB !== arrivedA) return arrivedB - arrivedA;
 
     return (b.source_count ?? 0) - (a.source_count ?? 0);
   });

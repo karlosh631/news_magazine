@@ -26,7 +26,18 @@ import { SITE_LOGO, SITE_NAME, SITE_URL, jsonLd } from "@/lib/site";
  * that exports `revalidate` is a static route that is regenerated in
  * the background, and the CDN serves the HTML it already has.
  */
-export const revalidate = 60;
+// The home page is NEVER served from a cache.
+//
+// It used to be regenerated every sixty seconds, and the reader saw
+// why that is not enough: a hard refresh in a private window showed a
+// page that was more than an hour old, with an hour-old story at the
+// top, because the regeneration had failed (the database connection
+// is not always there) and the stale page was still being served.
+//
+// A live news page that can be an hour stale is not a live news page.
+// The page is built per request instead, and the reader's own browser
+// holds it for the few seconds it takes to draw it.
+export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   alternates: { canonical: "/" },

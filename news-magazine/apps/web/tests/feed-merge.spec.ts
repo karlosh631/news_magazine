@@ -29,7 +29,8 @@ function row(id: string, published: string, ingested = published): Row {
 test.describe("a story that arrives", () => {
   test("goes on top and pushes the page down", () => {
     const current = [row("a", "2026-10-23T10:00:00Z"), row("b", "2026-10-23T09:00:00Z")];
-    const fresh = [row("new", "2026-10-23T09:30:00Z"), ...current];
+    // Published a minute ago, so it is ahead of everything on the page.
+    const fresh = [row("new", "2026-10-23T10:30:00Z"), ...current];
 
     const merged = mergeArticles(current, fresh);
 
@@ -63,27 +64,74 @@ test.describe("a story that arrives", () => {
     expect(mergeArticles(current, [])).toBe(current);
   });
 
-  test("a story published an hour ago still arrives on top", () => {
-    // It is new to this site, and the site is what the reader is
-    // looking at. Burying it in the middle of the page is what made
-    // it look like nothing was happening.
+  test("a story published an hour ago takes its place, not the top", () => {
+    // The page is the newest NEWS. A story the worker only just
+    // reached, but which the publisher posted an hour ago, is an
+    // hour-old story, and the reader who opened a news site for the
+    // news does not want it above the news.
+    //
+    // (Ordering the page by ARRIVAL was tried and was wrong: the
+    // pipeline reads five pages of every feed, so the archive is
+    // fetched last, and the top of the page filled with nine
+    // o'clock stories that had simply arrived a moment ago.)
     const current = [row("a", "2026-10-23T10:00:00Z")];
-    const fresh = [row("old-but-new", "2026-10-23T09:00:00Z"), ...current];
+    const fresh = [
+      row("old-but-new", "2026-10-23T09:00:00Z", "2026-10-23T10:30:00Z"),
+      ...current,
+    ];
 
     expect(mergeArticles(current, fresh).map((r) => r.id)).toEqual([
-      "old-but-new",
       "a",
+      "old-but-new",
     ]);
+  });
+
+  test("the archive the poll brought back does not jump the queue", () => {
+    // The poll asks for a hundred rows and the page carries two. The
+    // other ninety-eight are the ARCHIVE, and treating them as
+    // arrivals put ninety-eight older stories on top of the page
+    // every ten seconds.
+    const current = [row("a", "2026-10-23T10:00:00Z"), row("b", "2026-10-23T09:00:00Z")];
+    const fresh = [
+      row("new", "2026-10-23T10:30:00Z"),
+      row("archive-1", "2026-10-23T08:00:00Z"),
+      row("archive-2", "2026-10-23T07:00:00Z"),
+      ...current,
+    ];
+
+    const merged = mergeArticles(current, fresh);
+
+    // The arrival is on top; the archive is below the page's own rows.
+    expect(merged[0]!.id).toBe("new");
+    expect(merged.map((r) => r.id)).toContain("archive-1");
+    // And the page's own rows keep their order.
+    expect(merged.map((r) => r.id).indexOf("a")).toBeLessThan(
+      merged.map((r) => r.id).indexOf("b")
+    );
   });
 });
 
 test.describe("the order of a fresh page", () => {
-  test("is newest first, by publication time", () => {
+  test("is the newest NEWS first, by publication time", () => {
     const rows = [
       row("older", "2026-10-23T08:00:00Z"),
       row("newer", "2026-10-23T10:00:00Z"),
     ];
 
     expect([...rows].sort(byNewest).map((r) => r.id)).toEqual(["newer", "older"]);
+  });
+
+  test("a story fetched just now but published an hour ago is not the newest", () => {
+    // The pipeline reads five pages of every feed, so it fetches the
+    // archive; ordering by arrival put the archive at the top.
+    const rows = [
+      row("old-but-new", "2026-10-23T09:00:00Z", "2026-10-23T10:30:00Z"),
+      row("newest", "2026-10-23T10:00:00Z", "2026-10-23T10:10:00Z"),
+    ];
+
+    expect([...rows].sort(byNewest).map((r) => r.id)).toEqual([
+      "newest",
+      "old-but-new",
+    ]);
   });
 });

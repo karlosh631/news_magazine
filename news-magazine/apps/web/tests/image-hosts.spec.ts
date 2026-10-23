@@ -163,16 +163,17 @@ test.describe("merging a batch into a running feed", () => {
     expect(merged[0]!.source_count).toBe(1);
   });
 
-  test("the newest FETCHED comes first, whatever the publication time", () => {
-    // The reader asked for this in as many words: the story the site
-    // has just brought in goes to the top. A publisher that posted an
-    // hour ago and whose story the worker only just reached is new to
-    // this site, and putting it where its publication time says would
-    // hide it in the middle of the page.
-    const fetchedEarlier = story("early", "2026-10-20T08:00:00Z", "2026-10-20T10:00:00Z");
-    const fetchedLater = story("late", "2026-10-20T11:00:00Z", "2026-10-20T08:00:00Z");
+  test("the newest NEWS comes first, whatever order we fetched it in", () => {
+    // The page is the newest NEWS. The pipeline reads five pages of
+    // every feed, so it fetches a lot of the ARCHIVE, and ordering by
+    // arrival put hours-old stories at the top of the page because
+    // they had been fetched last.
+    // The helper is (id, ingested, published): "early" was published an
+    // hour before "late", but it was fetched after it.
+    const publishedEarlier = story("early", "2026-10-20T11:00:00Z", "2026-10-20T10:00:00Z");
+    const publishedLater = story("late", "2026-10-20T08:00:00Z", "2026-10-20T11:00:00Z");
     expect(
-      [fetchedEarlier, fetchedLater].sort(byNewest).map((a) => a.id)
+      [publishedEarlier, publishedLater].sort(byNewest).map((a) => a.id)
     ).toEqual(["late", "early"]);
   });
 

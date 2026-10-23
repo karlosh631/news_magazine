@@ -177,20 +177,25 @@ interface FeedCursor {
  * visibly reshuffles on the first poll after every page load.
  */
 /**
- * Did this story arrive in the last few minutes?
+ * Was this story published in the last few minutes?
  *
- * The site's own clock: when the worker brought the story in. A story
- * published an hour ago and fetched five minutes ago is new to this
- * site, and it is new to the reader's page too.
+ * The PUBLISHER's clock, not the worker's. The worker reads five pages
+ * of every feed, so it fetches the archive too, and a story fetched a
+ * moment ago may have been published hours ago - that is not news,
+ * and marking it as new would be a lie.
+ *
+ * So the mark is on the stories that are actually news: published
+ * inside the last fifteen minutes, which is about three passes of the
+ * five-minute heartbeat.
  */
-export function isFreshlyArrived(
-  article: { ingested_at?: string | null },
+export function isFreshlyPublished(
+  article: { published_at?: string | null },
   minutes: number
 ): boolean {
-  if (!article.ingested_at) return false;
-  const arrived = Date.parse(article.ingested_at);
-  if (Number.isNaN(arrived)) return false;
-  return Date.now() - arrived <= minutes * 60_000;
+  if (!article.published_at) return false;
+  const published = Date.parse(article.published_at);
+  if (Number.isNaN(published)) return false;
+  return Date.now() - published <= minutes * 60_000;
 }
 
 export function LiveArticleFeed({
@@ -276,10 +281,6 @@ export function LiveArticleFeed({
     });
   }, []);
 
-  // The stories that arrived after the page was painted, so the card
-  // can mark them. A live feed that changes silently is
-  // indistinguishable from a live feed that is broken.
-  const [newIds, setNewIds] = useState<Set<string>>(() => new Set());
 
   /*
     HOW FRESH A STORY HAS TO BE TO BE MARKED NEW
@@ -292,7 +293,7 @@ export function LiveArticleFeed({
     The arrival time is the site's own, and it is the same clock the
     feed is ordered by, so the badge and the order always agree.
   */
-  const NEW_MINUTES = 20;
+  const NEW_MINUTES = 15;
   const ids = useRef(new Set(initialArticles.map((a) => a.id)));
   const lastArrivalAt = useRef<number | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
@@ -389,15 +390,6 @@ export function LiveArticleFeed({
     setArticles((current) => {
       lastArrivalAt.current = Date.now();
       // Which stories are new to the page, so the card can say so.
-      const known = new Set(current.map((a) => a.id));
-      const arrivals = fresh.filter((a) => !known.has(a.id));
-      if (arrivals.length > 0) {
-        setNewIds((previous) => {
-          const next = new Set(previous);
-          for (const arrival of arrivals) next.add(arrival.id);
-          return next;
-        });
-      }
       const merged = mergeArticles(current, fresh);
       // Same array back means the poll found nothing new; leave the id set
       // alone rather than rebuilding it every ten seconds for nothing.
@@ -873,9 +865,7 @@ export function LiveArticleFeed({
             article={article}
             language={language ?? "en"}
             onImageUnavailable={markImageless}
-            isNew={
-              newIds.has(article.id) && isFreshlyArrived(article, NEW_MINUTES)
-            }
+            isNew={isFreshlyPublished(article, NEW_MINUTES)}
             /*
               The first card's picture is the page's Largest Contentful
               Paint, and the browser only finds that out after it has

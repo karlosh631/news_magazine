@@ -138,6 +138,22 @@ logger = logging.getLogger("ingestion")
 # I/O-bound waits on a network socket, not CPU work.
 DB_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="supabase")
 
+# How many stories of ONE publisher are read at the same time.
+#
+# Three. Reading a story's own page takes seconds, and for the
+# publishers that refuse this address it takes the better part of a
+# minute, because the page has to be read through the reader proxy.
+# One at a time, a source with thirty new stories took thirty of those
+# back to back and the pass ran out of its window with most of the
+# outlets untouched - the site was an hour behind.
+#
+# Three at a time is what a browser does when it opens a page with its
+# pictures, and the reader proxy still holds itself to one request every
+# second and a half, so a publisher that refuses us is not touched
+# harder than it was. Five publishers are read at once, so the pass
+# makes at most fifteen requests in flight.
+ARTICLE_CONCURRENCY = 3
+
 # Attempts per database call, including the first.
 DB_RETRY_ATTEMPTS = 4
 
@@ -183,8 +199,8 @@ async def db_call(fn, *args, **kwargs):
     """
     Run a blocking supabase-py call off the event loop, with a retry.
 
-    supabase-py has no retry of its own, and PostgREST over HTTP/2 drops
-    connections routinely on a busy or idle connection pool:
+    supabase-py has no retry of its own, and PostgREST drops connections
+    routinely:
 
         httpcore.RemoteProtocolError: Server disconnected
 
@@ -198,6 +214,20 @@ async def db_call(fn, *args, **kwargs):
     second attempt — and retrying it just multiplies the noise. The
     operations here are reads and id-based upserts, both idempotent, so
     a retry cannot duplicate anything.
+
+    WHY THE FIRST RETRY DOES NOT SLEEP
+    ----------------------------------
+    The failure is a dead socket, not a busy server. Sleeping before
+    trying again does not make the socket any better; replacing it does.
+    So the first retry asks for a fresh connection at once - httpcore
+    drops the failed one from the pool by itself - and only the later
+    attempts back off.
+
+    The old behaviour slept 0.4s, then 1.2s, then 3.6s — 5.2 seconds of
+    sleeping per failed call, on a pass that made hundreds of calls. In
+    the run of 2026-10-23 17:23 UTC that was eighty-nine failures and
+    roughly eight minutes of the twenty-five minute window spent
+    waiting for a socket that was never going to come back on its own.
     """
     loop = asyncio.get_running_loop()
 
@@ -209,14 +239,26 @@ async def db_call(fn, *args, **kwargs):
         except Exception as exc:
             if attempt == DB_RETRY_ATTEMPTS - 1 or not _is_transient_db_error(exc):
                 raise
-            # 0.4s, 1.2s, 3.6s — long enough for the pool to recycle the
-            # dead connection, short enough not to stall a source poll.
-            delay = 0.4 * (3 ** attempt)
+
+            # A dead connection is replaced, not waited for - and
+            # httpcore already replaces it: the failed connection is
+            # dropped from the pool and the next attempt opens a fresh
+            # one. The shared session must NOT be closed here: five
+            # source polls and sixteen executor threads are using it at
+            # the same time, and every in-flight request on it would
+            # fail with "Cannot send a request, as the client has been
+            # closed" - a RuntimeError, which is not transient and so is
+            # not retried, and the article is lost.
+            #
+            # 0s, then 0.5s, then 1.5s.
+            delay = (0.0, 0.5, 1.5)[min(attempt, 2)]
             logger.warning(
-                "Transient database error (%s); retry %s/%s in %ss.",
-                type(exc).__name__, attempt + 1, DB_RETRY_ATTEMPTS, delay,
+                "Transient database error (%s: %s); retry %s/%s in %ss.",
+                type(exc).__name__, str(exc)[:160],
+                attempt + 1, DB_RETRY_ATTEMPTS, delay,
             )
-            await asyncio.sleep(delay)
+            if delay:
+                await asyncio.sleep(delay)
 
 
 def _is_transient_db_error(exc: BaseException) -> bool:
@@ -686,11 +728,18 @@ IMAGE_PROBE_CANDIDATES = 3
 
 # How many imageless rows one poll will try to repair. Small on purpose:
 # this is a retry of work a previous poll already failed to do, so it must
-# not become a second crawl of the outlet. Five rows at one page fetch and
+# not become a second crawl of the outlet. Two rows at one page fetch and
 # a bounded number of image probes each is a handful of requests per
 # source poll, and every candidate URL is answered from the shared
 # validator cache whenever two of them share a photograph.
-IMAGE_REPAIR_LIMIT = 5
+#
+# It used to be five, and there are three of these sweeps. Fifteen page
+# reads at the end of every source poll is fifteen more requests to the
+# publisher, on the critical path, for work that is by definition a
+# retry - and with thirty-four sources that is over five hundred page
+# reads a pass. The dedicated "Refresh images" sweep does this work in
+# bulk, on its own clock; the poll's own job is to fetch the news.
+IMAGE_REPAIR_LIMIT = 2
 
 # Only look this far back. An older imageless row is not a transient
 # failure any more, it is a story from an outlet that genuinely publishes
@@ -707,7 +756,7 @@ IMAGE_REPAIR_WINDOW_HOURS = 48
 # have an image, and the local shape check throws out the ones that do
 # not. Only the survivors cost a page fetch, so this number bounds the
 # fetches rather than the scan.
-BROKEN_IMAGE_REPAIR_LIMIT = 5
+BROKEN_IMAGE_REPAIR_LIMIT = 1
 
 # How many stored rows one poll will re-resolve the artwork of, under
 # today's rules, as a one-shot pass over rows the marker has not
@@ -715,9 +764,9 @@ BROKEN_IMAGE_REPAIR_LIMIT = 5
 #
 # Each row is fetched exactly ONCE, ever — the marker stops it being
 # fetched again — so this number does not set a permanent load. It sets
-# how fast the backlog clears: at 5 per poll per source every five
-# minutes, a source's 48-hour backlog is covered in about an hour.
-IMAGE_REFRESH_LIMIT = 5
+# how fast the backlog clears: at 2 per poll per source every five
+# minutes, a source's 48-hour backlog is covered in about two hours.
+IMAGE_REFRESH_LIMIT = 2
 
 # How many stored rows one poll will re-run the classifier over.
 #
@@ -1486,9 +1535,10 @@ async def _upsert_article_source(
     every few minutes for as long as the story stayed inside the dedup
     window.
 
-    Deliberately read-then-insert rather than an ON CONFLICT upsert.
-    Migration 0009 declares TWO unique indexes, and both have to be
-    checked because ON CONFLICT can only ever name one:
+    Deliberately ONE idempotent write rather than a read-then-insert.
+    Migration 0009 declares TWO unique indexes, and an ON CONFLICT
+    clause can only ever name one - so the write is
+    `ON CONFLICT DO NOTHING`, which covers both without naming either:
 
       * (article_id, source_id)      — this outlet already carried this
                                        story; nothing to do.
@@ -1503,6 +1553,11 @@ async def _upsert_article_source(
     attached elsewhere — for Setopati that fired repeatedly. The link
     exists either way; this story simply is not the one holding it. So
     it is reported as "exists" rather than retried or logged as noise.
+
+    The old read-then-insert also cost three round trips for every
+    story - two reads and an insert - and it was a race, because the
+    cron and the long-lived worker poll the same outlets independently.
+    One write is one round trip and cannot lose.
 
     Only ever called with an id that already exists in `articles`. Both
     ids are shape-checked first: a link cannot be written without an
@@ -1531,45 +1586,49 @@ async def _upsert_article_source(
         return "skipped"
 
     try:
-        # This outlet already carried this story.
-        existing = await db_call(
+        # The link is written ONCE, idempotently.
+        #
+        # This used to read first and insert second - two reads and an
+        # insert, three round trips for every story - and the read-then-
+        # insert is a race: the cron and the long-lived worker both poll
+        # the same outlet, both read "not there", and both insert. One
+        # loses with a unique violation, and the merge record for that
+        # outlet is lost with it.
+        #
+        # `resolution=ignore-duplicates` is PostgREST's
+        # `ON CONFLICT DO NOTHING`: the second writer's insert becomes a
+        # no-op instead of an error, and with `return=representation` the
+        # response carries the row ONLY when this call is the one that
+        # wrote it - so "created" and "exists" are still told apart and
+        # source_count is still only bumped for a genuinely new outlet.
+        #
+        # Both unique indexes are covered without naming either one:
+        #   * (article_id, source_id) - this outlet already carried this
+        #     story; nothing to do.
+        #   * (source_id, source_article_url) - this outlet's own link
+        #     is already attached to a DIFFERENT article row. The link
+        #     exists either way; this story simply is not the one
+        #     holding it.
+        response = await db_call(
             lambda: db.table("article_sources")
-            .select("id")
-            .eq("article_id", article_uuid)
-            .eq("source_id", source_uuid)
-            .limit(1)
-            .execute()
-        )
-        if existing.data:
-            return "exists"
-
-        # The same outlet link is already attached to another article.
-        # Nothing to write, and it is not an error.
-        linked_elsewhere = await db_call(
-            lambda: db.table("article_sources")
-            .select("id, article_id")
-            .eq("source_id", source_uuid)
-            .eq("source_article_url", source_article_url)
-            .limit(1)
-            .execute()
-        )
-        if linked_elsewhere.data:
-            return "exists"
-
-        await db_call(
-            lambda: db.table("article_sources")
-            .insert(
+            .upsert(
                 {
                     "article_id": article_uuid,
                     "source_id": source_uuid,
                     "source_article_url": source_article_url,
                     "is_primary": is_primary,
-                }
+                },
+                ignore_duplicates=True,
             )
             .execute()
         )
-        return "created"
+        return "created" if (response.data or []) else "exists"
     except Exception as exc:
+        # Belt and braces: if the conflict target is ever rejected, a
+        # collision is still not an error - the link exists.
+        if "23505" in str(exc) or "duplicate key" in str(exc):
+            return "exists"
+
         # A foreign-key failure here is benign and expected: the article
         # was matched as a duplicate, then the TTL prune deleted it
         # before the link could be written. The story is already gone,
@@ -1916,7 +1975,20 @@ async def prune_old_articles(db, retention_hours: int, max_rows: int) -> int:
 #: How old a story may be and still have its picture read from its own
 #: page during a pass. The archive is stored from the feed's picture
 #: and proved afterwards by the repair sweep.
-ARCHIVE_AFTER_HOURS = 3
+#:
+#: One hour, and it used to be three. This is the single biggest
+#: number in the pass: every story inside the window costs one page
+#: read, and a page read for a publisher that refuses this address
+#: costs a read through the reader proxy as well.
+#:
+#: The measured cost of the three-hour window was the pass itself: the
+#: pipeline reads two pages of every feed, so it fetches back stories
+#: the site has never seen, and every one of them inside the window
+#: was read in full - three hours of stories, on every pass, to
+#: re-fetch what the site already had. An hour is enough: it covers
+#: every story a reader is looking at, and the stories below it are
+#: the archive, which the repair sweep proves at its own pace.
+ARCHIVE_AFTER_HOURS = 1
 
 
 def _is_archive(published_at, settings) -> bool:
@@ -2366,291 +2438,342 @@ async def run_source_sync(
             media_http, timeout=settings.image_validation_timeout_seconds
         )
 
-        for article in articles:
+        # THE STORIES OF ONE PUBLISHER ARE READ AT THE SAME TIME
+        # -------------------------------------------------------
+        # They used to be read one at a time, and that was the pass's
+        # whole problem. Reading a story's own page takes seconds - and
+        # for the publishers that refuse this address it takes the
+        # better part of a minute, because the page has to be read
+        # through the reader proxy - so a source with thirty new
+        # stories took thirty of those, back to back, and the pass ran
+        # out of its window with most of the outlets untouched.
+        #
+        # The measured cost: a pass that lasted twenty-five minutes and
+        # reached a handful of sources. The site was an hour behind.
+        #
+        # So the stories of one publisher are read together, up to a
+        # small limit. Three at a time is the most this does to any one
+        # publisher - three page requests in flight is what a browser
+        # does when it opens a page with its pictures - and the reader
+        # proxy still holds itself to one request every second and a
+        # half, so the publishers who refuse us are not touched harder
+        # than they were.
+        #
+        # The limit is per publisher, and five publishers are read at
+        # once, so the pass makes at most fifteen requests in flight.
+        article_gate = asyncio.Semaphore(ARTICLE_CONCURRENCY)
+
+        async def _process_one(article) -> None:
             try:
-                if not article.headline or not article.source_article_url:
-                    result.rejected += 1
-                    continue
+                async with article_gate:
+                    if not article.headline or not article.source_article_url:
+                        result.rejected += 1
+                        return
 
-                headline = sanitize_headline(article.headline)
-                if not headline:
-                    result.rejected += 1
-                    await _log_error(
-                        db, source_id, sync_log_id, "empty_headline",
-                        "Headline was empty after sanitization.",
-                        {"source_url": article.source_article_url},
+                    headline = sanitize_headline(article.headline)
+                    if not headline:
+                        result.rejected += 1
+                        await _log_error(
+                            db, source_id, sync_log_id, "empty_headline",
+                            "Headline was empty after sanitization.",
+                            {"source_url": article.source_article_url},
+                        )
+                        return
+
+                    excerpt = sanitize_excerpt(article.excerpt) or None
+
+                    # ---- Deduplicate ----
+                    #
+                    # The dedup lookup is a database call like any other, so
+                    # it is run off the event loop and retried like any
+                    # other. It used to be a bare synchronous call on the
+                    # event loop thread: it blocked the loop, it was never
+                    # retried, and one dropped connection read as "this
+                    # story is new" and inserted a second copy of it.
+                    try:
+                        verdict = await db_call(
+                            lambda headline=headline,
+                            url=article.canonical_url or article.source_article_url:
+                                dedup.check(headline=headline, canonical_url=url)
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        # The database is not answering. The story is NOT
+                        # lost: the feed still carries it and the next poll
+                        # offers it again. It is deliberately NOT stored now,
+                        # because storing it would put a second row for a
+                        # story that may already be stored.
+                        result.rejected += 1
+                        await _log_error(
+                            db, source_id, sync_log_id, "dedup_lookup_failed",
+                            str(exc),
+                            {
+                                "headline": headline,
+                                "source_url": article.source_article_url,
+                            },
+                        )
+                        return
+
+                    if verdict.is_duplicate and verdict.existing_id:
+                        result.duplicates += 1
+                        link = await _upsert_article_source(
+                            db=db,
+                            article_id=verdict.existing_id,
+                            source_id=source_id,
+                            source_article_url=article.source_article_url,
+                            is_primary=False,
+                        )
+                        if link == "skipped":
+                            result.links_skipped += 1
+                        # Only a link we had not recorded before is a new
+                        # outlet. Bumping on every poll made source_count
+                        # climb continuously for any story still inside the
+                        # 12h dedup window.
+                        if link == "created":
+                            await _bump_source_count(db, verdict.existing_id)
+                        logger.info(
+                            # f-string rather than %-args: the worker's
+                            # structlog config renders stdlib log records as
+                            # Message:/Arguments: without interpolating them,
+                            # so the actual headline never reached the log.
+                            f"Duplicate ({verdict.reason}, {verdict.confidence:.0f}%): "
+                            f"{headline!r} <- {verdict.matched_title!r}",
+                        )
+                        return
+
+                    # ---- Enrich from the article page ----
+                    feed_media = media_from_feed(article)
+                    extracted: ExtractedMedia | None = None
+
+                    # A STORY'S OWN PAGE IS THE AUTHORITY FOR ITS IMAGE.
+                    #
+                    # The feed's image is not the story's image. It is whatever
+                    # the publisher put in the feed enclosure, and for an outlet
+                    # that reuses a "featured" or promoted slot in the feed, that
+                    # is a DIFFERENT story's photograph. Measured on production:
+                    # the drug-seizure story on nepalnews.com
+                    # (2026/10/22/armed-forces-seize-drugs-from-motorcycle) had
+                    # stored .../wp-content/uploads/2026/10/aston-villa.webp - an
+                    # Aston Villa FOOTBALL photograph - while the story's own
+                    # og:image was .../2026/10/apf11.jpg, the armed police
+                    # photograph that actually belongs to it.
+                    #
+                    # The old rule fetched the article page only when the feed
+                    # had NO image at all, so for every RSS outlet the feed's
+                    # picture won by default and the story's own page was never
+                    # consulted. Only the html_listing adapter set
+                    # `needs_article_fetch`, so this applied to the majority of
+                    # the outlets. And because `dedup.check` matches a stored row
+                    # and continues long before the media block, the wrong image
+                    # was written once and never revisited.
+                    #
+                    # So the page is fetched for every NEW story. It costs one
+                    # request per story that is not already stored - the poll
+                    # only reaches this code for a story that passed the
+                    # duplicate check - and the same request is where the
+                    # alt text and the article's own word count come from, so it
+                    # is not spent twice.
+                    #
+                    # `enrich_media` still governs it, so an operator who wants
+                    # the old feed-only behaviour can turn it off.
+                    # THE ARCHIVE DOES NOT NEED ITS PICTURE PROVEN.
+                    #
+                    # A pass that reads five pages of every feed brings in
+                    # hundreds of stories the site has never seen, and
+                    # every one of them whose publisher refuses this
+                    # address is read through the reader, which is slow by
+                    # design. The pass was taking longer than its own
+                    # window, so it was killed half way through and the
+                    # next pass started the same work again - and the site
+                    # went an hour without a new story.
+                    #
+                    # The reader reads the NEWEST stories, and the archive
+                    # is stored from the feed's own picture. The repair
+                    # sweep proves the archive's pictures afterwards, a
+                    # few dozen at a time, on its own pace.
+                    #
+                    # A story the reader is looking at now is never more
+                    # than a few hours old, so nothing on the page is
+                    # affected by this.
+                    if (
+                        enrich_media
+                        and article.source_article_url
+                        and not _is_archive(article.published_at, settings)
+                    ):
+                        extracted = await extract_from_article(
+                            article.source_article_url,
+                            media_http,
+                            referer=(article.raw_metadata or {}).get("listing_url"),
+                        )
+                        if not extracted.is_empty():
+                            result.enriched += 1
+
+                    media = merge_media(feed_media, extracted)
+
+                    # ---- Prove the image exists before storing it ----
+                    # Everything above chose an image by ranking URLs.
+                    # Ranking is not liveness: the winner may 403 forever,
+                    # and the feed thumbnail's "high-res upgrade" is a
+                    # guess at a sibling filename that may not exist. Ask
+                    # the CDN before the row is written, and take the
+                    # artwork away entirely if it cannot prove itself.
+                    if enrich_media and settings.validate_images:
+                        media, dropped = await verify_media_images(
+                            media,
+                            validator,
+                            feed_media,
+                            extracted,
+                            limit=settings.max_image_candidates_per_article,
+                        )
+                        if dropped:
+                            result.images_dropped += 1
+
+                    # Use the richer description when the feed gave us none.
+                    if not excerpt and extracted is not None:
+                        excerpt = sanitize_excerpt(extracted.description) or None
+
+                    # ---- The story's OWN page is the authority for its
+                    # HEADLINE, exactly as it is for its picture.
+                    #
+                    # The listing card is the publisher's own summary of the
+                    # story, and on a client-rendered listing that summary
+                    # is the whole card: the outlet's domain, the time
+                    # since publication, the headline and the first
+                    # paragraph, all in one string. Stored as the headline,
+                    # that is what the reader saw:
+                    #
+                    #   canadanepal.com . 33 minutes ago Cyber security
+                    #   risks ... | The web technology (PHP) ...
+                    #
+                    # The article's own page declares the headline, and it
+                    # declares it exactly as the outlet published it - in
+                    # the og:title, and again in the JSON-LD NewsArticle
+                    # block. So the page wins, and the listing is only used
+                    # when the page does not say.
+                    page_title = (
+                        sanitize_headline(extracted.title) if extracted is not None else ""
                     )
-                    continue
+                    if page_title and page_title != headline:
+                        logger.info(
+                            "Headline from the story's own page: %r (the listing "
+                            "said %r)",
+                            page_title[:120],
+                            headline[:80],
+                        )
+                        headline = page_title
 
-                excerpt = sanitize_excerpt(article.excerpt) or None
-
-                # ---- Deduplicate ----
-                verdict = dedup.check(
-                    headline=headline,
-                    canonical_url=article.canonical_url or article.source_article_url,
-                )
-
-                if verdict.is_duplicate and verdict.existing_id:
-                    result.duplicates += 1
-                    link = await _upsert_article_source(
-                        db=db,
-                        article_id=verdict.existing_id,
-                        source_id=source_id,
-                        source_article_url=article.source_article_url,
-                        is_primary=False,
+                    # ---- Licensed full body, if this outlet permits one ----
+                    # The page was already fetched above for media whenever
+                    # `extracted` is not None, and `attach_full_body` reuses
+                    # it: no second request, no second parse. The extra
+                    # request that covers stories whose page was NOT being
+                    # fetched is behind its own opt-in (fetch_full_text)
+                    # because it is one request per story into 27
+                    # publishers. It stores PLAIN TEXT only, bounded, and
+                    # only when sources.republish_permission says so —
+                    # checked before any request and again before storage.
+                    await attach_full_body(
+                        article,
+                        source_row,
+                        settings,
+                        extracted=extracted,
+                        client=media_http,
+                        robots=adapter.robots,
+                        rate_limiter=adapter.rate_limiter,
                     )
-                    if link == "skipped":
-                        result.links_skipped += 1
-                    # Only a link we had not recorded before is a new
-                    # outlet. Bumping on every poll made source_count
-                    # climb continuously for any story still inside the
-                    # 12h dedup window.
-                    if link == "created":
-                        await _bump_source_count(db, verdict.existing_id)
-                    logger.info(
-                        # f-string rather than %-args: the worker's
-                        # structlog config renders stdlib log records as
-                        # Message:/Arguments: without interpolating them,
-                        # so the actual headline never reached the log.
-                        f"Duplicate ({verdict.reason}, {verdict.confidence:.0f}%): "
-                        f"{headline!r} <- {verdict.matched_title!r}",
-                    )
-                    continue
 
-                # ---- Enrich from the article page ----
-                feed_media = media_from_feed(article)
-                extracted: ExtractedMedia | None = None
-
-                # A STORY'S OWN PAGE IS THE AUTHORITY FOR ITS IMAGE.
-                #
-                # The feed's image is not the story's image. It is whatever
-                # the publisher put in the feed enclosure, and for an outlet
-                # that reuses a "featured" or promoted slot in the feed, that
-                # is a DIFFERENT story's photograph. Measured on production:
-                # the drug-seizure story on nepalnews.com
-                # (2026/10/22/armed-forces-seize-drugs-from-motorcycle) had
-                # stored .../wp-content/uploads/2026/10/aston-villa.webp - an
-                # Aston Villa FOOTBALL photograph - while the story's own
-                # og:image was .../2026/10/apf11.jpg, the armed police
-                # photograph that actually belongs to it.
-                #
-                # The old rule fetched the article page only when the feed
-                # had NO image at all, so for every RSS outlet the feed's
-                # picture won by default and the story's own page was never
-                # consulted. Only the html_listing adapter set
-                # `needs_article_fetch`, so this applied to the majority of
-                # the outlets. And because `dedup.check` matches a stored row
-                # and continues long before the media block, the wrong image
-                # was written once and never revisited.
-                #
-                # So the page is fetched for every NEW story. It costs one
-                # request per story that is not already stored - the poll
-                # only reaches this code for a story that passed the
-                # duplicate check - and the same request is where the
-                # alt text and the article's own word count come from, so it
-                # is not spent twice.
-                #
-                # `enrich_media` still governs it, so an operator who wants
-                # the old feed-only behaviour can turn it off.
-                # THE ARCHIVE DOES NOT NEED ITS PICTURE PROVEN.
-                #
-                # A pass that reads five pages of every feed brings in
-                # hundreds of stories the site has never seen, and
-                # every one of them whose publisher refuses this
-                # address is read through the reader, which is slow by
-                # design. The pass was taking longer than its own
-                # window, so it was killed half way through and the
-                # next pass started the same work again - and the site
-                # went an hour without a new story.
-                #
-                # The reader reads the NEWEST stories, and the archive
-                # is stored from the feed's own picture. The repair
-                # sweep proves the archive's pictures afterwards, a
-                # few dozen at a time, on its own pace.
-                #
-                # A story the reader is looking at now is never more
-                # than a few hours old, so nothing on the page is
-                # affected by this.
-                if (
-                    enrich_media
-                    and article.source_article_url
-                    and not _is_archive(article.published_at, settings)
-                ):
-                    extracted = await extract_from_article(
-                        article.source_article_url,
-                        media_http,
-                        referer=(article.raw_metadata or {}).get("listing_url"),
-                    )
-                    if not extracted.is_empty():
-                        result.enriched += 1
-
-                media = merge_media(feed_media, extracted)
-
-                # ---- Prove the image exists before storing it ----
-                # Everything above chose an image by ranking URLs.
-                # Ranking is not liveness: the winner may 403 forever,
-                # and the feed thumbnail's "high-res upgrade" is a
-                # guess at a sibling filename that may not exist. Ask
-                # the CDN before the row is written, and take the
-                # artwork away entirely if it cannot prove itself.
-                if enrich_media and settings.validate_images:
-                    media, dropped = await verify_media_images(
-                        media,
-                        validator,
-                        feed_media,
-                        extracted,
-                        limit=settings.max_image_candidates_per_article,
-                    )
-                    if dropped:
-                        result.images_dropped += 1
-
-                # Use the richer description when the feed gave us none.
-                if not excerpt and extracted is not None:
-                    excerpt = sanitize_excerpt(extracted.description) or None
-
-                # ---- The story's OWN page is the authority for its
-                # HEADLINE, exactly as it is for its picture.
-                #
-                # The listing card is the publisher's own summary of the
-                # story, and on a client-rendered listing that summary
-                # is the whole card: the outlet's domain, the time
-                # since publication, the headline and the first
-                # paragraph, all in one string. Stored as the headline,
-                # that is what the reader saw:
-                #
-                #   canadanepal.com . 33 minutes ago Cyber security
-                #   risks ... | The web technology (PHP) ...
-                #
-                # The article's own page declares the headline, and it
-                # declares it exactly as the outlet published it - in
-                # the og:title, and again in the JSON-LD NewsArticle
-                # block. So the page wins, and the listing is only used
-                # when the page does not say.
-                page_title = (
-                    sanitize_headline(extracted.title) if extracted is not None else ""
-                )
-                if page_title and page_title != headline:
-                    logger.info(
-                        "Headline from the story's own page: %r (the listing "
-                        "said %r)",
-                        page_title[:120],
-                        headline[:80],
-                    )
-                    headline = page_title
-
-                # ---- Licensed full body, if this outlet permits one ----
-                # The page was already fetched above for media whenever
-                # `extracted` is not None, and `attach_full_body` reuses
-                # it: no second request, no second parse. The extra
-                # request that covers stories whose page was NOT being
-                # fetched is behind its own opt-in (fetch_full_text)
-                # because it is one request per story into 27
-                # publishers. It stores PLAIN TEXT only, bounded, and
-                # only when sources.republish_permission says so —
-                # checked before any request and again before storage.
-                await attach_full_body(
-                    article,
-                    source_row,
-                    settings,
-                    extracted=extracted,
-                    client=media_http,
-                    robots=adapter.robots,
-                    rate_limiter=adapter.rate_limiter,
-                )
-
-                # ---- Four-point extractive summary ----
-                # Every point is a verbatim sentence from the article the
-                # outlet published. Nothing is generated.
-                summary = summarize_from_html(
-                    extracted.article_text if extracted is not None else None,
-                    headline=headline,
-                    fallback_excerpt=excerpt,
-                    num_points=4,
-                )
-
-                if summary.points and settings.enable_gemini_ranking:
-                    summary.points = await polish_with_gemini(
-                        summary.points, headline, enabled=True
-                    )
-                    summary.method = f"{summary.method}+gemini_ranked"
-
-                # ---- Category ----
-                # The categoriser returns None when no keyword rule
-                # matches. Falling through to the source's default (which
-                # is usually NULL) left the article with no category at
-                # all, so it appeared on no category page — the
-                # /category/national page rendered empty while hundreds
-                # of articles existed. Default to national instead.
-                category_id = (
-                    categorizer.classify(headline, excerpt)
-                    or source_row.get("default_category_id")
-                    or national_category_id
-                )
-
-                # ---- Identity ----
-                title_normalized = normalize_title(headline)
-                fingerprint = token_fingerprint(headline)
-                content_hash = (
-                    (article.raw_metadata or {}).get("content_hash")
-                    or hashlib.sha256(
-                        f"{article.canonical_url or article.source_article_url}|{fingerprint}".encode("utf-8")
-                    ).hexdigest()
-                )
-
-                # ---- Store ----
-                # The excerpt and the points are both extracted from the
-                # same article, so the excerpt's opening sentences are
-                # normally the very sentences the points were built from.
-                # Stored together they render as the same paragraph twice
-                # on the article page, so the excerpt is trimmed to what
-                # the points do not already say.
-                store_excerpt = excerpt_without_points(
-                    excerpt, summary.points if summary and summary.points else None
-                )
-
-                article_id = await store_article(
-                    db=db,
-                    article=article,
-                    media=media,
-                    category_id=category_id,
-                    source_row=source_row,
-                    content_hash=content_hash,
-                    title_normalized=title_normalized,
-                    excerpt=store_excerpt,
-                    summary=summary,
-                )
-
-                if article_id:
-                    # The row exists, so the link is safe to write. This
-                    # is the primary outlet for a story that is already
-                    # stored, so the counter must not move: it already
-                    # counted this outlet the first time.
-                    link = await _upsert_article_source(
-                        db=db,
-                        article_id=article_id,
-                        source_id=source_id,
-                        source_article_url=article.source_article_url,
-                        is_primary=True,
-                    )
-                    if link == "skipped":
-                        result.links_skipped += 1
-                    result.new += 1
-
-                    # Teach the deduper this article's id. Without it an
-                    # in-run duplicate resolves with existing_id=None
-                    # and falls through to being stored as a second copy
-                    # of the same story.
-                    dedup.bind_article_id(
+                    # ---- Four-point extractive summary ----
+                    # Every point is a verbatim sentence from the article the
+                    # outlet published. Nothing is generated.
+                    summary = summarize_from_html(
+                        extracted.article_text if extracted is not None else None,
                         headline=headline,
-                        fingerprint=fingerprint,
-                        url=article.canonical_url or article.source_article_url,
-                        article_id=article_id,
+                        fallback_excerpt=excerpt,
+                        num_points=4,
                     )
-                else:
-                    # No valid id means no row. Count it as rejected and
-                    # deliberately do NOT attempt the article_sources
-                    # write — there is nothing to link to.
-                    result.rejected += 1
+
+                    if summary.points and settings.enable_gemini_ranking:
+                        summary.points = await polish_with_gemini(
+                            summary.points, headline, enabled=True
+                        )
+                        summary.method = f"{summary.method}+gemini_ranked"
+
+                    # ---- Category ----
+                    # The categoriser returns None when no keyword rule
+                    # matches. Falling through to the source's default (which
+                    # is usually NULL) left the article with no category at
+                    # all, so it appeared on no category page — the
+                    # /category/national page rendered empty while hundreds
+                    # of articles existed. Default to national instead.
+                    category_id = (
+                        categorizer.classify(headline, excerpt)
+                        or source_row.get("default_category_id")
+                        or national_category_id
+                    )
+
+                    # ---- Identity ----
+                    title_normalized = normalize_title(headline)
+                    fingerprint = token_fingerprint(headline)
+                    content_hash = (
+                        (article.raw_metadata or {}).get("content_hash")
+                        or hashlib.sha256(
+                            f"{article.canonical_url or article.source_article_url}|{fingerprint}".encode("utf-8")
+                        ).hexdigest()
+                    )
+
+                    # ---- Store ----
+                    # The excerpt and the points are both extracted from the
+                    # same article, so the excerpt's opening sentences are
+                    # normally the very sentences the points were built from.
+                    # Stored together they render as the same paragraph twice
+                    # on the article page, so the excerpt is trimmed to what
+                    # the points do not already say.
+                    store_excerpt = excerpt_without_points(
+                        excerpt, summary.points if summary and summary.points else None
+                    )
+
+                    article_id = await store_article(
+                        db=db,
+                        article=article,
+                        media=media,
+                        category_id=category_id,
+                        source_row=source_row,
+                        content_hash=content_hash,
+                        title_normalized=title_normalized,
+                        excerpt=store_excerpt,
+                        summary=summary,
+                    )
+
+                    if article_id:
+                        # The row exists, so the link is safe to write. This
+                        # is the primary outlet for a story that is already
+                        # stored, so the counter must not move: it already
+                        # counted this outlet the first time.
+                        link = await _upsert_article_source(
+                            db=db,
+                            article_id=article_id,
+                            source_id=source_id,
+                            source_article_url=article.source_article_url,
+                            is_primary=True,
+                        )
+                        if link == "skipped":
+                            result.links_skipped += 1
+                        result.new += 1
+
+                        # Teach the deduper this article's id. Without it an
+                        # in-run duplicate resolves with existing_id=None
+                        # and falls through to being stored as a second copy
+                        # of the same story.
+                        dedup.bind_article_id(
+                            headline=headline,
+                            fingerprint=fingerprint,
+                            url=article.canonical_url or article.source_article_url,
+                            article_id=article_id,
+                        )
+                    else:
+                        # No valid id means no row. Count it as rejected and
+                        # deliberately do NOT attempt the article_sources
+                        # write — there is nothing to link to.
+                        result.rejected += 1
 
             except asyncio.CancelledError:
                 # A BaseException, so the handler below never catches it.
@@ -2672,6 +2795,10 @@ async def run_source_sync(
                         "source_url": getattr(article, "source_article_url", None),
                     },
                 )
+
+        # Every story of this publisher has been read. They were read
+        # together, up to ARTICLE_CONCURRENCY at a time.
+        await asyncio.gather(*(_process_one(article) for article in articles))
 
     # ---- Re-apply today's category rules to recently stored rows ----
     #

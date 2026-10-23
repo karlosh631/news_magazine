@@ -73,9 +73,12 @@ class FakeQuery:
     def limit(self, n):
         return self
 
-    def upsert(self, row, on_conflict=None):
-        self.db.calls.append(("upsert", self.db.table_name, on_conflict))
+    def upsert(self, row, on_conflict=None, ignore_duplicates=False, **kwargs):
+        self.db.calls.append(
+            ("upsert", self.db.table_name, on_conflict, ignore_duplicates)
+        )
         self.db.upserted = row
+        self.db.upsert_ignore_duplicates = ignore_duplicates
         return self
 
     def insert(self, row):
@@ -95,8 +98,10 @@ class FakeTable:
     def select(self, *a, **k):
         return FakeQuery(self.db).select(*a, **k)
 
-    def upsert(self, row, on_conflict=None):
-        return FakeQuery(self.db).upsert(row, on_conflict=on_conflict)
+    def upsert(self, row, on_conflict=None, ignore_duplicates=False, **kwargs):
+        return FakeQuery(self.db).upsert(
+            row, on_conflict=on_conflict, ignore_duplicates=ignore_duplicates
+        )
 
     def insert(self, row):
         return FakeQuery(self.db).insert(row)
@@ -110,6 +115,7 @@ class FakeDB:
         self.calls: list = []
         self.eq_pairs: list = []
         self.upserted = None
+        self.upsert_ignore_duplicates = None
         self.inserted = None
         self.table_name = "articles"
 
@@ -212,7 +218,7 @@ def test_extract_id_rejects_a_malformed_id_rather_than_returning_it():
 def test_store_article_returns_the_id_from_a_normal_upsert():
     db = FakeDB([[{"id": GOOD_UUID}]])
     assert call_store(db) == GOOD_UUID
-    assert ("upsert", "articles", "slug") in db.calls
+    assert ("upsert", "articles", "slug", False) in db.calls
 
 
 def test_store_article_returns_none_instead_of_raising_when_the_insert_fails():
@@ -272,14 +278,19 @@ def test_store_article_never_returns_something_that_is_not_a_uuid():
 # =============================================================
 
 def test_upsert_article_source_writes_the_link_for_a_valid_id():
-    db = FakeDB([[]])  # existence check returns no rows -> insert
+    # The link is written ONCE, idempotently: PostgREST's
+    # `resolution=ignore-duplicates` turns the insert into an
+    # ON CONFLICT DO NOTHING, and the row comes back only when this
+    # call is the one that wrote it.
+    db = FakeDB([[{"id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}]])
     assert run(
         _upsert_article_source(db, GOOD_UUID, OTHER_UUID, "https://example.com/a")
     ) == "created"
-    assert db.inserted["article_id"] == GOOD_UUID
-    assert db.inserted["source_id"] == OTHER_UUID
-    assert db.inserted["source_article_url"] == "https://example.com/a"
-    assert db.inserted["is_primary"] is False
+    assert db.upserted["article_id"] == GOOD_UUID
+    assert db.upserted["source_id"] == OTHER_UUID
+    assert db.upserted["source_article_url"] == "https://example.com/a"
+    assert db.upserted["is_primary"] is False
+    assert db.upsert_ignore_duplicates is True
 
 
 def test_upsert_article_source_reports_an_existing_link_without_reinserting():
@@ -287,11 +298,12 @@ def test_upsert_article_source_reports_an_existing_link_without_reinserting():
     Idempotence is what keeps source_count honest. Re-polling an article
     every few minutes must not look like a newly discovered outlet.
     """
-    db = FakeDB([[{"id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}]])
+    # No row comes back: the write was a no-op because the link is
+    # already there. The story is not counted as a new outlet.
+    db = FakeDB([[]])
     assert run(
         _upsert_article_source(db, GOOD_UUID, OTHER_UUID, "https://example.com/a")
     ) == "exists"
-    assert db.inserted is None
 
 
 def test_upsert_article_source_skips_without_touching_the_database():
@@ -319,9 +331,9 @@ def test_upsert_article_source_skips_when_the_url_is_missing():
 
 
 def test_upsert_article_source_writes_the_stripped_id():
-    db = FakeDB([[]])
+    db = FakeDB([[{"id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}]])
     run(_upsert_article_source(db, f" {GOOD_UUID} ", OTHER_UUID, "https://example.com/a"))
-    assert db.inserted["article_id"] == GOOD_UUID
+    assert db.upserted["article_id"] == GOOD_UUID
 
 
 def test_upsert_article_source_does_not_raise_when_every_write_fails():

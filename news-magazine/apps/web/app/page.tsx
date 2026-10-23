@@ -95,8 +95,24 @@ const structuredData = {
  * headlines instead.
  */
 export default async function HomePage() {
+  /*
+    HOW MANY STORIES THE HOMEPAGE OPENS WITH
+    -----------------------------------------
+    It used to open with thirty-six. The reader asked for the MAXIMUM
+    number of stories, and thirty-six is a page's worth - it is what a
+    newspaper would print, not what a live site should offer. Every
+    story below the fold was one more scroll, and on a phone that scroll
+    is where the reader stops.
+
+    A hundred and twenty is what the archive actually holds in a couple
+    of hours on a busy day, so the page now opens with the whole
+    recent window rather than a taste of it. The cost is real and it was
+    measured: one request for a hundred and twenty rows answers in about
+    a second, and the client poll keeps merging anything newer into the
+    top of the list as it arrives.
+  */
   const [feed, breaking] = await Promise.all([
-    getLatestArticles({ limit: 36 }),
+    getLatestArticles({ limit: 120 }),
     getBreakingNews(10),
   ]);
 

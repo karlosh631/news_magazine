@@ -89,6 +89,30 @@ export function byNewest<T extends FeedOrder>(a: T, b: T): number {
 }
 
 /**
+ * How long a story stays "arriving".
+ *
+ * A fetched story that was published inside this window is NEWS, and it
+ * goes to the top of the page when the fetch that brought it lands. A
+ * fetched story that is older than this is the ARCHIVE - the pipeline
+ * reads a couple of pages of every feed, so it fetches back stories the
+ * site has never had - and an archive story takes its place in the order
+ * instead of jumping the queue.
+ *
+ * The window is deliberately generous. A fetch that brings twenty
+ * stories brings twenty stories from the last hour or so, and the
+ * reader's complaint was that only ONE of them ever appeared at the top.
+ * The old rule - "an arrival must be newer than the newest story
+ * already on the page" - dropped every story in the batch that was a
+ * few minutes older than the one above it, so a fetch that delivered
+ * fifteen stories at once showed exactly one.
+ *
+ * Ninety minutes is about six fetches at the heartbeat's pace, so a
+ * story that arrives late is still news when it lands, and nothing that
+ * is genuinely old is promoted above the news.
+ */
+export const ARRIVAL_WINDOW_MS = 90 * 60_000;
+
+/**
  * Fold a batch into the running list, newest first.
  *
  * Union by id, and the union only ever grows: a story already in the list
@@ -104,10 +128,15 @@ export function byNewest<T extends FeedOrder>(a: T, b: T): number {
  * That identity is the whole point: it is what lets React skip the
  * re-render, and therefore what keeps a poll that found no news from moving
  * a single pixel.
+ *
+ * `now` is a parameter so the rule can be tested against a fixed clock.
+ * Without it the tests would pass or fail depending on the hour of the
+ * day they were run.
  */
 export function mergeArticles<T extends FeedOrder>(
   current: readonly T[],
   fresh: readonly T[],
+  now: number = Date.now(),
 ): T[] {
   if (fresh.length === 0) return current as T[];
 
@@ -126,13 +155,6 @@ export function mergeArticles<T extends FeedOrder>(
     news feed is FOR: a story that arrives now appears at the top,
     and the stories that were there move down.
 
-    The order is by ARRIVAL for the new arrivals, not by publication
-    time. A publisher that posted an hour ago and whose story the
-    worker only just reached is new to this site, and putting it where
-    its publication time says would hide it in the middle of the page
-    - which is exactly what the reader was seeing: nothing seemed to
-    happen.
-
     The stories already on screen KEEP their places. A poll that
     returns the same hundred rows every ten seconds must not reshuffle
     the page under the reader, and the header's own refresh (which
@@ -144,42 +166,41 @@ export function mergeArticles<T extends FeedOrder>(
     WHAT COUNTS AS AN ARRIVAL
     -------------------------
     A row is an arrival when it is NOT on the page yet AND it is
-    NEWER than the newest row the page is showing.
+    RECENT - published inside the arrival window (ARRIVAL_WINDOW_MS).
 
-    The second half matters. The poll asks for a hundred rows and the
-    page carries thirty-six of them, so sixty-four rows come back that
-    the page has never shown - and they are the ARCHIVE, not news.
-    Treating them as arrivals put sixty-four older stories on top of
-    the page every ten seconds, which is exactly what a reader saw:
-    the newest story, then a pile of old ones, then the page again.
+    The second half matters, and it is a rule about NEWS rather than
+    about position. The poll asks for a hundred rows and the page
+    carries a hundred and twenty of them, so the rows that come back
+    that the page has never shown are the ARCHIVE, not news. Treating
+    them as arrivals put a pile of old stories on top of the page
+    every ten seconds, which is exactly what a reader saw: the newest
+    story, then a pile of old ones, then the page again.
 
-    A hard refresh made it worse: the page came from the cache and was
-    a minute behind, so the poll's whole answer looked new.
-
-    So the arrivals are the rows that are genuinely ahead of the page,
-    and everything else keeps the order it had.
+    But the window must not be so tight that a whole batch is thrown
+    away. The reader asked for the maximum number of stories from each
+    fetch, and the batch a fetch brings is stories from the last hour
+    or so - so the window is ninety minutes, and every one of them
+    lands at the top, newest first among themselves.
   */
-  const newestOnPage = current[0];
-  const newestPublished = newestOnPage?.published_at
-    ? Date.parse(newestOnPage.published_at)
-    : 0;
-
-  const isAhead = (article: T) => {
+  const isRecent = (article: T) => {
     if (!article.published_at) return false;
     const published = Date.parse(article.published_at);
     if (Number.isNaN(published)) return false;
-    return published > newestPublished;
+    // A story from the future (a publisher whose clock is ahead) counts
+    // as recent rather than being excluded.
+    return now - published <= ARRIVAL_WINDOW_MS;
   };
 
-  const arrivals = fresh.filter(
-    (article) => !known.has(article.id) && isAhead(article)
-  );
+  const arrivals = fresh
+    .filter((article) => !known.has(article.id) && isRecent(article))
+    .sort(byNewest);
 
   const kept = current.map((article) => byId.get(article.id) ?? article);
 
   // Everything else - the page's own rows and the archive the poll
   // brought back - in one list, newest news first.
-  const rest = fresh.filter((article) => !arrivals.includes(article));
+  const arrivalIds = new Set(arrivals.map((article) => article.id));
+  const rest = fresh.filter((article) => !arrivalIds.has(article.id));
   const restIds = new Set(rest.map((article) => article.id));
   const tail = [
     ...rest,
@@ -187,7 +208,7 @@ export function mergeArticles<T extends FeedOrder>(
   ].sort(byNewest);
 
   if (arrivals.length === 0) {
-    // Nothing arrived ahead of the page. The union is still the union:
+    // Nothing arrived inside the window. The union is still the union:
     // a story the page had not mounted takes its place in the order
     // rather than being dropped. The first early return above already
     // handled the case where the poll found nothing at all, and that

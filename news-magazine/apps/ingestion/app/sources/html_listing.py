@@ -50,7 +50,11 @@ import feedparser
 import httpx
 
 from app.config import DEFAULT_MAX_ARTICLES_PER_SOURCE
-from app.sources.reader_proxy import fetch_with_reader_fallback
+from app.sources.reader_proxy import (
+    BLOCKED_STATUS_CODES,
+    fetch_via_reader,
+    fetch_with_reader_fallback,
+)
 from app.services.dedup import normalize_title, token_fingerprint
 from app.services.sanitizer import sanitize_excerpt, sanitize_headline
 from app.sources.base import NormalizedArticle, SourceAdapter
@@ -469,43 +473,86 @@ class HtmlListingAdapter(SourceAdapter):
             "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
         }
 
-        async def is_article(entry: dict) -> bool:
-            link = entry.get("link")
-            if not link:
-                return False
+        # ONE client for the whole probe window.
+        #
+        # There was one per probe, so a listing of forty candidates cost
+        # forty TLS handshakes - and the handshakes, not the requests,
+        # were the cost. The connection is shared and reused, which is
+        # also what a browser does.
+        async with httpx.AsyncClient(
+            timeout=12.0, follow_redirects=True
+        ) as probe_client:
 
-            async with semaphore:
-                try:
-                    async with httpx.AsyncClient(
-                        timeout=12.0, follow_redirects=True
-                    ) as probe:
-                        response = await probe.get(
-                            link, headers=headers
-                        )
-                    if response.status_code >= 400:
-                        return False
-                    # A redirect to the homepage means the link was chrome.
-                    final_path = urlparse(str(response.url)).path.rstrip("/")
-                    original_path = urlparse(link).path.rstrip("/")
-                    if final_path != original_path and final_path == "":
-                        return False
-                    text = response.text
-                    if len(text) < 500:
-                        return False
-                    # A page with no headline is not an article.
-                    #
-                    # `<h1>` is the usual place for one, but it is not
-                    # the only one, and insisting on it rejected a
-                    # whole outlet whose article pages carry the
-                    # headline in an `<h2>` and in the Open Graph
-                    # metadata instead. The check is "does this page
-                    # name the story", and there are three ways to
-                    # answer that.
-                    if not _HAS_HEADLINE_RE.search(text):
-                        return False
-                    return True
-                except Exception:
+            async def is_article(entry: dict) -> bool:
+                link = entry.get("link")
+                if not link:
                     return False
+
+                async with semaphore:
+                    try:
+                        response = await probe_client.get(link, headers=headers)
+                    except Exception:
+                        return False
+
+                    if response.status_code < 400:
+                        # A redirect to the homepage means the link was
+                        # chrome.
+                        final_path = urlparse(str(response.url)).path.rstrip("/")
+                        original_path = urlparse(link).path.rstrip("/")
+                        if final_path != original_path and final_path == "":
+                            return False
+                        text = response.text
+                    elif response.status_code in BLOCKED_STATUS_CODES:
+                        # REFUSED, NOT MISSING.
+                        #
+                        # Three outlets - Ekantipur, Hamro Patro
+                        # National and Hamro Patro News - answer this
+                        # address with a refusal, and the refusal was
+                        # read as "this is not an article". Every
+                        # candidate failed, the outlet raised, and the
+                        # whole source was dropped: three publishers
+                        # contributed NOTHING to the site, every pass,
+                        # for as long as the code had been like this.
+                        #
+                        # A refusal is not an answer about the page. It
+                        # is an answer about the address, and the
+                        # reader proxy is an address that has not been
+                        # refused - which is exactly how the article
+                        # pages are read elsewhere in this pipeline.
+                        if not self.settings.reader_proxy_enabled:
+                            return False
+                        text = await fetch_via_reader(
+                            link,
+                            probe_client,
+                            proxy=self.settings.reader_proxy_url,
+                        )
+                        if text is None:
+                            return False
+                    else:
+                        # A 404 is a real answer: the page is not there.
+                        return False
+
+                if len(text) < 500:
+                    return False
+                # A page with no headline is not an article.
+                #
+                # `<h1>` is the usual place for one, but it is not the
+                # only one, and insisting on it rejected a
+                # whole outlet whose article pages carry the
+                # headline in an `<h2>` and in the Open Graph
+                # metadata instead. The check is "does this page
+                # name the story", and there are three ways to
+                # answer that.
+                if not _HAS_HEADLINE_RE.search(text):
+                    return False
+                return True
+
+            results = await asyncio.gather(
+                *(is_article(entry) for entry in candidates)
+            )
+        verified = [
+            entry for entry, ok in zip(candidates, results) if ok
+        ]
 
         results = await asyncio.gather(*(is_article(entry) for entry in candidates))
         verified = [

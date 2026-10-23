@@ -298,7 +298,10 @@ export default async function CategoryPage({ params, searchParams }: Props) {
     );
   }
 
-  const feed = await getLatestArticles({ limit: 36, categorySlug: slug! });
+  // A hundred and twenty, like the homepage: the reader asked for the
+  // maximum number of stories, and a category that shows thirty-six of
+  // them is showing a taste rather than the news.
+  const feed = await getLatestArticles({ limit: 120, categorySlug: slug! });
 
   return (
     <main className="min-h-screen">

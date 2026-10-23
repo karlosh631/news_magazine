@@ -274,10 +274,21 @@ jobs:
             # (synthesize_summary is unwired), so it is left false rather
             # than implying a behaviour that does not exist.
             echo "ENABLE_GEMINI_SUMMARY=false"
-            # Safe to enable: the model only returns an ordering of the
-            # four already-extracted points, at temperature 0.0, and
-            # anything not verbatim in that list is discarded.
-            echo "ENABLE_GEMINI_RANKING=true"
+            # The ranking call is OFF, and it used to be on.
+            #
+            # All it does is reorder the four points the extractor
+            # already found, at temperature 0.0 - and it costs one POST
+            # per new story, with an eight-second timeout. On a pass
+            # that brings two hundred new stories that is between four
+            # and twelve minutes of the pass, spent on the ORDER of
+            # four sentences that are already in the right words.
+            #
+            # The pass's whole job now is to be quick: the reader is
+            # waiting for the news, and a story that lands in the
+            # database without its points ordered by importance is still
+            # the story. The extractive order - the order the outlet
+            # wrote them in - is used instead.
+            echo "ENABLE_GEMINI_RANKING=false"
             # Reels, on the same five-minute cron as the news.
             #
             # The reels category used to be fetched ONLY by the

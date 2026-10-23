@@ -133,6 +133,60 @@ async def main() -> int:
         print("SOURCES_OK=0")
         return 2
 
+    # =============================================================
+    # THE CHEAP PASSES GO FIRST
+    # =============================================================
+    #
+    # The reels, the almanac and the storage guard used to run AFTER
+    # the news sources. The news sources take the whole window - they
+    # read a couple of pages of every feed, and every story nobody has
+    # seen before costs a page read and an image proof - and so the
+    # window ran out with the news half done and the other three
+    # passes never started at all.
+    #
+    # The symptom was a Reels page that said "245 clips in the
+    # catalogue, 0 clips fetched today" and a Rashifal page that
+    # sometimes showed yesterday's horoscope: the passes were in the
+    # code, and they were never reached.
+    #
+    # They are quick and they are bounded, so they go first. Whatever
+    # happens to the news pass after them, the reels are fetched, the
+    # almanac is fetched and the database is pruned.
+    #
+    # ---- Reels ----
+    #
+    # A separate concern from the news sources, and deliberately
+    # non-fatal: a reels failure must not turn a green news run red,
+    # and a green news run must not be reported as if reels had also
+    # succeeded.
+    reels_ok = await sync_reels_once()
+
+    # ---- The almanac ----
+    #
+    # The same correction, for the same reason, one more time.
+    #
+    # The panchang was fetched ONLY by the long-lived worker's
+    # scheduler. The GitHub Actions cron — the path that is
+    # guaranteed to run, because GitHub does not suspend free accounts
+    # the way Render suspends a free instance — never fetched it. So
+    # the almanac depended on a service that sleeps, and when it
+    # slept the Rashifal page said "Today's almanac has not been
+    # fetched yet" for no reason the reader could understand.
+    #
+    # The pass is now in the cron too. It asks the database whether
+    # today's row is there and fresh, so a five-minute cron costs one
+    # query and no requests on most runs.
+    panchang_ok = await sync_panchang_once()
+
+    # ---- The storage guard ----
+    #
+    # Once per pass, and the pass runs every three minutes, so the
+    # guard runs every three minutes without anybody watching. The
+    # log tables go by age, and if the database is at eighty percent
+    # of its limit the oldest half of the articles goes as well. The
+    # site keeps serving either way.
+    await storage_guard_once(db, settings)
+
     # THE SWEEP DOES NOT ASK EVERY OUTLET EVERY TIME
     # ----------------------------------------------
     # This pass runs every three minutes now, and every pass used to
@@ -249,40 +303,6 @@ async def main() -> int:
         f"{totals['rejected']} rejected"
     )
     print(f"SOURCES_OK={ok}")
-
-    # ---- Reels ----
-    #
-    # A separate concern from the news sources, and deliberately
-    # non-fatal: a reels failure must not turn a green news run red,
-    # and a green news run must not be reported as if reels had also
-    # succeeded.
-    reels_ok = await sync_reels_once()
-
-    # ---- The almanac ----
-    #
-    # The same correction, for the same reason, one more time.
-    #
-    # The panchang was fetched ONLY by the long-lived worker's
-    # scheduler. The GitHub Actions cron — the path that is
-    # guaranteed to run, because GitHub does not suspend free accounts
-    # the way Render suspends a free instance — never fetched it. So
-    # the almanac depended on a service that sleeps, and when it
-    # slept the Rashifal page said "Today's almanac has not been
-    # fetched yet" for no reason the reader could understand.
-    #
-    # The pass is now in the cron too. It asks the database whether
-    # today's row is there and fresh, so a five-minute cron costs one
-    # query and no requests on most runs.
-    panchang_ok = await sync_panchang_once()
-
-    # ---- The storage guard ----
-    #
-    # Once per pass, and the pass runs every three minutes, so the
-    # guard runs every three minutes without anybody watching. The
-    # log tables go by age, and if the database is at eighty percent
-    # of its limit the oldest half of the articles goes as well. The
-    # site keeps serving either way.
-    await storage_guard_once(db, settings)
 
     return 0 if ok > 0 else 3
 

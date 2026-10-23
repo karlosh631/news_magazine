@@ -437,8 +437,17 @@ class Deduplicator:
                 return DuplicateVerdict(True, row["id"], "exact_url", 100.0, row.get("headline"))
 
         # 2. Content hash
-        if fingerprint:
-            row = self._one("articles", "content_hash", fingerprint)
+        #
+        # This tier was DEAD. It looked the row up by the 32-character
+        # token fingerprint, but what the store writes is the 64
+        # character sha256 of "<url>|<fingerprint>" - so the value could
+        # never match and the tier never fired. The same story is
+        # caught by the canonical-URL tier above, which is why the bug
+        # was invisible, but a story whose URL changed and whose wording
+        # did not had no tier left to catch it.
+        stored_hash = content_hash(canonical_url, headline)
+        if stored_hash:
+            row = self._one("articles", "content_hash", stored_hash)
             if row:
                 self.stats["exact_hash"] += 1
                 return DuplicateVerdict(True, row["id"], "exact_hash", 100.0, row.get("headline"))
@@ -539,7 +548,20 @@ class Deduplicator:
                 .execute()
             )
             return response.data or []
-        except Exception:
+        except Exception as exc:
+            # A database that is DOWN is not the same as an RPC that is
+            # not installed. Only the second may be answered with an
+            # empty candidate list; the first must be raised, or a dead
+            # database reads as "no duplicates" and the story is stored
+            # as a second copy of itself.
+            from app.services.ingestion import _is_transient_db_error
+
+            if _is_transient_db_error(exc):
+                logger.warning(
+                    "dedup: candidate pre-filter failed (transient); "
+                    "the article is deferred, not stored"
+                )
+                raise
             logger.exception("dedup: candidate pre-filter failed")
             return []
 
@@ -567,11 +589,33 @@ class Deduplicator:
         try:
             verdict = self.check_database(headline, canonical_url, fingerprint)
         except Exception:
-            # Dedup could not run. Treat the article as new rather than
-            # dropping it — the unique index on content_hash is still the
-            # final backstop against exact duplicates.
-            logger.warning("dedup: falling through to insert after lookup failure")
-            verdict = UNIQUE
+            # A LOOKUP THAT DID NOT ANSWER IS NOT "UNIQUE".
+            #
+            # Reading a failed lookup as "this story is new" is how a
+            # reconnect floods the table with duplicates: the row is
+            # inserted, the article_sources link then collides with the
+            # link the story already has, and the merge record for that
+            # outlet is lost with it.
+            #
+            # The unique index on content_hash is NOT a backstop here:
+            # it is sha256(url | fingerprint), so a story whose headline
+            # changed between polls gets a second content_hash and a
+            # second row - and canonical_url has no unique index at all.
+            #
+            # The article is not lost by refusing it here. The outlet's
+            # feed still carries the story, the next poll offers it
+            # again, and this check runs against a database that is
+            # answering. A duplicate row, by contrast, is permanent.
+            #
+            # So the failure is raised, not swallowed. The caller runs
+            # this through db_call, which retries it like every other
+            # database call; if the database is genuinely down then the
+            # store that follows would fail too.
+            logger.warning(
+                "dedup: lookup failed for %r; the article is deferred, not stored",
+                headline[:80],
+            )
+            raise
 
         if not verdict.is_duplicate:
             self.stats["unique"] += 1

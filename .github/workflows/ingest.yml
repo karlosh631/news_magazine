@@ -122,7 +122,13 @@ jobs:
   sync:
     name: Sync sources
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # The window has to fit the work. Reading two pages of every feed
+    # means a few hundred stories the site has never seen, and each one
+    # whose publisher refuses this address is read through the reader,
+    # which is slow by design. At twenty-five minutes the pass was
+    # being killed half way through, and the next pass started the same
+    # work again - so the site went an hour without a new story.
+    timeout-minutes: 45
 
     steps:
       - name: Note when this run started
@@ -262,7 +268,7 @@ jobs:
             # one page can only ever see the last hundred items, so a
             # quiet hour is an hour of stories the site never learns
             # about.
-            echo "RSS_FEED_PAGES=5"
+            echo "RSS_FEED_PAGES=2"
             echo "RSS_PAGE_SIZE=100"
             # ENABLE_GEMINI_SUMMARY has no caller in services/ingestion.py
             # (synthesize_summary is unwired), so it is left false rather

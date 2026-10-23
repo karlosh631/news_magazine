@@ -198,6 +198,42 @@ export function isFreshlyPublished(
   return Date.now() - published <= minutes * 60_000;
 }
 
+/**
+ * The stories this reader has already seen.
+ *
+ * "NEW" means new to the READER, not new to the world. A story that
+ * was on their screen an hour ago is not new to them, and a badge
+ * that says otherwise is a badge the reader stops believing.
+ *
+ * The record lives in the browser (localStorage), so it survives a
+ * reload and a return visit, and it is capped so it cannot grow
+ * without bound.
+ */
+const SEEN_STORAGE_KEY = "news-seen-stories";
+const SEEN_MAX = 400;
+
+function readSeenStories(): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = window.localStorage.getItem(SEEN_STORAGE_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return new Set(Array.isArray(parsed) ? parsed : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeSeenStories(ids: Set<string>): void {
+  if (typeof window === "undefined") return;
+  try {
+    const list = Array.from(ids).slice(-SEEN_MAX);
+    window.localStorage.setItem(SEEN_STORAGE_KEY, JSON.stringify(list));
+  } catch {
+    // A browser that refuses storage still gets a working page.
+  }
+}
+
 export function LiveArticleFeed({
   initialArticles,
   initialCursor = null,
@@ -294,6 +330,32 @@ export function LiveArticleFeed({
     feed is ordered by, so the badge and the order always agree.
   */
   const NEW_MINUTES = 15;
+
+  // The stories this reader has seen, from a previous visit.
+  const [seenIds, setSeenIds] = useState<Set<string>>(() => new Set());
+
+  // Read the record once the page is in the browser, and record what
+  // was on the screen - so the stories the reader is looking at now
+  // are not "new" to them the next time they come back.
+  useEffect(() => {
+    const previous = readSeenStories();
+    setSeenIds(previous);
+
+    const markSeen = () => {
+      setSeenIds((current) => {
+        const next = new Set(current);
+        for (const article of articles) next.add(article.id);
+        writeSeenStories(next);
+        return next;
+      });
+    };
+
+    // A moment, so the first screenful is not recorded before the
+    // reader has had a chance to see it.
+    const timer = window.setTimeout(markSeen, 15_000);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const ids = useRef(new Set(initialArticles.map((a) => a.id)));
   const lastArrivalAt = useRef<number | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
@@ -865,7 +927,10 @@ export function LiveArticleFeed({
             article={article}
             language={language ?? "en"}
             onImageUnavailable={markImageless}
-            isNew={isFreshlyPublished(article, NEW_MINUTES)}
+            isNew={
+              isFreshlyPublished(article, NEW_MINUTES) &&
+              !seenIds.has(article.id)
+            }
             /*
               The first card's picture is the page's Largest Contentful
               Paint, and the browser only finds that out after it has

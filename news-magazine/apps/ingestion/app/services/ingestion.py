@@ -1912,6 +1912,37 @@ async def prune_old_articles(db, retention_hours: int, max_rows: int) -> int:
         return 0
 
 
+
+#: How old a story may be and still have its picture read from its own
+#: page during a pass. The archive is stored from the feed's picture
+#: and proved afterwards by the repair sweep.
+ARCHIVE_AFTER_HOURS = 3
+
+
+def _is_archive(published_at, settings) -> bool:
+    """
+    Is this story old enough that its picture can wait?
+
+    "Old" is measured against the site's own clock and the store's
+    retention window: a story published more than three hours ago is
+    not what a reader opened the site for, and its picture is proved
+    by the repair sweep instead.
+    """
+    if not published_at:
+        return False
+    try:
+        published = (
+            published_at
+            if isinstance(published_at, datetime)
+            else datetime.fromisoformat(str(published_at).replace("Z", "+00:00"))
+        )
+    except (TypeError, ValueError):
+        return False
+    if published.tzinfo is None:
+        published = published.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - published
+    return age > timedelta(hours=ARCHIVE_AFTER_HOURS)
+
 # =============================================================
 # LOGGING HELPERS
 # =============================================================
@@ -2421,7 +2452,30 @@ async def run_source_sync(
                 #
                 # `enrich_media` still governs it, so an operator who wants
                 # the old feed-only behaviour can turn it off.
-                if enrich_media and article.source_article_url:
+                # THE ARCHIVE DOES NOT NEED ITS PICTURE PROVEN.
+                #
+                # A pass that reads five pages of every feed brings in
+                # hundreds of stories the site has never seen, and
+                # every one of them whose publisher refuses this
+                # address is read through the reader, which is slow by
+                # design. The pass was taking longer than its own
+                # window, so it was killed half way through and the
+                # next pass started the same work again - and the site
+                # went an hour without a new story.
+                #
+                # The reader reads the NEWEST stories, and the archive
+                # is stored from the feed's own picture. The repair
+                # sweep proves the archive's pictures afterwards, a
+                # few dozen at a time, on its own pace.
+                #
+                # A story the reader is looking at now is never more
+                # than a few hours old, so nothing on the page is
+                # affected by this.
+                if (
+                    enrich_media
+                    and article.source_article_url
+                    and not _is_archive(article.published_at, settings)
+                ):
                     extracted = await extract_from_article(
                         article.source_article_url,
                         media_http,

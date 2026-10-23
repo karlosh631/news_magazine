@@ -90,10 +90,22 @@ BLOCKED_STATUS_CODES = (401, 403, 405, 406, 407, 429, 451)
 #: "slow down" for most of them - and a "slow down" is a page that
 #: could not be read, which is a story that keeps its broken headline.
 #:
-#: So the reader is asked at most once every three seconds, whatever
+#: So the reader is asked at most once every second and a half, whatever
 #: the caller is doing. The wait is here rather than in the callers
 #: because the limit belongs to the reader, not to the sweep.
-READER_MIN_INTERVAL_SECONDS = 3.0
+#:
+#: It used to be three seconds, and the cost was measured: a pass
+#: that had to read six hundred pages through the reader took longer
+#: than the job's timeout, so it was killed half way through, and the
+#: next pass started the same six hundred again. The site went an hour
+#: without a new story because a backfill of the archive was bigger
+#: than the window it had to fit in.
+#:
+#: A reader that answers "slow down" is handled below: the page is
+#: skipped, the story is still stored, and the next pass reads it
+#: again. A story that arrives late is better than a story that never
+#: arrives.
+READER_MIN_INTERVAL_SECONDS = 1.5
 
 _reader_lock = asyncio.Lock()
 _reader_last_call: float = 0.0
@@ -156,6 +168,9 @@ async def fetch_via_reader(
         return None
 
     if response.status_code >= 400:
+        # 429 is the reader saying "slow down". The page is skipped and
+        # the story is stored without it - a late story beats no
+        # story - and the next pass reads it again.
         logger.info(
             "The reader answered %s for %s",
             response.status_code,

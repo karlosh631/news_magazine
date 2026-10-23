@@ -28,7 +28,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 
-from app.services.sanitizer import sanitize_plain_text
+from app.services.sanitizer import sanitize_plain_text, strip_card_chrome
 
 logger = logging.getLogger("summarizer")
 
@@ -330,6 +330,10 @@ def summarize_article(
     summarise — the caller then falls back to the excerpt.
     """
     flat = html_to_text(text or "")
+    # The listing card's own furniture - the outlet's domain, the date
+    # and the time since publication - is not part of any sentence, and
+    # it was ending up in the reader's four key points.
+    flat = strip_card_chrome(flat)
     sentences = split_sentences(flat)
 
     if not sentences:

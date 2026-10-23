@@ -92,7 +92,7 @@ MAX_CLEAN_HEADLINE = 160
 #: domain in the reader's own script too ("नेपालnews.com"), and the
 #: domain has to be found inside that as well.
 _DOMAIN_RE = re.compile(
-    r"\b[\w-]+\.(?:com\.np|com|net|org|np|gov|edu|io)\b", re.IGNORECASE
+    r"[\w-]+(?:\.[\w-]+)*\.(?:com\.np|com|net|org|np|gov|edu|io)\b", re.IGNORECASE
 )
 _DATE_RE = re.compile(
     r"\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*\s+\w{3,}\.?\s+\d{1,2}\s+"

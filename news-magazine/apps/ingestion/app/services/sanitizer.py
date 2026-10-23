@@ -89,6 +89,53 @@ def sanitize_plain_text(
     return text
 
 
+
+#: The chrome a listing card prints around the story: the outlet's own
+#: domain, a bullet, the date and the time, and sometimes the time
+#: since publication in the reader's own language.
+_CARD_CHROME_RE = re.compile(
+    r"[\w-]+(?:\.[\w-]+)*\.(?:com\.np|com|net|org|np|gov|edu|io)\b\s*[•|]\s*"
+    r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*\s+\w{3,}\.?\s+\d{1,2}\s+"
+    r"\d{1,2}:\d{2}:\d{2}\s+(?:GMT|UTC)\s+\d{4}",
+    re.IGNORECASE,
+)
+
+_RELATIVE_CHROME_RE = re.compile(
+    r"(?:^|\s)\d+\s*(?:minutes?|mins?|hours?|hrs?)\s+ago(?:\s|$)|"
+    r"(?:^|\s)\d+\s*मिनेट\s*अघि(?:\s|$)|"
+    r"(?:^|\s)\d+\s*घंटा\s*अघि(?:\s|$)",
+    re.IGNORECASE,
+)
+
+
+def strip_card_chrome(text: str | None) -> str:
+    """
+    Take the listing card's chrome out of a piece of text.
+
+    WHY
+    ---
+    A client-rendered listing card is a summary of the story, and the
+    summary includes the card's own furniture: the outlet's domain, a
+    bullet, the date and the time, and the time since publication. When
+    the card's text was taken for the story's text, that furniture went
+    into the story's four key points, and the reader saw:
+
+        नयाँ संस्कारको नागरिक नागरिक २७ गतेदेखि himalpress.com •
+        Fri Oct 23 16:05:51 GMT 2026 काठमाडौं
+
+    The sentence after the furniture IS the outlet's own words; the
+    furniture before it is not part of any sentence.
+
+    The rule is narrow: it removes the domain-and-date string and a
+    leading "x minutes ago", and nothing else. A story that mentions a
+    website in its own words keeps it.
+    """
+    if not text:
+        return ""
+    cleaned = _CARD_CHROME_RE.sub(" ", text)
+    cleaned = _RELATIVE_CHROME_RE.sub(" ", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
 def collapse_repeated_headline(text: str) -> str:
     """
     A headline that says the same thing twice, said once.

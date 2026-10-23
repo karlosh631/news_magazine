@@ -29,6 +29,25 @@
 # fine.
 #
 # It never invents a picture, and it never takes one from a feed.
+#
+# THE SECOND PASS
+# ---------------
+# The pass above works on the rows the marker has never visited. It
+# cannot help a row the marker HAS visited and whose picture is still
+# wrong - and there were those: rows written by an ingestion build
+# older than the rules, carrying a photograph of a different story.
+#
+# Two cheap signals find them without fetching anything: a stored
+# picture that is a resizer URL (the current code never stores one, so
+# its presence is proof of an old build) and a stored picture that is
+# on more than one story (a photograph belongs to one story).
+#
+# So the run finishes with scripts/fix_wrong_images.py, which fetches
+# each suspect's OWN page, asks the repo's own extractor what that page
+# offers as the story's picture, and replaces the picture when the page
+# proves a different one. A page that cannot be read is not evidence
+# that the picture is wrong, so those rows are left exactly as they
+# are.
 # =============================================================
 
 name: Refresh images
@@ -121,10 +140,31 @@ jobs:
             echo "::warning::The artwork refresh did not finish cleanly. The rows it did not reach keep their unverified picture, and the site shows those stories without one."
           fi
 
+      - name: Find the pictures that are not their story's
+        working-directory: news-magazine/apps/ingestion
+        env:
+          LIMIT: ${{ inputs.limit || '250' }}
+          DELAY: ${{ inputs.delay || '1' }}
+        run: |
+          set -uo pipefail
+          # The pass above works on the rows the marker has never
+          # visited. This one works on the rows the marker HAS visited
+          # but whose picture is provably wrong: a resizer URL (which
+          # the current code never stores) or a photograph that is on
+          # more than one story.
+          python -m scripts.fix_wrong_images --limit "$LIMIT" --delay "$DELAY" 2>&1 | tee fix-wrong.log
+          if grep -q "FIX_OK=1" fix-wrong.log; then
+            echo "::notice::Every suspect picture has been checked against its own story."
+          else
+            echo "::warning::The wrong-picture pass did not finish cleanly."
+          fi
+
       - name: Upload the run log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: refresh-images-log-${{ github.run_number }}
-          path: news-magazine/apps/ingestion/refresh.log
+          path: |
+            news-magazine/apps/ingestion/refresh.log
+            news-magazine/apps/ingestion/fix-wrong.log
           retention-days: 7

@@ -58,7 +58,7 @@ on:
       limit:
         description: "How many rows to touch in this run"
         required: false
-        default: "250"
+        default: "120"
       delay:
         description: "Seconds to wait between rows"
         required: false
@@ -129,7 +129,7 @@ jobs:
       - name: Re-resolve the artwork
         working-directory: news-magazine/apps/ingestion
         env:
-          LIMIT: ${{ inputs.limit || '250' }}
+          LIMIT: ${{ inputs.limit || '120' }}
           DELAY: ${{ inputs.delay || '1' }}
         run: |
           # The runner hands this block to `bash -e`, so -e is ALREADY
@@ -154,7 +154,7 @@ jobs:
         if: always()
         working-directory: news-magazine/apps/ingestion
         env:
-          LIMIT: ${{ inputs.limit || '250' }}
+          LIMIT: ${{ inputs.limit || '120' }}
           DELAY: ${{ inputs.delay || '1' }}
         run: |
           set +e
@@ -175,7 +175,7 @@ jobs:
       - name: Repair the headlines, the points and the pictures
         working-directory: news-magazine/apps/ingestion
         env:
-          LIMIT: ${{ inputs.limit || '250' }}
+          LIMIT: ${{ inputs.limit || '120' }}
           DELAY: ${{ inputs.delay || '1' }}
         run: |
           set +e

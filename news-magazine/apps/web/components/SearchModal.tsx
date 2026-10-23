@@ -143,7 +143,12 @@ export function SearchModal({
           type="button"
           onClick={onClose}
           aria-label="Close search"
-          className="shrink-0 rounded px-2 py-1 text-xs font-medium text-gray-500 transition hover:bg-gray-100 hover:text-gray-900 dark:hover:bg-gray-800 dark:hover:text-gray-100"
+          /*
+            48 pixels tall, like the rest of the site's controls: a
+            finger dismissing the overlay should not have to find the
+            word "Cancel" to land on it.
+          */
+          className="flex min-h-[48px] shrink-0 items-center rounded px-3 text-xs font-medium text-gray-500 transition hover:bg-gray-100 hover:text-gray-900 dark:hover:bg-gray-800 dark:hover:text-gray-100"
         >
           Cancel
         </button>

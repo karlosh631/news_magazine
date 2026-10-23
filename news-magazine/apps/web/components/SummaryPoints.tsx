@@ -20,7 +20,13 @@ export function SummaryPoints({
         <li key={index} className="flex gap-2.5">
           <span
             aria-hidden="true"
-            className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-blue-600 text-[10px] font-bold text-white"
+            /*
+              The number in the circle. It was 10 pixels, which is
+              below the 12 pixels Lighthouse counts as legible; the
+              circle is 20 pixels across, so a 12-pixel digit still
+              sits inside it comfortably.
+            */
+            className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white"
           >
             {index + 1}
           </span>

@@ -94,7 +94,15 @@ export function LoginForm({ redirect }: { redirect: string }) {
     <div className="w-full max-w-sm">
       <Link
         href="/"
-        className="mb-6 inline-flex items-center gap-2 text-sm text-gray-500 transition-colors hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 dark:text-gray-400 dark:hover:text-gray-100"
+        /*
+          48 pixels tall.
+
+          "Back to the news" is a link with a word in it and nothing
+          else around it, so it was as small as the text in it - 20
+          pixels, which is a line of type rather than a target. The
+          padding is what makes it something a finger can hit.
+        */
+        className="mb-6 inline-flex min-h-[48px] items-center gap-2 text-sm text-gray-500 transition-colors hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 dark:text-gray-400 dark:hover:text-gray-100"
       >
         <span aria-hidden="true">←</span> Back to the news
       </Link>
@@ -175,7 +183,14 @@ export function LoginForm({ redirect }: { redirect: string }) {
           <button
             type="submit"
             disabled={status === "submitting"}
-            className="w-full rounded-md bg-gray-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-black disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white dark:focus-visible:ring-gray-100 dark:focus-visible:ring-offset-gray-900"
+            /*
+              48 pixels tall.
+
+              This is the button the operator presses with a finger,
+              and at `py-2.5` it was 40 pixels. It is the full width
+              of the form, so the extra height costs nothing.
+            */
+            className="min-h-[48px] w-full rounded-md bg-gray-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-black disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white dark:focus-visible:ring-gray-100 dark:focus-visible:ring-offset-gray-900"
           >
             {status === "submitting" ? "Signing in…" : "Sign in"}
           </button>

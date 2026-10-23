@@ -48,7 +48,15 @@ export function ThemeToggle() {
       onClick={toggle}
       aria-label={mounted ? `Switch to ${theme === "dark" ? "light" : "dark"} mode` : "Toggle colour mode"}
       title={mounted ? `Switch to ${theme === "dark" ? "light" : "dark"} mode` : "Toggle colour mode"}
-      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-gray-300 text-gray-600 transition hover:bg-gray-100 hover:text-gray-900"
+      /*
+        48 pixels, like every other control in the header.
+
+        It was `h-9 w-9` - 36 pixels square - which is a smaller target
+        than a finger is asked to hit, and smaller than the language
+        toggle and the refresh button beside it now are. See the note
+        in components/Header.tsx.
+      */
+      className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md border border-gray-300 text-gray-600 transition hover:bg-gray-100 hover:text-gray-900"
     >
       {theme === "dark" ? (
         // Sun

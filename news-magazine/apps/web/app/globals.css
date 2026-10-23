@@ -220,3 +220,36 @@ a {
 ::selection {
   background-color: rgb(var(--accent) / 0.25);
 }
+
+/* =============================================================
+   The smallest text on the site: 12px
+   =============================================================
+
+   Lighthouse's font-size audit says that text below 12 CSS pixels is
+   too small to be legible, and fails the page when enough of the
+   text is that small (core/audits/seo/font-size.js). Twelve pixels
+   is also the floor the rest of the site is designed to: `text-xs`
+   is 12px, and everything the reader is asked to read is at least
+   that.
+
+   A handful of components still ask for less, with Tailwind's
+   arbitrary values - `text-[9px]` on a card's "Key points" label,
+   `text-[10px]` on a number in a circle, `text-[11px]` on a
+   caption. Those are all real text, not decoration, and the
+   rendering is what Lighthouse measures.
+
+   This rule is the floor for the whole site rather than a fix in
+   each component: it catches the arbitrary values wherever they
+   are used, including in components that are being reworked at the
+   moment. A component that asks for `text-xs` is unaffected - the
+   rule only ever raises a size, never lowers one - and a component
+   whose class is fixed at the source no longer needs this rule at
+   all. It is deliberately last in the file so that it wins against
+   the Tailwind utilities it overrides, which are emitted above it.
+   ============================================================= */
+
+.text-\[9px\],
+.text-\[10px\],
+.text-\[11px\] {
+  font-size: 0.75rem;
+}

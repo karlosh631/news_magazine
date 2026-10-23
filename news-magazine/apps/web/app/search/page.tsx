@@ -5,6 +5,7 @@ import { ImagelessGrid } from "@/components/ImagelessGrid";
 import { ResurrectionNotice } from "@/components/ResurrectionNotice";
 import { searchArticles, toCardArticle } from "@/lib/news";
 import { triggerResurrection } from "@/lib/resurrection";
+import { SITE_NAME, SITE_URL, jsonLd } from "@/lib/site";
 
 export const dynamic = "force-dynamic";
 
@@ -19,15 +20,107 @@ export const dynamic = "force-dynamic";
  * crawled, the noindex has to come from a meta robots tag.
  *
  * follow stays true so the links inside still pass authority onward.
+ *
+ * GOOGLEBOT IS TOLD SEPARATELY
+ * -----------------------------
+ * The layout declares a robots directive for Google as well as for
+ * everyone else, and a page's own robots directive REPLACES the
+ * layout's rather than merging with it — so on this page the
+ * `googlebot` tag was not inherited, and only the general one was
+ * left saying noindex. That happens to be the right answer, but it
+ * was right by accident. Both are stated here so that the page
+ * cannot become indexable for Google by a change in the layout.
+ *
+ * THE CANONICAL
+ * -------------
+ * The layout's canonical is the homepage's address, and this page
+ * inherited it: every query string claimed the homepage as its
+ * canonical URL. A canonical link says "the real version of this
+ * page is over there", and for a noindex page that is a
+ * contradiction — the page asks not to be indexed and then asks to
+ * be indexed AS the homepage. It points at itself instead.
  */
-export const metadata: Metadata = {
-  title: "Search",
-  robots: { index: false, follow: true },
-};
+export async function generateMetadata({
+  searchParams,
+}: {
+  searchParams: Promise<{ q?: string }>;
+}): Promise<Metadata> {
+  const { q } = (await searchParams) ?? {};
+  const hasQuery = Boolean(q && q.trim().length > 0);
+
+  // THE EMPTY SEARCH PAGE IS A DIFFERENT PAGE
+  // -----------------------------------------
+  // `/search` on its own is a real page: it has a heading, it explains
+  // what the site searches, and it is the way in to every story. It is
+  // indexable, and it says so. `/search?q=...` is a RESULT, not a page,
+  // and results are not indexed - so the directive is decided by
+  // whether there is a query.
+  return {
+    title: hasQuery ? `Search: ${q}` : "Search",
+    alternates: { canonical: "/search" },
+    robots: hasQuery
+      ? {
+          index: false,
+          follow: true,
+          googleBot: { index: false, follow: true },
+        }
+      : {
+          index: true,
+          follow: true,
+          googleBot: { index: true, follow: true },
+        },
+  };
+}
 
 const PAGE_SIZE = 12;
 
 type SearchParams = Promise<{ q?: string; page?: string }>;
+
+/**
+ * What this page IS, for a machine.
+ *
+ * A search results page is its own type, and saying so is what tells
+ * a crawler that the list under the search box is the answer to a
+ * question rather than a page of ordinary stories. The site already
+ * describes itself this way on the homepage and on the category
+ * pages; this page was the one that said nothing.
+ *
+ * The SearchAction below is not decoration: it names the search box
+ * that produced the results, and its target is this site's own
+ * search - `/search?q=`, which is what the header's search box and
+ * the search page itself use.
+ *
+ * jsonLd() escapes `<`, so a query containing `</script>` cannot
+ * close this element early and inject markup.
+ */
+function SearchStructuredData({ name }: { name: string }) {
+  return (
+    <script
+      type="application/ld+json"
+      dangerouslySetInnerHTML={{
+        __html: jsonLd({
+          "@context": "https://schema.org",
+          "@type": "SearchResultsPage",
+          name,
+          url: `${SITE_URL}/search`,
+          isPartOf: {
+            "@type": "WebSite",
+            name: SITE_NAME,
+            url: SITE_URL,
+          },
+          potentialAction: {
+            "@type": "SearchAction",
+            target: {
+              "@type": "EntryPoint",
+              urlTemplate: `${SITE_URL}/search?q={search_term_string}`,
+            },
+            "query-input": "required name=search_term_string",
+          },
+        }),
+      }}
+    />
+  );
+}
 
 /**
  * Search results page.
@@ -53,6 +146,7 @@ export default async function SearchPage({ searchParams }: { searchParams: Searc
   if (!query) {
     return (
       <main className="mx-auto max-w-7xl px-4 py-8">
+        <SearchStructuredData name="Search news" />
         <h1 className="mb-6 text-2xl font-bold text-gray-900">Search news</h1>
         <EmptyState
           title="Search across every outlet"
@@ -67,6 +161,7 @@ export default async function SearchPage({ searchParams }: { searchParams: Searc
   if (result.error) {
     return (
       <main className="mx-auto max-w-7xl px-4 py-8">
+        <SearchStructuredData name={`Results for “${query}”`} />
         <h1 className="mb-2 text-2xl font-bold text-gray-900">
           Results for “{query}”
         </h1>
@@ -104,6 +199,7 @@ export default async function SearchPage({ searchParams }: { searchParams: Searc
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-8">
+      <SearchStructuredData name={`Results for “${query}”`} />
       <header className="mb-6 border-b pb-5">
         <span className="text-xs font-semibold uppercase tracking-wider text-blue-600">
           Search
@@ -138,7 +234,17 @@ export default async function SearchPage({ searchParams }: { searchParams: Searc
                   key={page}
                   href={`/search?q=${encodeURIComponent(query)}&page=${page}`}
                   aria-current={page === safePage ? "page" : undefined}
-                  className={`rounded px-3 py-1.5 text-sm font-medium transition ${
+                  /*
+                    48 pixels tall.
+
+                    A page number is a number in a box, and the box
+                    was as tall as the number - 32 pixels, with the
+                    next box eight pixels away. A finger going for
+                    page 3 could land on page 2 instead. The padding
+                    is what turns a row of digits into a row of
+                    buttons.
+                  */
+                  className={`inline-flex min-h-[48px] min-w-[48px] items-center justify-center rounded px-3 text-sm font-medium transition ${
                     page === safePage
                       ? "bg-gray-900 text-white"
                       : "text-gray-600 hover:bg-gray-100"

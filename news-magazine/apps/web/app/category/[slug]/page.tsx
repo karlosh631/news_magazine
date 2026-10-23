@@ -13,7 +13,7 @@ import {
 } from "@/lib/daily-info";
 import { getCategories, getLatestArticles } from "@/lib/news";
 import { getReels } from "@/lib/reels";
-import { SITE_NAME, SITE_URL } from "@/lib/site";
+import { SITE_NAME, SITE_URL, jsonLd } from "@/lib/site";
 
 export const dynamic = "force-dynamic";
 
@@ -140,9 +140,56 @@ export default async function CategoryPage({ params, searchParams }: Props) {
       getRashifalFor(date),
     ]);
 
+    /*
+      WHAT THIS PAGE IS, FOR A MACHINE
+      ---------------------------------
+      The almanac is a collection: the five limbs of the panchang for
+      one day, and then the twelve horoscopes for that day. A
+      CollectionPage says that, and the ItemList inside it names the
+      twelve signs the page actually carries - no more, no fewer.
+
+      It matters here more than on the other category pages, because
+      this route returns before the feed that emits the other
+      category pages' JSON-LD ever runs. Without this block the
+      page says nothing at all about what it holds.
+
+      Everything in it is something the page shows: the title is the
+      heading above, the date is the day being shown, and the twelve
+      names are the twelve signs the worker stored. Nothing is
+      invented, and the canonical URL is the one the category's own
+      metadata declares.
+    */
+    const pageTitle =
+      date === today ? "आजको पञ्चाङ र राशिफल" : `पञ्चाङ र राशिफल — ${date}`;
+
     return (
       <main className="min-h-screen">
         <section className="mx-auto w-full max-w-3xl px-4 py-8 sm:px-6 lg:px-8">
+          <script
+            type="application/ld+json"
+            dangerouslySetInnerHTML={{
+              __html: jsonLd({
+                "@context": "https://schema.org",
+                "@type": "CollectionPage",
+                name: pageTitle,
+                url: `${SITE_URL}/category/rashifal`,
+                datePublished: date,
+                isPartOf: {
+                  "@type": "WebSite",
+                  name: SITE_NAME,
+                  url: SITE_URL,
+                },
+                mainEntity: {
+                  "@type": "ItemList",
+                  itemListElement: signs.map((sign, index) => ({
+                    "@type": "ListItem",
+                    position: index + 1,
+                    name: sign.nameNe ?? sign.name ?? `Sign ${sign.sign}`,
+                  })),
+                },
+              }),
+            }}
+          />
           {/*
             The page's name.
 
@@ -153,11 +200,7 @@ export default async function CategoryPage({ params, searchParams }: Props) {
             so the reader sees the same page and the machine gets a
             heading.
           */}
-          <h1 className="sr-only">
-            {date === today
-              ? "आजको पञ्चाङ र राशिफल"
-              : `पञ्चाङ र राशिफल — ${date}`}
-          </h1>
+          <h1 className="sr-only">{pageTitle}</h1>
           <PanchangPanel
             panchang={panchang}
             signs={signs}
@@ -171,7 +214,7 @@ export default async function CategoryPage({ params, searchParams }: Props) {
             weekdayNe=""
           />
           {panchang?.sourceUrl ? (
-            <p className="mt-4 text-[11px] text-gray-400 dark:text-gray-500">
+            <p className="mt-4 text-xs text-gray-400 dark:text-gray-500">
               Source:{" "}
               <a
                 href={panchang.sourceUrl}

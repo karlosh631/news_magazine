@@ -797,6 +797,53 @@ left behind by an older build. `apps/ingestion/scripts/refresh_images.py`
 walks them newest first, and the **Refresh images** workflow runs it —
 on a schedule, or from the button.
 
+**AND A PROXY IS OPENED, NOT THROWN AWAY.** Kathmandu Post serves its
+body pictures through `assets-api.../thumb.php?src=<the real file>`.
+A proxy is a downscaled copy of somebody else's file, so the proxy
+itself is never stored — but the file behind it is the story's own, at
+full size, on the publisher's own host, and dropping the proxy used to
+throw the photograph away with it. So `unwrap_resizer` opens the proxy
+and keeps what is inside. The story keeps its picture, at the size it
+was published.
+
+**AND A ROW WHOSE PICTURE IS PROVABLY WRONG IS FOUND AND FIXED.** The
+marker says a picture was confirmed against the story's own page. For
+the rows an older build wrote, that marker is a lie and there is no way
+to tell from the row alone — so two cheap signals do tell:
+
+- **the stored picture is a proxy.** The current code never stores one,
+  so a stored proxy is proof the row predates the rule;
+- **the stored picture is on more than one story.** A photograph that
+  belongs to one story does not belong to two.
+
+`apps/ingestion/scripts/fix_wrong_images.py` finds both, fetches each
+suspect's own page, asks the repo's own extractor what that page
+offers as the story's picture, and replaces the picture when the page
+proves a different one. A page that cannot be read is **not** evidence
+that the picture is wrong, so those rows are left exactly as they are.
+The **Refresh images** workflow runs it after the backlog pass.
+
+### The page must not move under the reader
+
+The confirmation rule is applied **before the feed is sliced**, on the
+server, in the same place the other three passes run. That ordering is
+not cosmetic:
+
+- the server fetches far more rows than it shows, so that the ones a
+  filter throws away leave room for the ones further down. The
+  confirmation pass was running *after* the slice, so the slots were
+  gone before it saw them — and the homepage painted **one** story
+  instead of twenty-four, because twenty-three of the newest rows had
+  not been confirmed;
+- the server and the browser then disagreed about what the feed was,
+  and the browser's first poll filled the page in under the reader. The
+  footer, which had been sitting at the top of the screen, jumped two
+  thousand pixels down: a layout shift of **0.23** on a phone.
+
+With the rule before the slice, the server's first paint is the list
+the browser's first poll produces, so the first poll changes nothing.
+Measured on the homepage, mobile and desktop: **CLS 0.0000**.
+
 ### A story with no picture
 
 A card with no picture used to show a grey panel that said "No image
@@ -929,10 +976,59 @@ the port.
 
 #### The worker must be redeployed when the code changes
 
-A Render service redeploys when you push, if it is set to. Check it
+A Render service redeploys when you push, **if it is set to**. Check it
 has: the dashboard's "last poll" times are the proof, and an outlet
 whose error is `KeyError: 'date'` — a line that no longer exists in
 the tree — is a worker running old code.
+
+**The health endpoint now answers the question directly.** It reports
+the commit the deployment is running:
+
+```bash
+curl -s https://news-ingestion-service.onrender.com/api/health
+# {"status":"ok", ... ,"deployed_commit":"fab88c6...","deployed_branch":"main"}
+
+git rev-parse HEAD
+```
+
+If the two do not agree, the worker is running old code — and that is
+how the confirmation marker stopped being written, which is how the
+homepage ended up painting one story instead of twenty-four.
+
+**If the service does not redeploy on a push, redeploy it by hand.**
+Render's dashboard has a **Deploy Hook** for the service
+(`https://api.render.com/deploy/srv-…?key=…`); a POST to it starts a
+deploy:
+
+```bash
+curl -X POST "https://api.render.com/deploy/srv-…?key=…"
+```
+
+Keep that URL out of the repository — it is a credential, and it can
+start a deploy of the worker.
+
+### The operator's job, in one list
+
+The pipeline is automatic. These four things are the operator's, and
+none of them can be done from inside a deployment:
+
+1. **Stop the worker on the laptop** when the hosted one is doing the
+   job. A second worker asks every publisher twice as often, which is
+   how publishers start refusing with 403 — and it writes with whatever
+   code the laptop was running when it started.
+2. **Redeploy the worker** after every change to `apps/ingestion`
+   (see above). A worker running old code keeps writing rows the new
+   code would have written differently.
+3. **Rotate the admin password** after any change to the admin panel:
+
+   ```bash
+   node scripts/hash-admin-password.mjs "<16 or more characters>"
+   ```
+
+   and run the SQL it prints. The seeded operator's hash is in
+   migration 0017, which is in a public repository, and PBKDF2 at
+   210,000 iterations is recoverable offline by anybody with it.
+4. **Apply the migrations** — `supabase db push`, or the SQL by hand.
 
 ### Environment
 

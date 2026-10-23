@@ -62,7 +62,17 @@ export async function generateMetadata({ params }: Props2): Promise<Metadata> {
     article.image_verified_at === null
       ? undefined
       : article.image_highres_url ?? article.featured_image_url ?? undefined;
-  const description = clampDescription(article.excerpt ?? article.subtitle);
+  const description =
+    clampDescription(article.excerpt ?? article.subtitle) ||
+    // A story with no excerpt is still a story, and a page with no
+    // description is a page a crawler cannot summarise. The key points
+    // are the outlet's own sentences about the story, so they are the
+    // best thing to say about it; failing that, the headline and the
+    // outlet it came from.
+    clampDescription(
+      (article.summary_points ?? []).join(" ") ||
+        `${article.headline} — ${article.source_name_snapshot ?? SITE_NAME}`
+    );
   const url = `${SITE_URL}/article/${article.slug}`;
 
   return {
@@ -267,7 +277,13 @@ export default async function ArticlePage({ params }: Props) {
             <div className="mb-4">
               <Link
                 href={`/category/${category.slug}`}
-                className="text-sm font-semibold uppercase tracking-wide text-blue-600 hover:underline"
+                /*
+                  The category label is a link a finger has to hit,
+                  and it was the height of a line of capital letters -
+                  about 19 pixels. The padding makes it the 48-pixel
+                  target every other control on the site is.
+                */
+                className="inline-flex min-h-[48px] items-center text-sm font-semibold uppercase tracking-wide text-blue-600 hover:underline"
               >
                 {categoryName}
               </Link>

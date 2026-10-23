@@ -297,7 +297,7 @@ export function Header({ categories }: { categories: NavCategory[] }) {
               doRefresh();
             }
           }}
-          className="flex shrink-0 items-center gap-2 font-bold text-gray-900 transition hover:text-blue-600 sm:text-xl"
+          className="flex min-h-[48px] shrink-0 items-center gap-2 font-bold text-gray-900 transition hover:text-blue-600 sm:text-xl"
         >
           <LogoIcon />
           <span className="truncate">NEWS</span>
@@ -311,7 +311,7 @@ export function Header({ categories }: { categories: NavCategory[] }) {
               <Link
                 key={cat.slug}
                 href={href}
-                className={`whitespace-nowrap rounded-md px-3 py-2 text-sm font-medium transition ${
+                className={`inline-flex min-h-[48px] items-center whitespace-nowrap rounded-md px-3 text-sm font-medium transition ${
                   isActive
                     ? "bg-gray-900 text-white"
                     : "text-gray-700 hover:bg-gray-100 hover:text-black"
@@ -323,6 +323,22 @@ export function Header({ categories }: { categories: NavCategory[] }) {
           })}
         </nav>
 
+        {/*
+          THE CONTROLS ARE 48 PIXELS TALL
+          --------------------------------
+          Every control here is something a finger has to hit on a
+          phone: the language toggle, the theme toggle, the refresh
+          button, the menu button and the search box. They used to be
+          `h-9` - 36 pixels - which is smaller than the 48 CSS pixels
+          Google's own guidance asks for, and smaller than the finger
+          that has to land on them.
+
+          The header row is 64 pixels tall (`h-16`), so a 48-pixel
+          control still has 8 pixels of air above and below it and
+          the header does not grow. The nav links got the same
+          treatment for the same reason: they are the one thing on
+          every page that a reader taps to move.
+        */}
         <div className="flex items-center gap-2">
           <form onSubmit={handleSearchSubmit} className="hidden sm:block">
             <input
@@ -353,7 +369,7 @@ export function Header({ categories }: { categories: NavCategory[] }) {
                 setSearchQuery(e.target.value);
                 if (e.target.value.trim()) setSearchOpen(true);
               }}
-              className="h-9 w-40 rounded-md border border-gray-300 px-3 text-xs outline-none transition focus:w-56 focus:border-black focus:ring-1 focus:ring-black"
+              className="h-12 w-40 rounded-md border border-gray-300 px-3 text-xs outline-none transition focus:w-56 focus:border-black focus:ring-1 focus:ring-black"
             />
           </form>
 
@@ -361,7 +377,7 @@ export function Header({ categories }: { categories: NavCategory[] }) {
             type="button"
             onClick={toggleLanguage}
             aria-label="Toggle Nepali and English labels"
-            className="h-9 min-w-9 rounded-md border border-gray-300 px-2 text-xs font-semibold text-gray-700 hover:bg-gray-100"
+            className="flex h-12 min-w-12 items-center justify-center rounded-md border border-gray-300 px-3 text-xs font-semibold text-gray-700 hover:bg-gray-100"
           >
             {language === "en" ? "ने" : "EN"}
           </button>
@@ -372,7 +388,7 @@ export function Header({ categories }: { categories: NavCategory[] }) {
             type="button"
             onClick={doRefresh}
             aria-label="Fetch the latest news and refresh the feed"
-            className="flex h-9 w-9 items-center justify-center rounded-full border border-gray-300 text-gray-700 transition hover:border-black hover:bg-gray-900 hover:text-white active:scale-95"
+            className="flex h-12 w-12 items-center justify-center rounded-full border border-gray-300 text-gray-700 transition hover:border-black hover:bg-gray-900 hover:text-white active:scale-95"
           >
             <ReloadIcon spinning={reloading} />
           </button>
@@ -382,7 +398,7 @@ export function Header({ categories }: { categories: NavCategory[] }) {
             onClick={() => setMenuOpen((v) => !v)}
             aria-label="Toggle menu"
             aria-expanded={menuOpen}
-            className="flex h-9 w-9 items-center justify-center rounded-md border border-gray-300 text-gray-700 transition hover:bg-gray-100 md:hidden"
+            className="flex h-12 w-12 items-center justify-center rounded-md border border-gray-300 text-gray-700 transition hover:bg-gray-100 md:hidden"
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
               {menuOpen ? (
@@ -418,7 +434,7 @@ export function Header({ categories }: { categories: NavCategory[] }) {
                 setSearchQuery(e.target.value);
                 if (e.target.value.trim()) setSearchOpen(true);
               }}
-              className="h-9 w-full rounded-md border border-gray-300 px-3 text-sm outline-none focus:border-black focus:ring-1 focus:ring-black"
+              className="h-12 w-full rounded-md border border-gray-300 px-3 text-sm outline-none focus:border-black focus:ring-1 focus:ring-black"
             />
           </form>
 
@@ -430,7 +446,7 @@ export function Header({ categories }: { categories: NavCategory[] }) {
                 key={cat.slug}
                 href={href}
                 onClick={() => setMenuOpen(false)}
-                className={`whitespace-nowrap rounded-md px-3 py-2 text-sm font-medium transition ${
+                className={`inline-flex min-h-[48px] items-center whitespace-nowrap rounded-md px-3 text-sm font-medium transition ${
                   isActive
                     ? "bg-gray-900 text-white"
                     : "text-gray-700 hover:bg-gray-100"

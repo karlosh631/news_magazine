@@ -1004,13 +1004,16 @@ export function ReelsFeed({
             // controls to a screen reader.
             aria-label="Auto-scrolling news columns"
             aria-pressed={driftPaused}
-            // `text-gray-600`, not `text-gray-500`: the button is 11px,
+            // `text-gray-600`, not `text-gray-500`: the button is 12px,
             // and at that size the WCAG AA threshold is 4.5:1 rather than
             // the 3:1 that large text gets. Grey-500 on the white/90
             // pill measured 3.87:1 — a real failure, caught by axe-core
             // as `color-contrast`. Grey-600 measures 6.05:1 over the
             // same composite.
-            className="absolute bottom-4 left-1/2 hidden -translate-x-1/2 rounded-full border border-gray-200 bg-white/90 px-3 py-1.5 text-[11px] font-medium uppercase tracking-wider text-gray-600 shadow-sm backdrop-blur transition-colors hover:text-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 lg:inline-flex"
+            //
+            // 48 pixels tall, like the other controls: it is a button a
+            // finger has to hit, and it used to be 32.
+            className="absolute bottom-4 left-1/2 hidden min-h-[48px] -translate-x-1/2 items-center rounded-full border border-gray-200 bg-white/90 px-3 text-xs font-medium uppercase tracking-wider text-gray-600 shadow-sm backdrop-blur transition-colors hover:text-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 lg:inline-flex"
           >
             {driftPaused ? "Resume news" : "Pause news"}
           </button>

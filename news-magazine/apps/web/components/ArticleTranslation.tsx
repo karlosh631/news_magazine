@@ -209,7 +209,12 @@ export function ArticleTranslation({
               <li key={index} className="flex gap-2.5">
                 <span
                   aria-hidden="true"
-                  className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-blue-600 text-[10px] font-bold text-white"
+                  /*
+                    The number in the circle. 12 pixels, like every
+                    other piece of text on the site - it was 10, which
+                    is below what Lighthouse counts as legible.
+                  */
+                  className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white"
                 >
                   {index + 1}
                 </span>

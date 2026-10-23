@@ -132,7 +132,7 @@ export function PanchangPanel({
           <h3 className="text-sm font-bold text-gray-900 dark:text-gray-100">
             {isToday ? "आजको राशिफल" : "राशिफल"}
           </h3>
-          <p className="text-[11px] text-gray-400 dark:text-gray-500">
+          <p className="text-xs text-gray-400 dark:text-gray-500">
             the horoscope, for every sign
           </p>
           <ul className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -156,13 +156,13 @@ export function PanchangPanel({
                     </span>
                   </div>
                   {sign.name ? (
-                    <span className="text-[11px] text-gray-400 dark:text-gray-500">
+                    <span className="text-xs text-gray-400 dark:text-gray-500">
                       {sign.name}
                     </span>
                   ) : null}
                 </div>
                 {sign.initials ? (
-                  <p className="mt-1 text-[11px] text-gray-400 dark:text-gray-500">
+                  <p className="mt-1 text-xs text-gray-400 dark:text-gray-500">
                     {sign.initials}
                   </p>
                 ) : null}
@@ -172,7 +172,7 @@ export function PanchangPanel({
                   </p>
                 ) : null}
                 {sign.luckyColour || sign.luckyNumber ? (
-                  <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
+                  <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
                     {sign.luckyColour ? (
                       <>
                         <span className="sr-only">Lucky colour: </span>
@@ -249,7 +249,21 @@ function DayPicker({
             href={`/category/rashifal?date=${day.date}`}
             scroll={false}
             aria-current={active ? "date" : undefined}
-            className={`shrink-0 rounded-lg border px-3 py-2 text-center transition-colors ${
+            /*
+              48 pixels tall, and centred inside.
+
+              The day strip is a row of small boxes that a finger has
+              to pick from - the one control on this page that is
+              genuinely touched - and at the size it was (two short
+              lines of text, about 44 pixels) a mis-tap picked the
+              wrong day, which is a day of the wrong horoscope.
+
+              The Bikram Sambat date under the day number used to be
+              10 pixels, which is below what Lighthouse counts as
+              legible and below what the rest of the site's captions
+              are set at.
+            */
+            className={`flex min-h-[48px] shrink-0 flex-col items-center justify-center rounded-lg border px-3 text-center transition-colors ${
               active
                 ? "border-blue-600 bg-blue-600 text-white"
                 : "border-gray-200 bg-white text-gray-700 hover:border-gray-400 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:border-gray-500"
@@ -259,7 +273,7 @@ function DayPicker({
               {isToday ? "आज" : dayNumber}
             </span>
             <span
-              className={`mt-0.5 block text-[10px] ${
+              className={`mt-0.5 block text-xs ${
                 active
                   ? "text-blue-50"
                   : "text-gray-400 dark:text-gray-500"
@@ -296,7 +310,7 @@ function withoutLuckySentence(advice: string): string {
 function Limb({ label, value }: { label: string; value: string | null }) {
   return (
     <div>
-      <dt className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">
+      <dt className="text-xs font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">
         {label}
       </dt>
       <dd className="mt-0.5 text-sm font-medium text-gray-900 dark:text-gray-100">
@@ -322,7 +336,7 @@ function WindowList({
       <h3 className="text-sm font-bold text-gray-900 dark:text-gray-100">
         {title}
       </h3>
-      <p className="text-[11px] text-gray-400 dark:text-gray-500">{subtitle}</p>
+      <p className="text-xs text-gray-400 dark:text-gray-500">{subtitle}</p>
       {entries.length ? (
         <ul className="mt-3 space-y-1.5">
           {entries.map((entry, index) => (

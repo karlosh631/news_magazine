@@ -337,7 +337,13 @@ export function StoryDialog({
             type="button"
             onClick={onClose}
             aria-label="Close story"
-            className="shrink-0 rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 dark:hover:bg-gray-800 dark:hover:text-gray-200"
+            /*
+              48 pixels, like every other control on the site. The
+              cross used to be the size of the cross - 36 pixels with
+              the padding - which is a target for a thumb, not a
+              finger.
+            */
+            className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg text-gray-400 transition hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 dark:hover:bg-gray-800 dark:hover:text-gray-200"
           >
             <span aria-hidden="true" className="block text-xl leading-none">
               ×
@@ -383,7 +389,7 @@ export function StoryDialog({
             */}
             <Link
               href={`/article/${article.slug}`}
-              className="inline-flex min-h-[44px] items-center rounded-lg border-2 border-blue-600 bg-blue-50 px-4 text-sm font-semibold text-blue-800 transition hover:bg-blue-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-2 dark:border-blue-500 dark:bg-blue-950/50 dark:text-blue-200 dark:hover:bg-blue-900/50"
+              className="inline-flex min-h-[48px] items-center rounded-lg border-2 border-blue-600 bg-blue-50 px-4 text-sm font-semibold text-blue-800 transition hover:bg-blue-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-2 dark:border-blue-500 dark:bg-blue-950/50 dark:text-blue-200 dark:hover:bg-blue-900/50"
             >
               Open the full page
             </Link>
@@ -393,7 +399,7 @@ export function StoryDialog({
                 href={article.source_article_url}
                 target="_blank"
                 rel="noopener noreferrer nofollow"
-                className="inline-flex min-h-[44px] items-center rounded-lg border border-gray-300 px-4 text-sm font-semibold text-gray-700 transition hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-2 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
+                className="inline-flex min-h-[48px] items-center rounded-lg border border-gray-300 px-4 text-sm font-semibold text-gray-700 transition hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-2 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
               >
                 Read the full story on{" "}
                 {article.source_name_snapshot ?? "the original source"} ↗

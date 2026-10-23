@@ -484,8 +484,13 @@ export function ReelCard({
   const provider = providerLabel(reel.source_key);
 
   // Overlay button styling, repeated so each control is self-describing.
+  //
+  // 48 pixels, like every other control on the site. At 44 the
+  // sound, like and share buttons were a finger-width smaller than
+  // the finger that has to hit them, and they sit close enough
+  // together that a mis-tap changed the volume instead of the like.
   const control =
-    "pointer-events-auto flex h-11 w-11 items-center justify-center rounded-full bg-black/50 text-white backdrop-blur transition hover:bg-black/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-black/40";
+    "pointer-events-auto flex h-12 w-12 items-center justify-center rounded-full bg-black/50 text-white backdrop-blur transition hover:bg-black/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-black/40";
 
   return (
     <div
@@ -656,7 +661,7 @@ export function ReelCard({
       <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-start justify-between gap-2 p-2">
         <div className="flex flex-wrap items-center gap-1.5">
           {duration && (
-            <span className="pointer-events-none rounded bg-black/60 px-2 py-1 text-[11px] font-medium tabular-nums text-white backdrop-blur">
+            <span className="pointer-events-none rounded bg-black/60 px-2 py-1 text-xs font-medium tabular-nums text-white backdrop-blur">
               {duration}
             </span>
           )}
@@ -667,7 +672,7 @@ export function ReelCard({
             does not do.
           */}
           {provider && (
-            <span className="pointer-events-none rounded bg-black/60 px-2 py-1 text-[11px] font-medium text-white/90 backdrop-blur">
+            <span className="pointer-events-none rounded bg-black/60 px-2 py-1 text-xs font-medium text-white/90 backdrop-blur">
               {provider}
             </span>
           )}
@@ -736,7 +741,7 @@ export function ReelCard({
           pointer-events-none; only the actual controls take taps, so the
           rest of the surface still reaches the video. */}
       <div className="pointer-events-none absolute inset-x-0 bottom-0 z-30 flex flex-col gap-2 bg-gradient-to-t from-black/90 via-black/60 to-transparent p-3">
-        <div className="pointer-events-auto flex items-center gap-2">
+        <div className="pointer-events-auto flex items-center gap-4">
           <button
             type="button"
             onClick={toggleLike}
@@ -798,7 +803,7 @@ export function ReelCard({
         */}
         <details className="group/details pointer-events-auto">
           <summary
-            className="flex min-h-[44px] cursor-pointer list-none items-center justify-between gap-2 rounded px-2 text-xs font-medium uppercase tracking-wider text-white/85 transition hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white [&::-webkit-details-marker]:hidden"
+            className="flex min-h-[48px] cursor-pointer list-none items-center justify-between gap-2 rounded px-2 text-xs font-medium uppercase tracking-wider text-white/85 transition hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white [&::-webkit-details-marker]:hidden"
           >
             <span>Details</span>
             <svg
@@ -819,16 +824,36 @@ export function ReelCard({
             </svg>
           </summary>
 
-          <div className="space-y-1.5 pb-1 pt-1 text-xs leading-relaxed text-white/90">
+          {/*
+            THE CREDIT
+
+            Three links, and every one of them is something a finger
+            has to hit: the uploader's name, the licence, and the
+            place the clip came from.
+
+            They were lines of 16-pixel text a few pixels apart, which
+            is the arrangement Lighthouse's tap-target audit calls a
+            failure - a finger aimed at the licence lands on the
+            uploader - and it is the arrangement WCAG's target-size
+            rule was written about.
+
+            So each link is a 48-pixel row, and the rows are 16
+            pixels apart, which leaves the space a finger needs
+            between them. The credit panel is taller than it was; it
+            is also the one part of a reel that a publisher's terms
+            require to be readable, and it is behind a disclosure
+            that the reader opens on purpose.
+          */}
+          <div className="space-y-4 pb-1 pt-1 text-xs leading-relaxed text-white/90">
             {reel.creator_name ? (
-              <p>
-                <span className="text-white/60">By </span>
+              <p className="flex items-center gap-2">
+                <span className="shrink-0 text-white/60">By</span>
                 {reel.creator_url ? (
                   <a
                     href={reel.creator_url}
                     target="_blank"
                     rel="noopener noreferrer nofollow"
-                    className="underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+                    className="inline-flex min-h-[48px] items-center underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
                   >
                     {reel.creator_name}
                   </a>
@@ -843,14 +868,14 @@ export function ReelCard({
             )}
 
             {reel.license_name && (
-              <p>
-                <span className="text-white/60">Licence </span>
+              <p className="flex items-center gap-2">
+                <span className="shrink-0 text-white/60">Licence</span>
                 {reel.license_url ? (
                   <a
                     href={reel.license_url}
                     target="_blank"
                     rel="noopener noreferrer nofollow"
-                    className="underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+                    className="inline-flex min-h-[48px] items-center underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
                   >
                     {reel.license_name}
                   </a>
@@ -864,7 +889,7 @@ export function ReelCard({
               href={`${SITE_URL}/category/reels`}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-block underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+              className="inline-flex min-h-[48px] items-center underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
             >
               Watch on source
             </a>

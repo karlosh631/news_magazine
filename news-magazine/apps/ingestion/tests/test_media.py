@@ -46,6 +46,7 @@ from app.sources.media import (
     extract_from_article,
     resolve_live_image,
     strip_size_suffix,
+    unwrap_resizer,
     upgrade_to_highres,
 )
 
@@ -707,6 +708,94 @@ def test_best_image_prefers_the_page_image_when_both_are_real():
     assert best_image("https://cdn.example.com/feed.jpg", page) == (
         "https://cdn.example.com/og.jpg"
     )
+
+
+# =============================================================
+# Opening the proxy
+#
+# A resizer is a proxy for somebody else's file: the file itself lives
+# on the publisher's own host, at full size, and the proxy serves a
+# downscaled copy of it. Dropping the proxy - which is what the code
+# used to do - threw the photograph away with it, and the story was
+# left with no picture even though the picture was right there in the
+# URL.
+# =============================================================
+
+def test_unwrap_resizer_returns_the_file_behind_the_proxy():
+    assert unwrap_resizer(
+        "https://assets-api.kathmandupost.com/thumb.php?src="
+        "https://assets-cdn.kathmandupost.com/uploads/source/news/2026/world/a.jpg"
+        "&w=300&height=200"
+    ) == (
+        "https://assets-cdn.kathmandupost.com/uploads/source/news/2026/world/a.jpg"
+    )
+
+
+def test_unwrap_resizer_handles_a_percent_encoded_file():
+    """
+    A resizer given a URL with a query of its own percent-encodes it.
+    Leaving it encoded points at a file that does not exist.
+    """
+    assert unwrap_resizer(
+        "https://wsrv.nl/?url=https%3A%2F%2Fcdn.test%2Fa.jpg%3Fw%3D300"
+    ) == "https://cdn.test/a.jpg?w=300"
+
+
+def test_unwrap_resizer_has_nothing_to_open():
+    assert unwrap_resizer("https://cdn.example.com/a.jpg") is None
+    assert unwrap_resizer("https://wsrv.nl/?url=not-a-url") is None
+    assert unwrap_resizer(None) is None
+
+
+def test_candidates_keep_the_file_behind_a_proxy():
+    """
+    The proxy is dropped and the photograph is kept.
+    """
+    page = ExtractedMedia(
+        image_url="https://assets-api.kathmandupost.com/thumb.php?src=https://cdn.test/a.jpg",
+        image_candidates=[
+            "https://assets-api.kathmandupost.com/thumb.php?src=https://cdn.test/a.jpg",
+        ],
+    )
+    assert candidate_images(None, page) == ["https://cdn.test/a.jpg"]
+
+
+def test_candidates_still_drop_a_proxy_with_nothing_behind_it():
+    page = ExtractedMedia(
+        image_url="https://assets-api.kathmandupost.com/thumb.php?src=x",
+        image_candidates=["https://assets-api.kathmandupost.com/thumb.php?src=x"],
+    )
+    assert candidate_images(None, page) == []
+
+
+async def test_the_file_behind_the_proxy_counts_as_the_page_s_own_picture():
+    """
+    The page offers the proxy; the store keeps the file behind it. The
+    picture is still the page's own - the two are the same photograph -
+    so it must still be CONFIRMED, or the story would be stored with no
+    artwork even though its picture was found and proven.
+    """
+    real = "https://cdn.test/story.jpg"
+    proxy = f"https://assets-api.kathmandupost.com/thumb.php?src={real}"
+
+    feed = {"image_url": None}
+    page = ExtractedMedia(
+        image_url=proxy,
+        image_highres_url=proxy,
+        image_candidates=[proxy],
+    )
+    media = merge_media(feed, page)
+
+    async with httpx.AsyncClient(
+        transport=transport({"/story.jpg": build()})
+    ) as client:
+        verified, dropped = await verify_media_images(
+            media, ImageValidator(client), feed, page
+        )
+
+    assert dropped == 0
+    assert verified["image_url"] == real
+    assert verified["image_verified"] is True
 
 
 # =============================================================

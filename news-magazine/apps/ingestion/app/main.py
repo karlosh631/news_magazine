@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -46,6 +47,42 @@ logger = logging.getLogger("main")
 # Set by worker.py so main.py knows a standalone daemon already owns the
 # schedule and this process must not start a second one.
 _WORKER_MODE = False
+
+
+def deployed_commit() -> str | None:
+    """
+    The commit this deployment is running, if the host tells us.
+
+    "Is the worker running the current code?" is the question that
+    matters when a poll fails with an error from a line that no longer
+    exists in the tree - `KeyError: 'date'` was the symptom of a worker
+    that had not been redeployed since the code changed, and it was
+    expensive to diagnose because nothing said which code was running.
+
+    Render sets `RENDER_GIT_COMMIT` for a service deployed from a
+    repository; Vercel sets `VERCEL_GIT_COMMIT_SHA`. Either is enough
+    to compare with `git rev-parse HEAD` and see at a glance whether
+    the running service is the tree.
+    """
+    for name in (
+        "RENDER_GIT_COMMIT",
+        "VERCEL_GIT_COMMIT_SHA",
+        "GIT_COMMIT_SHA",
+        "SOURCE_VERSION",
+    ):
+        value = os.environ.get(name)
+        if value and value.strip():
+            return value.strip()[:40]
+    return None
+
+
+def deployed_branch() -> str | None:
+    """The branch this deployment is running, if the host tells us."""
+    for name in ("RENDER_GIT_BRANCH", "VERCEL_GIT_COMMIT_REF"):
+        value = os.environ.get(name)
+        if value and value.strip():
+            return value.strip()[:120]
+    return None
 
 
 @asynccontextmanager
@@ -110,6 +147,10 @@ async def health():
     """
     settings = get_settings()
     db_detail: str = "ok"
+    build = {
+        "deployed_commit": deployed_commit(),
+        "deployed_branch": deployed_branch(),
+    }
 
     if not settings.supabase_url or not settings.supabase_service_role_key:
         db_detail = "SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set"
@@ -118,6 +159,7 @@ async def health():
             "database": "unconfigured",
             "detail": db_detail,
             "ingestion": "ok",
+            **build,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -132,6 +174,7 @@ async def health():
             "database": "error",
             "detail": db_detail,
             "ingestion": "ok",
+            **build,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -163,6 +206,7 @@ async def health():
         "active_sources": sources_ok,
         "adapters": available_adapters(),
         "ingestion": "ok",
+        **build,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 

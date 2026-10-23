@@ -127,6 +127,7 @@ from app.sources.media import (
     extract_from_article,
     media_client,
     resolve_live_image,
+    unwrap_resizer,
     upgrade_to_highres,
 )
 
@@ -620,6 +621,17 @@ async def verify_media_images(
     page_candidates.update(
         u for u in ((page.image_highres_url, page.image_url) if page else ()) if u
     )
+    # A resizer and the file behind it are THE SAME PICTURE. The page
+    # offers the proxy; the candidate list unwraps it, because the proxy
+    # is a downscaled stand-in and the file behind it is the
+    # full-size original on the origin's own host. Without this, the
+    # picture that was actually proven - the original - would look like
+    # something the page did not offer, and the story would be stored
+    # with no artwork at all.
+    for candidate in list(page_candidates):
+        real = unwrap_resizer(candidate)
+        if real:
+            page_candidates.add(real)
     media["image_verified"] = bool(page_candidates) and live in page_candidates
 
     # gif_url is a separate column and the card walks it last. Keep it

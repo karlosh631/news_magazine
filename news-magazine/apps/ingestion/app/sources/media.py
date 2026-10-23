@@ -37,7 +37,7 @@ import re
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 
@@ -546,6 +546,46 @@ _RESIZER_MARKERS = (
 def _is_resizer(url: str) -> bool:
     lowered = url.lower()
     return any(marker in lowered for marker in _RESIZER_MARKERS)
+
+
+# A resizer that carries the file it is resizing in a query parameter.
+# Kathmandu Post serves every body picture through
+# assets-api.../thumb.php?src=<the real file>, and weserv.nl through
+# ?url=<the real file>.
+_RESIZER_PARAM_RE = re.compile(r"[?&](?:src|url)=([^&]+)", re.IGNORECASE)
+
+
+def unwrap_resizer(url: str | None) -> str | None:
+    """
+    The real file behind a resizer URL, or None if there is not one.
+
+    A resizer is a proxy: `thumb.php?src=<the real file>` serves a
+    downscaled copy of a picture that exists somewhere else, at full
+    size, on its own host. Dropping the resizer - which is what the
+    candidate list does - throws the photograph away with it.
+
+    So the resizer is unwrapped instead. The real file is not a
+    resizer, so it competes on its own merits: it is not penalised for
+    being a proxy, and it is the full-size picture rather than the
+    300-pixel stand-in.
+
+    The inner value is percent-decoded, because a resizer that is given
+    a URL with a query of its own percent-encodes it - and a URL that
+    is left encoded points at a file that does not exist.
+    """
+    if not url:
+        return None
+
+    match = _RESIZER_PARAM_RE.search(url)
+    if not match:
+        return None
+
+    inner = unquote(match.group(1)).strip()
+    if not inner.startswith(("http://", "https://")):
+        return None
+
+    return inner
+
 
 
 def _size_tokens(url: str) -> list[int]:
@@ -1183,12 +1223,17 @@ def candidate_images(feed_url: str | None, page: ExtractedMedia | None) -> list[
     Preferring a real rendition over a stripped guess matters: the
     stripped form is the fallback, not the favourite.
 
-    Resizers and junk are dropped here rather than merely ranked down.
-    A resizer can only return a downscaled version of something else,
-    and because proxy URLs are built from a handful of shared endpoints
-    the same picture used to land on eight unrelated cards. No image
-    beats a downscaled stand-in: the card has an honest "no image
-    available" state and the feed demotes imageless stories.
+    Resizers are unwrapped rather than merely dropped, and junk is
+    dropped outright. A resizer can only return a downscaled version of
+    something else, and because proxy URLs are built from a handful of
+    shared endpoints the same picture used to land on eight unrelated
+    cards - so the proxy itself is never kept. But the photograph
+    behind the proxy is the story's own, at full size, on the origin's
+    host, and dropping the proxy used to throw that photograph away
+    with it. So the proxy is opened and what is inside is kept.
+
+    No image beats a downscaled stand-in: the card has an honest "no
+    image available" state and the feed demotes imageless stories.
     """
     if page is not None and page.image_candidates:
         ranked = list(page.image_candidates)
@@ -1203,7 +1248,17 @@ def candidate_images(feed_url: str | None, page: ExtractedMedia | None) -> list[
     ordered: list[str] = []
 
     def push(url: str) -> None:
-        if not url or _is_resizer(url) or _looks_like_junk_image(url):
+        if not url:
+            return
+        # The proxy is opened FIRST, because the proxy itself is not a
+        # file: `thumb.php` ends in .php, so the "no filename means no
+        # file" rule would throw it away - and with it the photograph.
+        if _is_resizer(url):
+            real = unwrap_resizer(url)
+            if not real:
+                return
+            url = real
+        if _looks_like_junk_image(url):
             return
         if url not in ordered:
             ordered.append(url)

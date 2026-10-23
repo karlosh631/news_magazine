@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef } from "react";
 
 import { formatNewsDate } from "@/lib/date";
+import { collapseRepeatedHeadline } from "@/lib/headline";
 
 /**
  * Search results dropdown.
@@ -125,10 +126,20 @@ export function SearchModal({
   return (
     <div
       ref={rootRef}
-      className="absolute left-0 right-0 top-full z-[63] mt-2 max-h-[70vh] overflow-hidden rounded-xl border border-gray-200 bg-white text-left shadow-2xl dark:border-gray-700 dark:bg-gray-900"
+      /*
+        A SEARCH DROPDOWN, NOT A BANNER.
+
+        It used to be `left-0 right-0`, so it stretched the whole width
+        of the header: a 1,900-pixel-wide panel holding one result, with
+        a vast empty space under it. It is now a panel the width of the
+        thing it belongs to - the input - and no wider than 34rem, so it
+        reads as a menu hanging off the search box rather than as a
+        section of the page that happens to be open.
+      */
+      className="absolute right-0 top-full z-[63] mt-2 max-h-[min(26rem,70vh)] w-[min(34rem,calc(100vw-1.5rem))] overflow-hidden rounded-xl border border-gray-200 bg-white text-left shadow-xl shadow-black/5 dark:border-gray-700 dark:bg-gray-900"
     >
-      <div className="flex items-center justify-between gap-3 border-b border-gray-200 px-5 py-3 dark:border-gray-700">
-        <span className="truncate text-xs font-semibold uppercase tracking-wide text-gray-500">
+      <div className="flex items-center justify-between gap-3 border-b border-gray-100 px-4 py-2 dark:border-gray-800">
+        <span className="truncate text-[11px] font-semibold uppercase tracking-wide text-gray-500">
           {loading
             ? "Searching…"
             : error
@@ -154,7 +165,7 @@ export function SearchModal({
         </button>
       </div>
 
-      <div className="min-h-[6rem] overflow-y-auto px-2 py-2" aria-live="polite">
+      <div className="max-h-[min(21rem,60vh)] overflow-y-auto" aria-live="polite">
         {error && (
           <p className="px-3 py-4 text-sm text-red-700 dark:text-red-400">{error}</p>
         )}
@@ -195,12 +206,12 @@ export function SearchModal({
                     target="_blank"
                     rel="noopener noreferrer"
                     onClick={onClose}
-                    className="block rounded-lg px-3 py-3 transition hover:bg-gray-50 dark:hover:bg-gray-800"
+                    className="block px-4 py-2.5 transition hover:bg-gray-50 dark:hover:bg-gray-800"
                   >
-                    <p className="font-medium leading-snug text-gray-900 dark:text-gray-100">
-                      {source.headline}
+                    <p className="line-clamp-2 text-sm font-medium leading-snug text-gray-900 dark:text-gray-100">
+                      {collapseRepeatedHeadline(source.headline)}
                     </p>
-                    <p className="mt-0.5 text-xs text-gray-500">
+                    <p className="mt-1 text-[11px] text-gray-500">
                       {source.source ?? "External source"}
                       {source.published_at
                         ? ` · ${formatNewsDate(source.published_at)}`
@@ -225,10 +236,10 @@ export function SearchModal({
 
               const body = (
                 <>
-                  <p className="font-medium leading-snug text-gray-900 dark:text-gray-100">
-                    {hit.headline}
+                  <p className="line-clamp-2 text-sm font-medium leading-snug text-gray-900 dark:text-gray-100">
+                    {collapseRepeatedHeadline(hit.headline)}
                   </p>
-                  <p className="mt-0.5 text-xs text-gray-500">
+                  <p className="mt-1 text-[11px] text-gray-500">
                     {hit.source_name_snapshot ?? ""}
                     {hit.published_at
                       ? ` · ${formatNewsDate(hit.published_at)}`
@@ -244,7 +255,7 @@ export function SearchModal({
                     <Link
                       href={href}
                       onClick={onClose}
-                      className="block rounded-lg px-3 py-3 transition hover:bg-gray-50 dark:hover:bg-gray-800"
+                      className="block px-4 py-2.5 transition hover:bg-gray-50 dark:hover:bg-gray-800"
                     >
                       {body}
                     </Link>
@@ -254,7 +265,7 @@ export function SearchModal({
                       target="_blank"
                       rel="noopener noreferrer"
                       onClick={onClose}
-                      className="block rounded-lg px-3 py-3 transition hover:bg-gray-50 dark:hover:bg-gray-800"
+                      className="block px-4 py-2.5 transition hover:bg-gray-50 dark:hover:bg-gray-800"
                     >
                       {body}
                     </a>
@@ -267,7 +278,7 @@ export function SearchModal({
       </div>
 
       {showHits && (
-        <div className="border-t border-gray-200 px-5 py-3 dark:border-gray-700">
+        <div className="border-t border-gray-100 bg-gray-50/60 px-4 py-2.5 dark:border-gray-800 dark:bg-gray-800/40">
           <Link
             href={`/search?q=${encodeURIComponent(query)}`}
             onClick={onClose}

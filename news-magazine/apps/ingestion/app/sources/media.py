@@ -40,6 +40,8 @@ from typing import Any
 from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
+from app.config import get_settings
+from app.sources.reader_proxy import fetch_via_reader
 
 try:
     import trafilatura
@@ -647,6 +649,17 @@ def _parse_dimensions(meta: dict[str, str], prefix: str) -> tuple[int | None, in
     return width, height
 
 
+
+def _is_refused(status: int) -> bool:
+    """
+    Is this a refusal of the ADDRESS rather than a missing page?
+
+    403, 429 and 451 are the ones these publishers use to turn a
+    datacentre address away. 404 is not a refusal: the page is gone,
+    and reading it from somewhere else would only find the same 404.
+    """
+    return status in (401, 403, 405, 406, 407, 429, 451)
+
 def _extract_meta_tags(html: str) -> dict[str, str]:
     """
     Pull every <meta property/name content="..."> into a dict.
@@ -1087,12 +1100,46 @@ async def extract_from_article(
             follow_redirects=True,
         )
 
-        if response.status_code >= 400:
-            logger.debug("media: %s returned %s", url, response.status_code)
-            return result
-
-        html = response.text[:max_bytes]
         final_url = str(response.url)
+        html = ""
+
+        if response.status_code >= 400:
+            if not _is_refused(response.status_code):
+                logger.debug("media: %s returned %s", url, response.status_code)
+                return result
+            # REFUSED, NOT GONE.
+            #
+            # Nine publishers answer this address with a 403 and answer
+            # an ordinary client with a 200: the refusal is aimed at
+            # the address. The page carries the story's own photograph
+            # in its og:image and in its JSON-LD, so reading it from
+            # an address that is not refused is the difference between
+            # a card with the real picture and a card with key points.
+            #
+            # The image itself lives on the publisher's CDN, which
+            # answers us perfectly well - so the picture can still be
+            # proven here, by this worker, once the page is read.
+            logger.info(
+                "media: %s refused this address (%s); reading it through the "
+                "reader.",
+                url[:110],
+                response.status_code,
+            )
+            settings = get_settings()
+            if not settings.reader_proxy_enabled:
+                return result
+            html = (
+                await fetch_via_reader(
+                    url, client, proxy=settings.reader_proxy_url
+                )
+                or ""
+            )
+            if not html:
+                return result
+        else:
+            html = response.text
+
+        html = html[:max_bytes]
         meta = _extract_meta_tags(html)
 
         # ---------------- Image ----------------

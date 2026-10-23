@@ -216,6 +216,61 @@ class Settings(BaseSettings):
     max_article_rows: int = 10_000
 
     # ---------------------------------------------------------
+    # The reader proxy
+    # ---------------------------------------------------------
+    # Nine Nepali publishers answer the CI runner with a 403 and
+    # answer an ordinary client with a 200 - the refusal is aimed at
+    # the ADDRESS, not at the request, and their robots.txt permits
+    # every path we ask for. Those nine contribute nothing, and the
+    # pictures of the stories they published before the refusal
+    # began can never be proven, because the page that declares them
+    # cannot be read from here.
+    #
+    # So when a publisher refuses this address, the page is read
+    # through a reader proxy instead - a service that fetches a public
+    # URL from an address that is not refused and hands back the HTML.
+    # The extraction then runs on the real page, and the picture is
+    # proven by loading the IMAGE, which lives on the publisher's CDN
+    # and answers us perfectly well.
+    #
+    # It is a FALLBACK: the publisher is always asked first. It never
+    # carries a credential, a cookie or a session - the URLs are
+    # public article addresses and nothing else. Set this to false to
+    # turn it off.
+    reader_proxy_enabled: bool = True
+    reader_proxy_url: str = "https://r.jina.ai"
+
+    # ---------------------------------------------------------
+    # Storage pressure
+    # ---------------------------------------------------------
+    # The database must never be the reason the site stops. A free
+    # Supabase project has 500 MB, and a busy news day writes a lot:
+    # one `source_sync_logs` row per outlet per pass, one
+    # `source_errors` row per failure, one `analytics_events` row per
+    # read. Nothing prunes the last two by age, so a year of passes
+    # would fill a database that the news itself would never fill.
+    #
+    # So: the log tables are pruned by age on every pass, and when the
+    # database is at eighty percent of its limit the oldest half of
+    # the articles goes as well. The site keeps running either way —
+    # this is the difference between a small archive and no site.
+    #
+    # The limit is the plan's disk allowance, in bytes. 500 MB is
+    # Supabase's free tier; a paid project has far more, and the
+    # number is one setting away.
+    database_size_limit_bytes: int = 500 * 1024 * 1024
+    # How full the database may get before the emergency prune runs.
+    storage_pressure_threshold: float = 0.8
+    # How much of the oldest material the emergency prune removes.
+    storage_emergency_prune_ratio: float = 0.5
+    # How long the per-pass logs are kept. They are a diagnostic, not
+    # an archive: a week is enough to see what happened and small
+    # enough never to matter.
+    sync_log_retention_days: int = 7
+    error_log_retention_days: int = 30
+    analytics_retention_days: int = 30
+
+    # ---------------------------------------------------------
     # Deduplication
     # ---------------------------------------------------------
     dedup_window_hours: int = 12

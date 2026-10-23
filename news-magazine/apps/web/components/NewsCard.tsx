@@ -5,6 +5,7 @@ import { useEffect, useState, type MouseEvent } from "react";
 
 import { OptimizedImage } from "@/components/OptimizedImage";
 import { formatNewsDate, type SiteLanguage } from "@/lib/date";
+import { collapseRepeatedHeadline } from "@/lib/headline";
 import { withoutSizeSuffix } from "@/lib/image-url";
 import { isPlainActivation } from "@/lib/story-dialog";
 
@@ -476,7 +477,7 @@ export function NewsCard({
             The SERIF is the site's own voice and stays.
           */}
           <h2 className="line-clamp-3 min-h-[3lh] font-headline text-[15px] font-semibold leading-snug text-gray-900 transition group-hover:text-blue-600 sm:text-base">
-            {article.headline}
+            {collapseRepeatedHeadline(article.headline)}
           </h2>
 
           {article.audio_url && (

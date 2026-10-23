@@ -71,6 +71,16 @@ export interface ImageRow {
    * points is not the empty placeholder this pass exists to remove.
    */
   summary_points?: string[] | null;
+  /**
+   * Whether the picture was proven against the story's OWN page.
+   *
+   * Read here because a story whose picture was never proven renders
+   * NO picture at all: the card puts the story's key points in the
+   * picture slot instead. Such a story cannot be "the same photograph
+   * twice" - it shows no photograph - so it must not be dropped by a
+   * pass about repeated photographs.
+   */
+  image_verified_at?: string | null;
 }
 
 /**
@@ -102,6 +112,21 @@ export interface ImageRow {
  */
 function rowKeys(row: ImageRow): string[] {
   const keys: string[] = [];
+
+  // A PICTURE THAT WAS NEVER PROVEN IS NOT RENDERED
+  // ------------------------------------------------
+  // The card refuses to render it (see `NewsCard.pickImages`) and
+  // shows the story's own key points in its place. Such a story shows
+  // no photograph, so it cannot be showing the same photograph as
+  // another story - and dropping it here is what made a freshly
+  // fetched story APPEAR at the top of the live feed and then vanish
+  // a second later, because the pass ran again over the merged list
+  // and removed it.
+  //
+  // It also must not CLAIM a key: a proven story that really does
+  // share the photograph keeps it.
+  if (row.image_verified_at === null) return keys;
+
   for (const url of [row.image_highres_url, row.featured_image_url, row.gif_url]) {
     const exact = imageKey(url);
     if (exact && !keys.includes(exact)) keys.push(exact);
@@ -193,13 +218,24 @@ export function hasRenderableArtwork(row: {
   gif_url?: string | null;
   video_url?: string | null;
   video_embed_url?: string | null;
+  summary_points?: string[] | null;
 }): boolean {
-  return Boolean(
+  if (
     row.featured_image_url ||
-      row.image_highres_url ||
-      row.gif_url ||
-      row.video_url ||
-      row.video_embed_url
+    row.image_highres_url ||
+    row.gif_url ||
+    row.video_url ||
+    row.video_embed_url
+  ) {
+    return true;
+  }
+
+  // The story's OWN key points are what the card shows where a picture
+  // would be, so a story with points is not an empty card. Dropping it
+  // meant the site hid a story it had fetched, which is the one thing
+  // the operator never wanted.
+  return (row.summary_points ?? []).some(
+    (point) => typeof point === "string" && point.trim().length > 0
   );
 }
 

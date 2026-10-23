@@ -8,6 +8,22 @@ news-magazine/apps/web/_skeptic_*.js
 news-magazine/apps/web/_cls_probe*.js
 news-magazine/apps/web/tsconfig.tsbuildinfo
 
+node_modules/
+.next/
+# Verification builds use NEXT_DIST_DIR so they cannot clobber the .next a
+# running dev server is using. Ignore every one of them.
+.next-*/
+.env
+.env.local
+apps/ingestion/.venv/
+apps/ingestion/__pycache__/
+apps/ingestion/**/__pycache__/
+.DS_Store
+*.log
+*.tsbuildinfo.live-monitor/
+apps/web/_sound_probe.js
+
+
 # A scratch file for writing a long commit message before committing
 # it. It is a working note, not a source file, and it does not belong
 # in the history.

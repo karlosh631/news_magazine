@@ -89,6 +89,57 @@ def sanitize_plain_text(
     return text
 
 
+def collapse_repeated_headline(text: str) -> str:
+    """
+    A headline that says the same thing twice, said once.
+
+    WHY
+    ---
+    Some publishers put the headline in their markup twice - once as
+    the visible heading and once in a second element the desktop and
+    the phone each use - and the listing parser reads the container
+    rather than the heading. The stored headline then reads:
+
+        Tanker with Russian diesel heads to New York under Trump deal
+        Tanker with Russian diesel heads to New York under Trump deal
+
+    which is what the reader sees in the search dropdown and on the
+    card, and it is the outlet's headline with the outlet's own
+    headline appended to it.
+
+    The rule is deliberately strict. Every possible length of the first
+    copy is tried, and the rest of the headline must be nothing BUT
+    copies of it. A headline that merely mentions itself ("Man
+    arrested after man arrested in theft") is news, not a bug, and is
+    left alone.
+
+    This runs on every headline on the way into the database, so the
+    rows that get there are right; and the web app applies the same
+    rule when it renders a row, so the rows that are ALREADY stored
+    are right on screen too.
+    """
+    value = (text or "").strip()
+    if len(value) < 20:
+        return value
+
+    for size in range(len(value) // 2, 11, -1):
+        head = value[:size].strip()
+        if not head:
+            continue
+
+        rest = value[size:].strip()
+        if not rest:
+            continue
+
+        leftover = rest
+        while leftover.startswith(head):
+            leftover = leftover[len(head):].strip()
+        if not leftover:
+            return head
+
+    return value
+
+
 def sanitize_headline(
     value: str | None,
 ) -> str:
@@ -96,9 +147,11 @@ def sanitize_headline(
     Sanitize an article headline.
     """
 
-    return sanitize_plain_text(
-        value,
-        MAX_HEADLINE_LENGTH,
+    return collapse_repeated_headline(
+        sanitize_plain_text(
+            value,
+            MAX_HEADLINE_LENGTH,
+        )
     )
 
 

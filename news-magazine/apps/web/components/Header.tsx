@@ -281,6 +281,26 @@ export function Header({ categories }: { categories: NavCategory[] }) {
     the standard command-palette look and shows the reader that focus
     is still where they left it.
   */
+  // The dropdown is rendered twice: once hanging off the desktop input
+  // and once off the mobile one. Only one of the two is ever visible
+  // (the desktop form is `hidden sm:block`, the mobile menu is
+  // `md:hidden`), and both are handed the same results, so the reader
+  // sees one panel either way - hanging off the box they typed in.
+  const searchModal = (
+    <SearchModal
+      open={searchOpen}
+      query={aiSearch?.query ?? searchQuery.trim()}
+      loading={aiSearchLoading}
+      error={aiSearchError}
+      hits={aiSearch?.articles ?? []}
+      count={aiSearch?.count ?? aiSearch?.articles?.length ?? 0}
+      sources={aiSearch?.sources}
+      grounded={aiSearch?.grounded}
+      resurrected={aiSearch?.resurrected}
+      onClose={closeSearch}
+    />
+  );
+
   return (
     <header className="relative sticky top-0 z-[62] border-b border-gray-200 bg-white md:bg-white/90 md:backdrop-blur">
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 gap-4">
@@ -340,7 +360,11 @@ export function Header({ categories }: { categories: NavCategory[] }) {
           every page that a reader taps to move.
         */}
         <div className="flex items-center gap-2">
-          <form onSubmit={handleSearchSubmit} className="hidden sm:block">
+          {/* The dropdown hangs off the input, not off the header. It is
+              `relative` so the panel inside it has something to be
+              absolute against. */}
+          <div className="relative hidden sm:block">
+          <form onSubmit={handleSearchSubmit}>
             <input
               ref={searchInputRef}
               type="search"
@@ -372,6 +396,8 @@ export function Header({ categories }: { categories: NavCategory[] }) {
               className="h-12 w-40 rounded-md border border-gray-300 px-3 text-xs outline-none transition focus:w-56 focus:border-black focus:ring-1 focus:ring-black"
             />
           </form>
+          {searchModal}
+          </div>
 
           <button
             type="button"
@@ -413,7 +439,8 @@ export function Header({ categories }: { categories: NavCategory[] }) {
 
       {menuOpen && (
         <nav className="flex flex-col gap-2 border-t border-gray-200 bg-white px-4 py-3 md:hidden">
-          <form onSubmit={handleSearchSubmit} className="mb-1">
+          <div className="relative mb-1">
+          <form onSubmit={handleSearchSubmit}>
             <input
               type="search"
               /* The same control as the desktop one, in the mobile
@@ -437,6 +464,8 @@ export function Header({ categories }: { categories: NavCategory[] }) {
               className="h-12 w-full rounded-md border border-gray-300 px-3 text-sm outline-none focus:border-black focus:ring-1 focus:ring-black"
             />
           </form>
+          {searchModal}
+          </div>
 
           {categories.map((cat) => {
             const href = `/category/${cat.slug}`;
@@ -460,18 +489,6 @@ export function Header({ categories }: { categories: NavCategory[] }) {
       )}
 
 
-      <SearchModal
-        open={searchOpen}
-        query={aiSearch?.query ?? searchQuery.trim()}
-        loading={aiSearchLoading}
-        error={aiSearchError}
-        hits={aiSearch?.articles ?? []}
-        count={aiSearch?.count ?? aiSearch?.articles?.length ?? 0}
-        sources={aiSearch?.sources}
-        grounded={aiSearch?.grounded}
-        resurrected={aiSearch?.resurrected}
-        onClose={closeSearch}
-      />
     </header>
   );
 }

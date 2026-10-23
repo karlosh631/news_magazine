@@ -275,7 +275,44 @@ async def main() -> int:
     # query and no requests on most runs.
     panchang_ok = await sync_panchang_once()
 
+    # ---- The storage guard ----
+    #
+    # Once per pass, and the pass runs every three minutes, so the
+    # guard runs every three minutes without anybody watching. The
+    # log tables go by age, and if the database is at eighty percent
+    # of its limit the oldest half of the articles goes as well. The
+    # site keeps serving either way.
+    await storage_guard_once(db, settings)
+
     return 0 if ok > 0 else 3
+
+
+async def storage_guard_once(db, settings) -> None:
+    """Run the storage guard, and say what it did. Never raises."""
+    try:
+        from app.services.storage_guard import run_storage_guard
+
+        report = await run_storage_guard(db, settings)
+    except Exception as exc:  # noqa: BLE001
+        print(f"::warning::The storage guard could not run: {exc}")
+        return
+
+    used = report.get("used_bytes") or 0
+    limit = report.get("limit_bytes") or 1
+    print(
+        f"\nStorage: {used / 1024 / 1024:.1f} MB of {limit / 1024 / 1024:.0f} MB "
+        f"({(used / limit) * 100:.1f}%) · "
+        f"{report.get('logs_pruned', 0)} sync log(s), "
+        f"{report.get('errors_pruned', 0)} error(s) and "
+        f"{report.get('analytics_pruned', 0)} analytics row(s) pruned by age"
+    )
+    if report.get("emergency_pruned"):
+        print(
+            f"::warning::The database was near its limit, so "
+            f"{report['emergency_pruned']} old article(s) were deleted to keep "
+            f"the site running."
+        )
+    print("STORAGE_OK=1")
 
 
 async def sync_panchang_once() -> bool:

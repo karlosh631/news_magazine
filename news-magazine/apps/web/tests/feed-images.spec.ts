@@ -178,3 +178,78 @@ test.describe("a picture that is genuinely different stays", () => {
     expect(dropRepeatedImages(rows)).toBe(rows);
   });
 });
+
+test.describe("a story whose picture was never proven", () => {
+  test("it is not dropped as a repeated photograph", () => {
+    // It renders NO picture - the card shows its key points instead -
+    // so it cannot be showing the same photograph as another story.
+    //
+    // Dropping it here is what made a freshly fetched story appear at
+    // the top of the live feed and vanish a second later: the merge
+    // added it, the pass ran again over the merged list, and removed
+    // it.
+    const rows = [
+      {
+        id: "a",
+        featured_image_url: "https://x.test/same.jpg",
+        image_highres_url: null,
+        gif_url: null,
+        image_verified_at: null,
+      },
+      {
+        id: "b",
+        featured_image_url: "https://x.test/same.jpg",
+        image_highres_url: null,
+        gif_url: null,
+        image_verified_at: null,
+      },
+    ];
+
+    expect(dropRepeatedImages(rows).map((r) => r.id)).toEqual(["a", "b"]);
+  });
+
+  test("a PROVEN picture that is repeated is still dropped", () => {
+    const rows = [
+      {
+        id: "a",
+        featured_image_url: "https://x.test/same.jpg",
+        image_highres_url: null,
+        gif_url: null,
+        image_verified_at: "2026-10-23T00:00:00Z",
+      },
+      {
+        id: "b",
+        featured_image_url: "https://x.test/same.jpg",
+        image_highres_url: null,
+        gif_url: null,
+        image_verified_at: "2026-10-23T00:00:00Z",
+      },
+    ];
+
+    expect(dropRepeatedImages(rows).map((r) => r.id)).toEqual(["a"]);
+  });
+
+  test("an unproven picture does not claim the key a proven one shows", () => {
+    const rows = [
+      {
+        id: "unproven",
+        featured_image_url: "https://x.test/photo.jpg",
+        image_highres_url: null,
+        gif_url: null,
+        image_verified_at: null,
+      },
+      {
+        id: "proven",
+        featured_image_url: "https://x.test/photo.jpg",
+        image_highres_url: null,
+        gif_url: null,
+        image_verified_at: "2026-10-23T00:00:00Z",
+      },
+    ];
+
+    expect(dropRepeatedImages(rows).map((r) => r.id)).toEqual([
+      "unproven",
+      "proven",
+    ]);
+  });
+});

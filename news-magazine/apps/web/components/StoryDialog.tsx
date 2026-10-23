@@ -13,6 +13,7 @@ import type { NewsCardArticle } from "@/components/NewsCard";
 import { OptimizedImage } from "@/components/OptimizedImage";
 import { SummaryPoints } from "@/components/SummaryPoints";
 import { formatNewsDate } from "@/lib/date";
+import { collapseRepeatedHeadline } from "@/lib/headline";
 import { excerptWithoutOverlap } from "@/lib/excerpt";
 import {
   focusableWithin,
@@ -329,7 +330,7 @@ export function StoryDialog({
               id={titleId}
               className="mt-1 font-headline text-xl font-bold leading-snug text-gray-900 sm:text-2xl dark:text-gray-100"
             >
-              {article.headline}
+              {collapseRepeatedHeadline(article.headline)}
             </h2>
           </div>
 

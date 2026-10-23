@@ -50,6 +50,7 @@ import feedparser
 import httpx
 
 from app.config import DEFAULT_MAX_ARTICLES_PER_SOURCE
+from app.sources.reader_proxy import fetch_with_reader_fallback
 from app.services.dedup import normalize_title, token_fingerprint
 from app.services.sanitizer import sanitize_excerpt, sanitize_headline
 from app.sources.base import NormalizedArticle, SourceAdapter
@@ -181,14 +182,33 @@ class HtmlListingAdapter(SourceAdapter):
             timeout=self.settings.default_request_timeout_seconds,
             follow_redirects=True,
         ) as client:
-            response = await client.get(url, headers=headers)
-            response.raise_for_status()
+            # Nine publishers refuse this address with a 403 and answer
+            # an ordinary client with a 200 - the refusal is aimed at
+            # the address, not at the request. When that happens the
+            # page is read through the reader instead, so the outlet
+            # is not silent. See app/sources/reader_proxy.py.
+            if self.settings.reader_proxy_enabled:
+                text, status = await fetch_with_reader_fallback(
+                    url,
+                    client,
+                    headers,
+                    proxy=self.settings.reader_proxy_url,
+                )
+            else:
+                response = await client.get(url, headers=headers, follow_redirects=True)
+                text = response.text if response.status_code < 400 else None
+                status = response.status_code
 
-            if not response.text.strip():
+            if text is None:
+                raise ValueError(
+                    f"Empty listing page response from {url} (status {status})"
+                )
+
+            if not text.strip():
                 raise ValueError(f"Empty listing page response from {url}")
 
-            self._listing_html = response.text
-            return response.text
+            self._listing_html = text
+            return text
 
     # -- parsing -----------------------------------------------------------
 

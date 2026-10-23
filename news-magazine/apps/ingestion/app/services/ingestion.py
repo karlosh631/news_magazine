@@ -2454,6 +2454,36 @@ async def run_source_sync(
                 if not excerpt and extracted is not None:
                     excerpt = sanitize_excerpt(extracted.description) or None
 
+                # ---- The story's OWN page is the authority for its
+                # HEADLINE, exactly as it is for its picture.
+                #
+                # The listing card is the publisher's own summary of the
+                # story, and on a client-rendered listing that summary
+                # is the whole card: the outlet's domain, the time
+                # since publication, the headline and the first
+                # paragraph, all in one string. Stored as the headline,
+                # that is what the reader saw:
+                #
+                #   canadanepal.com . 33 minutes ago Cyber security
+                #   risks ... | The web technology (PHP) ...
+                #
+                # The article's own page declares the headline, and it
+                # declares it exactly as the outlet published it - in
+                # the og:title, and again in the JSON-LD NewsArticle
+                # block. So the page wins, and the listing is only used
+                # when the page does not say.
+                page_title = (
+                    sanitize_headline(extracted.title) if extracted is not None else ""
+                )
+                if page_title and page_title != headline:
+                    logger.info(
+                        "Headline from the story's own page: %r (the listing "
+                        "said %r)",
+                        page_title[:120],
+                        headline[:80],
+                    )
+                    headline = page_title
+
                 # ---- Licensed full body, if this outlet permits one ----
                 # The page was already fetched above for media whenever
                 # `extracted` is not None, and `attach_full_body` reuses

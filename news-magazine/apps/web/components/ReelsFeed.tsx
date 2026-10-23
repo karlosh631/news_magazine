@@ -464,9 +464,35 @@ export function ReelsFeed({
   */
   const [windowSize, setWindowSize] = useState(REELS_WINDOW);
 
+  /*
+    THE ROTATION
+    ------------
+    The catalogue arrives newest-first, so every reader who opened the
+    page saw the same clips, in the same order, in the same place -
+    and the ones they had not scrolled to were the ones they never
+    saw.
+
+    A rotation fixes that: the catalogue starts at a random point and
+    wraps around, so every fetched clip is reachable and two readers
+    do not open the same page. The offset is chosen ONCE per visit
+    and kept in a ref, so the order never changes under the reader
+    when the server tree refreshes underneath it.
+  */
+  const rotation = useRef<number | null>(null);
+  if (rotation.current === null) {
+    rotation.current =
+      reels.length > 0 ? Math.floor(Math.random() * reels.length) : 0;
+  }
+
+  const rotatedReels = useMemo(() => {
+    if (reels.length === 0) return reels;
+    const offset = rotation.current ?? 0;
+    return [...reels.slice(offset), ...reels.slice(0, offset)];
+  }, [reels]);
+
   const mountedReels = useMemo(
-    () => reels.slice(0, Math.max(REELS_WINDOW, windowSize)),
-    [reels, windowSize]
+    () => rotatedReels.slice(0, Math.max(REELS_WINDOW, windowSize)),
+    [rotatedReels, windowSize]
   );
 
   /*

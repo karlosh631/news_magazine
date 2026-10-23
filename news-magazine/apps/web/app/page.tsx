@@ -85,7 +85,7 @@ const structuredData = {
  */
 export default async function HomePage() {
   const [feed, breaking] = await Promise.all([
-    getLatestArticles({ limit: 24 }),
+    getLatestArticles({ limit: 36 }),
     getBreakingNews(10),
   ]);
 

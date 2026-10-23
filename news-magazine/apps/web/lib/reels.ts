@@ -306,13 +306,42 @@ export async function getReels(opts?: { limit?: number }): Promise<ReelFeedResul
   }
 
   return {
-    reels: ((data ?? []) as unknown[])
-      .map(mapReelRow)
-      .filter(isPlayableReel)
-      .slice(0, limit),
+    reels: dropRepeatedClips(
+      ((data ?? []) as unknown[]).map(mapReelRow).filter(isPlayableReel)
+    ).slice(0, limit),
     error: null,
     configured: true,
   };
+}
+
+/**
+ * The same clip, twice.
+ *
+ * Two providers can carry the same video - a Wikimedia file that a
+ * YouTube upload also has - and one provider can list the same file
+ * twice under two ids. The reader would then watch the same clip
+ * twice in a row and think the feed had looped.
+ *
+ * The key is the clip's own ADDRESS: the file the browser will fetch.
+ * Two rows that point at the same file are the same clip, whatever
+ * their ids say.
+ */
+export function dropRepeatedClips<T extends { id: string; video_url?: string | null; embed_url?: string | null; thumbnail_url?: string | null }>(
+  reels: T[]
+): T[] {
+  const seen = new Set<string>();
+  const kept: T[] = [];
+
+  for (const reel of reels) {
+    const key = reel.video_url || reel.embed_url || reel.thumbnail_url;
+    if (key) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+    }
+    kept.push(reel);
+  }
+
+  return kept;
 }
 
 /**

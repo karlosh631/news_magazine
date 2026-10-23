@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 
+import { NewsCard } from "@/components/NewsCard";
 import { ShareButtons } from "@/components/ShareButtons";
 import { ArticleViewTracker } from "@/components/ArticleViewTracker";
 import { ArticleBodyDisclosure } from "@/components/ArticleBodyDisclosure";
@@ -11,6 +12,8 @@ import { getArticleBySlug, getCategories, getRelatedArticles } from "@/lib/news"
 import { formatNewsDate } from "@/lib/date";
 import { SITE_LOGO, SITE_NAME, SITE_URL, clampDescription, jsonLd } from "@/lib/site";
 import { excerptWithoutOverlap } from "@/lib/excerpt";
+import { dropDuplicateStories } from "@/lib/feed-dedup";
+import { dropRepeatedImages } from "@/lib/feed-images";
 
 export const dynamic = "force-dynamic";
 
@@ -128,10 +131,19 @@ export default async function ArticlePage({ params }: Props) {
   const article = await getArticleBySlug(slug);
   if (!article) notFound();
 
-  const [categories, relatedArticles] = await Promise.all([
+  const [categories, relatedArticlesRaw] = await Promise.all([
     getCategories(),
-    getRelatedArticles(article.primary_category_id, article.id, 4),
+    getRelatedArticles(article.primary_category_id, article.id, 8),
   ]);
+
+  // No duplicate story and no duplicate photograph in the related
+  // list: the same wire copy from two outlets is one story, and the
+  // same photograph twice is one picture. The list is cut back to
+  // four AFTER the duplicates are gone, so the reader gets four
+  // DIFFERENT stories rather than four rows with two of them repeated.
+  const relatedArticles = dropRepeatedImages(
+    dropDuplicateStories(relatedArticlesRaw)
+  ).slice(0, 4);
 
   const category = categories.find((item) => item.id === article.primary_category_id);
   const categoryName = category ? (category.name_ne ?? category.name_en) : null;
@@ -403,24 +415,26 @@ export default async function ArticlePage({ params }: Props) {
 
         {relatedArticles.length > 0 && (
           <aside className="mt-14 border-t pt-8">
-            <h2 className="mb-5 text-xl font-bold text-gray-900">Related coverage</h2>
-            <div className="grid gap-5 sm:grid-cols-2">
+            <div className="mb-5 flex items-baseline justify-between gap-4">
+              <h2 className="text-xl font-bold text-gray-900">Related coverage</h2>
+              <span className="text-xs uppercase tracking-wide text-gray-400">
+                More from this desk
+              </span>
+            </div>
+            {/*
+              The same card the rest of the site uses, so the picture
+              is there - and so the rule about pictures is the same
+              rule: a picture that was never proven against its own
+              story's page is not rendered, and the story's own key
+              points take its place.
+
+              The list used to be four text boxes with no picture at
+              all, which is the one place on the site where a reader
+              was told a story existed and given nothing of it.
+            */}
+            <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
               {relatedArticles.map((related) => (
-                <Link
-                  key={related.id}
-                  href={`/article/${related.slug}`}
-                  className="group block rounded-lg border border-gray-200 bg-white p-4 transition hover:border-gray-400 dark:border-gray-700 dark:bg-gray-900 dark:hover:border-gray-500"
-                >
-                  <h3 className="font-semibold leading-snug text-gray-900 group-hover:text-blue-700">
-                    {related.headline}
-                  </h3>
-                  <p className="mt-1.5 line-clamp-2 text-sm text-gray-600">
-                    {related.summary_points?.[0] ?? related.excerpt ?? ""}
-                  </p>
-                  <p className="mt-2 text-xs text-gray-400">
-                    {related.source_name_snapshot ?? ""}
-                  </p>
-                </Link>
+                <NewsCard key={related.id} article={related} />
               ))}
             </div>
           </aside>

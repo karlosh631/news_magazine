@@ -298,7 +298,7 @@ export default async function CategoryPage({ params, searchParams }: Props) {
     );
   }
 
-  const feed = await getLatestArticles({ limit: 24, categorySlug: slug! });
+  const feed = await getLatestArticles({ limit: 36, categorySlug: slug! });
 
   return (
     <main className="min-h-screen">

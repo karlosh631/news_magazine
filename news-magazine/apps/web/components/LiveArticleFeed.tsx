@@ -368,7 +368,7 @@ export function LiveArticleFeed({
       setChecking(true);
       try {
         const params = new URLSearchParams({
-          limit: "60",
+          limit: "100",
           // Defeats any intermediary cache. A cached poll is a
           // homepage frozen at whatever was newest when it was stored.
           t: String(Date.now()),

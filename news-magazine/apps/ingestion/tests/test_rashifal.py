@@ -46,11 +46,37 @@ from datetime import date, time
 
 import pytest
 
+import app.services.panchang as panchang_module
+
 from app.services.panchang import (
     forget_last_stored_bs,
     last_stored_signs_bs,
     sync_panchang,
 )
+
+
+# =============================================================
+# THE CLOCK IS PINNED
+#
+# The pass asks the DATABASE whether today's row is there, and
+# today's row is keyed by the NEPAL date - so the check is made
+# against today's real date, not against the day the fixture was
+# saved.
+#
+# That made these tests fail THE DAY AFTER they were written: the
+# fixture's day is 2026-10-22, and on 2026-10-23 the row it stores
+# is in the past, the freshness check finds nothing, and the pass
+# does the work again. A test that breaks the day after it is
+# written is a broken test, so the clock is pinned to the fixture's
+# day here and the fixture never ages.
+# =============================================================
+
+
+@pytest.fixture(autouse=True)
+def _pinned_clock(monkeypatch):
+    monkeypatch.setattr(
+        panchang_module, "nepal_today", lambda *a, **k: date(2026, 10, 22)
+    )
 from app.services.rashifal import (
     RASHIFAL_CONFLICT,
     RashifalParseError,

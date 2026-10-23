@@ -108,7 +108,11 @@ async def run(limit: int, delay: float, dry_run: bool) -> int:
             .eq("status", "published")
             .is_("duplicate_of", None)
             .is_("image_verified_at", None)
-            .not_("featured_image_url", "is", None)
+            # `not_` is a PROPERTY in this client, not a method: it
+            # marks the NEXT filter as negated and returns the builder.
+            # Writing `.not_("column", "is", None)` CALLS the builder
+            # and raises a TypeError.
+            .not_.is_("featured_image_url", None)
             # NEWEST FIRST. The rows a reader is looking at are the
             # newest ones.
             .order("published_at", desc=True)

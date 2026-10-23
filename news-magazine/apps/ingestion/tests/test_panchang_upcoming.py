@@ -28,6 +28,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+
+import pytest
+
+import app.services.panchang as panchang_module
 from datetime import date, datetime, timedelta, timezone
 
 from app.services.panchang import (
@@ -37,6 +41,27 @@ from app.services.panchang import (
     parse_panchang,
     sync_panchang,
 )
+
+
+# =============================================================
+# THE CLOCK IS PINNED
+#
+# The pass asks the DATABASE whether today's row is there, and
+# today's row is keyed by the NEPAL date. A test whose fixture is
+# saved on one day and run on another therefore finds a row that is
+# in the past, decides the day is missing, and does the work again -
+# so these tests broke the day after they were written.
+#
+# The clock is pinned to the fixture's day and the fixture never
+# ages.
+# =============================================================
+
+
+@pytest.fixture(autouse=True)
+def _pinned_clock(monkeypatch):
+    monkeypatch.setattr(
+        panchang_module, "nepal_today", lambda *a, **k: date(2026, 10, 22)
+    )
 from app.services.rashifal import parse_rashifal_day
 
 

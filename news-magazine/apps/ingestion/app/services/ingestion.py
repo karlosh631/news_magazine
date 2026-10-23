@@ -1061,7 +1061,16 @@ async def repair_broken_image_urls(
             # Only rows that CLAIM to have an image. A null one is
             # `repair_missing_images`' job, and this pass would redo it
             # for nothing.
-            .not_("featured_image_url", "is", None)
+            #
+            # `not_` is a PROPERTY in this client, not a method: it
+            # marks the NEXT filter as negated and returns the builder.
+            # So the call is `.not_.is_(...)`, and writing it as
+            # `.not_("column", "is", None)` CALLS the builder - which
+            # raises TypeError: 'SyncSelectRequestBuilder' object is
+            # not callable. That exception was caught by the handler
+            # below, so this pass had never run: it logged a warning
+            # every poll and repaired nothing.
+            .not_.is_("featured_image_url", None)
             .gte("ingested_at", since.isoformat())
             .order("ingested_at", desc=False)
             .limit(max(limit, 0))

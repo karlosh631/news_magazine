@@ -229,6 +229,34 @@ async def test_two_polls_of_one_host_at_the_same_moment_download_robots_once(mon
     assert robots_calls == ["https://example.invalid/robots.txt"]
 
 
+async def test_a_redirecting_robots_txt_is_followed(monkeypatch):
+    """
+    ratopati.com answers 301 for https://ratopati.com/robots.txt and
+    serves its rules (and its Crawl-delay: 20) at the www host.
+
+    A robots.txt that redirects is normal. Reading the 301 as "no
+    rules" is the one answer a publisher never meant - it is how a
+    stated delay goes missing.
+    """
+    seen: dict = {}
+
+    async def fake_get(self, url, **kwargs):
+        seen["url"] = str(url)
+        seen["follow_redirects"] = getattr(self, "follow_redirects", None)
+        return FakeResponse(200, ROBOTS_WITH_DELAY)
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+    checker = RobotsChecker()
+    delay = await checker.crawl_delay(
+        "https://ratopati.com/feed",
+        "NepalNewsMagazineBot/1.0",
+    )
+
+    assert delay == 20.0
+    assert seen["follow_redirects"] is True
+
+
 async def test_the_crawl_delay_a_publisher_states_is_read(monkeypatch):
     """
     ratopati.com publishes "Crawl-delay: 20". It is read now.
@@ -453,12 +481,20 @@ async def test_a_feed_request_without_a_site_url_sends_no_referer(monkeypatch):
 
 MIGRATIONS = Path(__file__).resolve().parents[3] / "supabase" / "migrations"
 
+#: The migration is found by NAME, not by number.
+#:
+#: Migrations are numbered in the order they are written, and other work
+#: lands in this directory too, so the number of this one is not fixed.
+#: What matters is that the file that asks these five publishers less
+#: often is present and says what it must say.
+MIGRATION_GLOB = "*_ask_the_refused_publishers_less_often.sql"
+
 
 def migration_0030() -> str:
-    files = sorted(MIGRATIONS.glob("0030_*.sql"))
+    files = sorted(MIGRATIONS.glob(MIGRATION_GLOB))
     if not files:
-        pytest.skip("migration 0030 is not in this checkout")
-    return files[0].read_text(encoding="utf-8")
+        pytest.skip("the politeness migration is not in this checkout")
+    return files[-1].read_text(encoding="utf-8")
 
 
 def test_the_migration_asks_the_five_publishers_less_often():

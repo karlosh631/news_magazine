@@ -98,7 +98,17 @@ class RobotsChecker:
                     rp = robotparser.RobotFileParser()
                     robots_url = f"{host}/robots.txt"
                     try:
-                        async with httpx.AsyncClient(timeout=10.0) as client:
+                        async with httpx.AsyncClient(
+                            timeout=10.0,
+                            # A robots.txt that redirects is normal -
+                            # ratopati.com serves its rules at
+                            # www.ratopati.com/robots.txt and answers
+                            # 301 for the bare host. Not following the
+                            # redirect means the rules (and the
+                            # Crawl-delay) are read as "none", which is
+                            # the one answer a publisher never meant.
+                            follow_redirects=True,
+                        ) as client:
                             resp = await client.get(
                                 robots_url,
                                 headers={"User-Agent": user_agent},

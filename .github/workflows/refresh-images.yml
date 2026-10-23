@@ -132,6 +132,12 @@ jobs:
           LIMIT: ${{ inputs.limit || '250' }}
           DELAY: ${{ inputs.delay || '1' }}
         run: |
+          # The runner hands this block to `bash -e`, so -e is ALREADY
+          # on. `set -uo pipefail` adds to it and never turns it off,
+          # which means the first row that could not be proven used to
+          # end the whole step before it could say what had happened.
+          # A pass that half worked has to REPORT that it half worked.
+          set +e
           set -uo pipefail
           python -m scripts.refresh_images --limit "$LIMIT" --delay "$DELAY" 2>&1 | tee refresh.log
           if grep -q "REFRESH_OK=1" refresh.log; then
@@ -139,13 +145,19 @@ jobs:
           else
             echo "::warning::The artwork refresh did not finish cleanly. The rows it did not reach keep their unverified picture, and the site shows those stories without one."
           fi
+          exit 0
 
       - name: Find the pictures that are not their story's
+        # This one runs even when the pass above did not finish: the
+        # two passes look at DIFFERENT rows, so the second one still
+        # has work to do.
+        if: always()
         working-directory: news-magazine/apps/ingestion
         env:
           LIMIT: ${{ inputs.limit || '250' }}
           DELAY: ${{ inputs.delay || '1' }}
         run: |
+          set +e
           set -uo pipefail
           # The pass above works on the rows the marker has never
           # visited. This one works on the rows the marker HAS visited
@@ -158,6 +170,7 @@ jobs:
           else
             echo "::warning::The wrong-picture pass did not finish cleanly."
           fi
+          exit 0
 
       - name: Upload the run log
         if: always()

@@ -50,6 +50,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -139,8 +140,13 @@ async def run(limit: int, delay: float, dry_run: bool) -> int:
     # that has to be repeated with more printing; a run that says
     # "149 could not be proven: 120 of them are Kantipur, and the page
     # came back empty" is a diagnosis.
-    reasons: dict[str, int] = {}
-    outlets: dict[str, int] = {}
+    # A Counter, not a plain dict: a reason that has not been seen
+    # yet counts as zero instead of raising KeyError, which is what
+    # killed the first run of this script at the first row whose page
+    # offered no picture. A count that raises is a count that stops
+    # the work.
+    reasons: Counter[str] = Counter()
+    outlets: Counter[str] = Counter()
 
     async with media_client() as client:
         validator = ImageValidator(
@@ -228,6 +234,17 @@ async def run(limit: int, delay: float, dry_run: bool) -> int:
         f"\n{confirmed} confirmed, {unproven} could not be proven, "
         f"{skipped} skipped."
     )
+    # The diagnosis is only useful if it is PRINTED. "149 could not be
+    # proven" says nothing; "149 could not be proven: 120 of them are
+    # Kantipur and the page came back empty" says which switch to turn.
+    if reasons:
+        print("\nWhy each row could not be proven:")
+        for reason, count in reasons.most_common():
+            print(f"  {count:5d}  {reason}")
+    if outlets:
+        print("\nWhich outlet each row came from:")
+        for outlet, count in outlets.most_common():
+            print(f"  {count:5d}  {outlet}")
     if not dry_run:
         print("REFRESH_OK=1")
     return 0

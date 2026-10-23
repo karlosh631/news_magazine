@@ -1364,10 +1364,12 @@ class ImageValidator:
     - **The request mirrors the browser's.** A ranged GET rather than a
       bare HEAD, because CDNs answer the two differently often enough
       that a HEAD-based check produces confident false negatives on
-      perfectly good images. No Referer, matching the web card's
-      referrerPolicy="no-referrer", because several of these CDNs reject
-      a foreign Referer outright — sending one would prove the image
-      dead precisely when it is alive for readers.
+      perfectly good images. The page the picture is on travels as the
+      Referer, which is what a browser sends; several Nepali CDNs
+      refuse a request that claims to come from nowhere, and the
+      worker runs from a datacentre in another country, so a probe
+      with no Referer is exactly the shape their rule refuses. The
+      Referer is the picture's OWN page, never a foreign one.
 
     - **Results are cached per URL.** Outlets reuse one image across
       stories: a channel logo, a standing photo, an ad that escaped the

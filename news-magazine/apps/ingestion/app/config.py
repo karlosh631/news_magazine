@@ -61,6 +61,29 @@ class Settings(BaseSettings):
     )
     default_request_timeout_seconds: float = 15.0
 
+    # The language a normal reader sends with a request.
+    #
+    # Sent on every feed request alongside the outlet's own homepage as
+    # the Referer. Neither header pretends to be anything we are not:
+    # the language is a preference and the referer is the publisher's
+    # own address, on a path its robots.txt allows for everyone. They
+    # are here because a request with no Accept-Language and no Referer
+    # is the shape a WAF's browser check looks at first.
+    default_accept_language: str = "ne,en;q=0.8"
+
+    # Whether a publisher's own stated Crawl-delay (or Request-rate) in
+    # robots.txt is honoured.
+    #
+    # It is honoured by default, and it is honoured as a FLOOR: a row
+    # may say "eight requests a minute", but if the publisher's
+    # robots.txt says "one every 20 seconds", 20 seconds is what the
+    # worker waits. ratopati.com publishes `Crawl-delay: 20`; before
+    # this was read, the worker asked it every 7.5 seconds and never
+    # knew the publisher had said otherwise.
+    #
+    # Set this to false only if a publisher asks us to ignore it.
+    respect_robots_crawl_delay: bool = True
+
     # ---------------------------------------------------------
     # Scheduler
     # ---------------------------------------------------------

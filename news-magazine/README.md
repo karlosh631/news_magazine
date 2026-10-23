@@ -87,6 +87,7 @@ Apply these in order. Each is idempotent, so re-running is safe.
 | `0023_rashifal_category.sql` | The Rashifal category row |
 | `0024_purge_spam_articles.sql` | The removal of the search-engine spam a parked domain served as news |
 | `0025_daily_rashifal.sql` | The twelve horoscopes: twelve rows a day, one per sign |
+| `0031_admin_login_attempts.sql` | The durable counters that slow a password guess down, per email address and per IP, and the column that says which hashing policy an account's hash was written under |
 
 Migrations 0001–0016 are the original schema and are described in
 `ARCHITECTURE.md`.
@@ -95,6 +96,12 @@ Migrations 0001–0016 are the original schema and are described in
 exists`, so the policies are dropped and recreated — otherwise a second
 run dies on the policy and everything after it in the file never
 happens.
+
+**0031 is the sign-in's rate limit.** It is optional in the sense that
+the panel still works without it — the counters then live in the
+process's memory and are lost on a restart — but with it the limit
+survives a restart and is shared by every instance of the app. Apply
+it.
 
 ### 3. Ingestion service
 
@@ -352,7 +359,8 @@ so enabling an outlet cannot make the worker hammer a site.
 `/admin` is a dashboard, not a page that links to one. It opens on
 `/login` when there is no valid session, and the sign-in is a real one:
 PBKDF2-SHA256 at 210,000 iterations for the password, an HMAC-signed
-session cookie, and a per-address rate limit on failed attempts.
+session cookie, a rate limit on failed attempts that lives in the
+database, and an origin check on every request that changes something.
 
 | Route | What it is |
 |---|---|
@@ -361,12 +369,74 @@ session cookie, and a per-address rate limit on failed attempts.
 | `/403` | Signed in, and the answer is still no |
 | `/api/admin/login` | POST. Verifies the password, writes the session row, issues the cookie |
 | `/api/admin/logout` | POST. Deletes the session row and clears the cookie |
+| `/api/admin/sync` | POST. Triggers the ingestion service. The cron secret, a Supabase admin, or a signed-in operator |
 
 **It is a second door, not a replacement.** The Supabase Auth path in
 `middleware.ts` is untouched and still works: a user with an `admin` or
 `super_admin` row in `user_roles` gets in exactly as before. This door
 exists for the operator who should not have to open a Supabase dashboard
 to use their own site.
+
+### The sign-in, and what it refuses
+
+**The password is never compared in a way that leaks.** The stored hash
+is PBKDF2-HMAC-SHA256 at 210,000 iterations with a 16-byte salt, and the
+comparison is constant-time. An email address that belongs to no
+account is verified against a hash of a password nobody kept, so it
+costs exactly the same and answers exactly the same as a wrong
+password. There is no way to ask the form "does this address exist?".
+
+**The guess is slowed down, and the counters survive a restart.** Two
+counters, both in the database (`admin_login_attempts`, migration
+0031): one for the email address that was typed, one for the IP the
+request came from. After five failures against an address, each further
+attempt waits longer — one second, two, four, eight, and eight from
+then on. After twenty failures from an address, that address is
+blocked outright for the length of the window.
+
+The account limit is a **delay and not a lockout**, and that is
+deliberate: the operator's email address is published in this
+repository, so a hard lockout on it is a denial of service that anybody
+could trigger on purpose, over and over. A delay slows a guesser down
+and never stops the person who knows the password from signing in.
+
+The counter is keyed on the address that was **typed**, not on the
+accounts that exist, so an address nobody owns is counted exactly like
+one that does. That is what keeps the delay from being an oracle.
+
+**A request from another site is refused.** `/api/admin/login`,
+`/api/admin/logout` and `/api/admin/sync` all check where the request
+came from — `Sec-Fetch-Site`, then `Origin`, then `Referer` — and
+answer 403 to anything that is not this site. A page on another site
+cannot make the operator's browser sign in, sign out, or trigger a
+sync. The check runs before the rate limit, so a cross-site attempt
+cannot spend the operator's budget either.
+
+**The cookie is a claim; the row is the fact.** The cookie is
+`httpOnly`, `SameSite=Lax`, `Secure` in production, and signed with
+HMAC-SHA256 over its payload, so a tampered expiry or a swapped user id
+is detected. The expiry is enforced on the server, not merely decoded.
+Deleting the row in `admin_sessions` ends the session at once — that is
+what "sign out everywhere" is — and every route that trusts the cookie
+checks the row through `lib/admin-session.ts`, which fails closed: if
+the row cannot be read, the answer is no.
+
+**The signing key can be replaced.** `ADMIN_SESSION_SECRET` signs the
+cookie. `ADMIN_SESSION_SECRET_PREVIOUS` is accepted when a cookie is
+*read* and never when one is written, so the key can be rotated
+without signing everybody out at once: put the new key in
+`ADMIN_SESSION_SECRET`, move the old one to
+`ADMIN_SESSION_SECRET_PREVIOUS`, and take the old one away when the
+last session signed with it has expired. A secret shorter than 32
+characters is refused rather than used — the sign-in says so instead of
+signing cookies with a key somebody could guess.
+
+**The hash gets a salt of its own.** The seeded account's hash has a
+salt that is published in this repository, because it had to be written
+down for the operator to use it. The first time an account signs in
+after migration 0031, its hash is rewritten with a salt generated for
+that one account, and the password is not changed. Any account can have
+the same treatment by having its hash rewritten.
 
 ### The cards are live, and the filters are honest
 
@@ -388,7 +458,12 @@ read.
 
 **Changing the password.** The seeded account's hash is in migration
 0017, and a hash in a public repository is a published credential.
-Make a new one:
+**The password that goes with it was in the repository too** — it was
+pinned in `apps/web/tests/admin-auth.spec.ts`, so that the test could
+prove the migration's hash and the verifier agree. That line has been
+removed, because a live credential written in a published repository is
+not a credential. The account needs a new password, and only the
+operator can choose one:
 
 ```bash
 cd apps/web
@@ -397,6 +472,14 @@ node scripts/hash-admin-password.mjs "the new password"
 
 It prints the hash and the SQL to store it. It prints the SQL rather
 than running it, because it has no database access on purpose.
+
+The hash it prints is salted at random, so the same password never
+produces the same hash twice, and the account's stored hash is given a
+salt of its own the first time it signs in after migration 0031.
+
+**Do this before anything else.** Until the seeded password is
+replaced, the published hash in migration 0017 is a credential that
+anybody with this repository can use.
 
 ### The outlets, and which of them are actually dead
 
@@ -436,29 +519,45 @@ errors that looked exactly like a bad selector:
 
 ### What it needs
 
-Migration `0017_admin_users.sql`, applied:
+Migrations `0017_admin_users.sql` and `0031_admin_login_attempts.sql`,
+applied:
 
 ```bash
 python apps/ingestion/.venv/Scripts/python.exe scripts/supabase_admin.py apply
 ```
 
 The migration seeds one account — `thapakarlosh631@gmail.com` — with a
-PBKDF2 hash. The password is in the migration file's header comment.
-**Change it.** A seeded credential in a public repository is a published
-credential; the hash is safe to publish and the password is not.
+PBKDF2 hash. **Change the password.** A seeded credential in a public
+repository is a published credential; the hash is safe to publish and
+the password is not. The password that went with the seeded hash was
+pinned in the test suite, and that line has been removed — but the
+hash is still published, so the account needs a new password today:
+
+```bash
+cd apps/web
+node scripts/hash-admin-password.mjs "a long password of your own"
+```
+
+and the SQL it prints run against the database.
 
 The session cookie is signed with a secret, and the secret has to be the
 same on every request — a Vercel function can be a different instance on
 the next request, and a key generated per process would invalidate every
 session on every cold start. The order of preference:
 
-1. `ADMIN_SESSION_SECRET` — the right answer
+1. `ADMIN_SESSION_SECRET` — the right answer, and at least 32 characters
 2. `SUPABASE_SERVICE_ROLE_KEY` — already in the deployment
 3. `INGESTION_SECRET` — also already in the deployment
 
 The fallback exists so the panel works the moment it is deployed. Set
 `ADMIN_SESSION_SECRET` if you would rather it were not derived from a
 key that has another job.
+
+**Rotating it later.** Put the new key in `ADMIN_SESSION_SECRET` and
+the old one in `ADMIN_SESSION_SECRET_PREVIOUS`. Cookies signed with
+either are accepted; cookies are only ever signed with the new one.
+Take the old key away once the last session signed with it has
+expired — eight hours is the life of a session.
 
 ### The reels health panel
 
@@ -564,6 +663,47 @@ stories with no error and no empty page — just rows that were never
 shown. `lib/feed-cursor.ts` holds the order and the cursor together,
 because they are one decision.
 
+### How fast the pages are
+
+Every public route used to render from the database on the request,
+and the database is in another continent from the server that renders
+it. Measured against the live site, that was the whole of the
+Performance score: **1.9 seconds of time-to-first-byte on the
+homepage and 2.9 on a category page**, all of it spent waiting for
+PostgREST before a single byte of HTML was produced.
+
+Nothing a page does afterwards can be fast enough to matter while the
+browser is still waiting for the first byte. So:
+
+- the public reads are cached with an **explicit** revalidate of sixty
+  seconds, and the homepage is a static route regenerated in the
+  background rather than a `force-dynamic` one. The revalidate is
+  explicit on purpose: the implicit form — a plain GET with no cache
+  option — is cached for ever on Next 14, and the old code had that
+  bug, so the homepage was pinned to the first thing it ever fetched;
+- the client-side poll on top of it merges in anything newer the
+  moment the worker publishes it, so the page a reader is looking at
+  still moves.
+
+Measured after, on the live site:
+
+| | TTFB | LCP | CLS | TBT |
+|---|---|---|---|---|
+| homepage | 57ms | 510ms | 0.000 | 65ms |
+| a category page | 349ms | 655ms | 0.000 | 65ms |
+| the Rashifal page | 548ms | 847ms | 0.000 | 45ms |
+| the reels page | 636ms | 1288ms | 0.000 | 23ms |
+
+**And the feed no longer moves under the reader.** A card with
+nothing to show used to be swapped for the next story by an effect,
+which runs after the first paint — so the card was in the page, the
+reader had seen it, and it was then taken away, and every card below
+it slid up into the gap. That was a Cumulative Layout Shift of 0.07
+on the homepage and 0.21 on a category page. Whether a card will show
+nothing is a fact about the **story**, and the story is in hand
+before anything is rendered, so the feed now leaves those stories out
+of the very first paint.
+
 ### Every page is endless
 
 The category pages used to render twenty-four cards and stop. They were
@@ -633,6 +773,30 @@ The page is now always fetched for a new story, and where the picture
 came from is recorded on the row (`image_verified_at`), so the dashboard
 can tell a picture verified against the article from one that was not.
 
+**AND AN UNCONFIRMED PICTURE IS NOT SHOWN AT ALL.** That is the
+whole rule, and it is enforced at three points:
+
+- the pipeline will not STORE a picture it could not confirm against
+  the story's own page. The candidate list is the page's images plus
+  the publisher's feed thumbnail, and the feed thumbnail is the
+  publisher's choice about a slot in a feed — regularly a promoted or
+  related story's photograph. Measured on production: a story about
+  PHP security was illustrated with a black-and-white photograph of
+  an elephant, because the "Most Read from World" thumbnail that
+  Kathmandu Post puts on every one of its article pages was the first
+  picture the page scan found;
+- the repair pass re-resolves a row's picture from the story's own
+  page, newest first, and stamps the marker so the row is never
+  fetched again;
+- the web reads the marker and does not render a picture without one.
+
+**The backlog of unconfirmed rows is worked through by a script**, not
+by the poll. The poll re-resolves five rows a poll per source, which
+is right for a steady state and far too slow for a few hundred rows
+left behind by an older build. `apps/ingestion/scripts/refresh_images.py`
+walks them newest first, and the **Refresh images** workflow runs it —
+on a schedule, or from the button.
+
 ### A story with no picture
 
 A card with no picture used to show a grey panel that said "No image
@@ -689,7 +853,7 @@ Two ways to fix it. Pick one.
 
 #### Option A — GitHub Actions (nothing else to host)
 
-A workflow in this repo runs the scraper every 20 minutes. Add four
+A workflow in this repo runs the scraper every five minutes. Add four
 secrets once:
 
 **Settings → Secrets and variables → Actions → New repository secret**
@@ -703,6 +867,20 @@ secrets once:
 
 Nothing else to configure. After that, the site keeps itself current
 forever without you touching it.
+
+**The three workflows, and what each is for.**
+
+| Workflow | When | What it does |
+|---|---|---|
+| `ingest.yml` | every 5 minutes | One full pass over every outlet: fetch, deduplicate, store, and the artwork repair passes |
+| `almanac.yml` | 01:00 Nepal time (19:15 UTC the day before) | The day's almanac and the twelve horoscopes, and the week ahead of them |
+| `refresh-images.yml` | nightly, and on a button | Works through the rows whose picture has never been confirmed against their own page |
+
+GitHub's own scheduling is not precise — a scheduled workflow can run
+minutes or hours late, and on a busy repository much later — so the
+long-lived worker ALSO does the almanac, hourly, and whichever lands
+first wins. The store is an upsert on the Gregorian day, so the second
+run refreshes the row instead of adding a second one.
 
 #### Option B — a real background service (lower latency)
 
@@ -719,12 +897,50 @@ the sources table every 5 minutes.
 The worker must be a **single replica**. Two replicas means two
 schedulers polling the same 27 outlets concurrently.
 
+### The thing to check first: is anything else polling?
+
+Two schedulers over one set of outlets is not a redundancy, it is a
+bug: every outlet is asked twice as often, publishers start refusing
+with 403, and the dashboard's last-result-per-outlet becomes a
+race between the two.
+
+**The symptom is a dashboard where an outlet flips between Healthy
+and Failed with no change in the world.** The worker on a laptop is
+the usual culprit — it keeps running after the terminal is closed, it
+keeps running after the code has changed (Python loads modules at
+import time, so editing the files on disk changes nothing in a
+running process), and it stops the moment the machine sleeps.
+
+So, on the machine that has been running the worker:
+
+```bash
+# What is polling right now?
+tasklist | findstr python
+
+# Stop the ones that are not the service you mean to run.
+taskkill /PID <pid> /F
+```
+
+And on the hosted worker, make sure the **service type is Background
+Worker** and not Web Service. A Web Service binds no port, so Render's
+health check cannot find one, sends SIGTERM and restarts it every
+fifteen minutes; a Background Worker does not sleep and does not need
+the port.
+
+#### The worker must be redeployed when the code changes
+
+A Render service redeploys when you push, if it is set to. Check it
+has: the dashboard's "last poll" times are the proof, and an outlet
+whose error is `KeyError: 'date'` — a line that no longer exists in
+the tree — is a worker running old code.
+
 ### Environment
 
 **Vercel** (`apps/web`): `NEXT_PUBLIC_SUPABASE_URL`,
 `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_SITE_URL`, and optionally
 `GEMINI_API_KEY`, `INGESTION_SERVICE_URL`, `INGESTION_SECRET`,
-`ADMIN_SESSION_SECRET`.
+`ADMIN_SESSION_SECRET` (and `ADMIN_SESSION_SECRET_PREVIOUS`, while a
+key is being rotated).
 
 `SUPABASE_SERVICE_ROLE_KEY` is also read on the server, by the admin
 panel only — it is never sent to the browser. The admin panel needs a
@@ -745,7 +961,7 @@ cd apps/ingestion
 .venv/Scripts/python.exe -m pytest            # 432 tests
 
 cd apps/web
-npx playwright test                            # 106 tests
+npx playwright test                            # 142 tests
 ```
 
 The ingestion suite covers URL normalisation (including the srcset and

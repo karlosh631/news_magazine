@@ -934,11 +934,10 @@ So every run queues the next one. The last step of `ingest.yml`
 dispatches `ingest.yml` again, and `workflow_dispatch` is one of the
 two events a `GITHUB_TOKEN` may trigger — no secret of its own is
 needed, only the `actions: write` permission the workflow already
-carries for it. The run waits out the remainder of its five minutes
-first, so the cadence stays the one the publishers were promised
-rather than the ninety seconds a pass actually takes. The cron stays as
-the backstop: if the chain is ever broken, the next cron run starts it
-again.
+carries for it. The run waits before queueing the next one, so the
+cadence stays the one the publishers were promised rather than the
+ninety seconds a pass actually takes. The cron stays as the backstop:
+if the chain is ever broken, the next cron run starts it again.
 
 GitHub's own scheduling is not precise — a scheduled workflow can run
 minutes or hours late, and on a busy repository much later — so the

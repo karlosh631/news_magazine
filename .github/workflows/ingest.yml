@@ -269,15 +269,17 @@ jobs:
       # stays as the backstop: if this chain is ever broken (a cancelled
       # run, a changed token), the next cron run starts it again.
       #
-      # THE CADENCE IS STILL FIVE MINUTES
-      # ---------------------------------
+      # THE CADENCE IS STILL FIVE MINUTES OR SO
+      # ---------------------------------------
       # The chain would otherwise run back-to-back at the speed of the
       # pass itself, which is roughly ninety seconds - three times the
       # request rate to every publisher that the five-minute cadence
-      # was chosen for. So the run waits out the remainder of its five
-      # minutes before queueing the next one. The wait is free: this
-      # repository is public, and public repositories get Actions
-      # minutes without charge.
+      # was chosen for. So the run waits before queueing the next one,
+      # and the wait is set so that the gap between passes - the wait
+      # PLUS the tail of the workflow that is still finishing - lands
+      # on five or six minutes. The wait is free: this repository is
+      # public, and public repositories get Actions minutes without
+      # charge.
       # =============================================================
       - name: Queue the next run
         if: always()
@@ -285,7 +287,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           WORKFLOW: ingest.yml
-          CADENCE_SECONDS: "300"
+          # The gap between one run and the next is this wait PLUS the
+          # tail of the workflow that is still finishing (the keep-warm
+          # ping, and the queue in front of the next runner). Measured
+          # on 2026-10-23 that tail is two to four minutes, so a
+          # five-minute wait produced a nine-minute gap between passes.
+          # Three and a half minutes of waiting plus that tail is a
+          # pass every five or six minutes, which is the cadence the
+          # publishers were promised.
+          CADENCE_SECONDS: "210"
         run: |
           set +e
           now=$(date +%s)
@@ -293,7 +303,7 @@ jobs:
           elapsed=$(( now - started ))
           wait=$(( CADENCE_SECONDS - elapsed ))
           if [ "$wait" -gt 0 ]; then
-            echo "Waiting ${wait}s so the next run starts five minutes after this one did."
+            echo "Waiting ${wait}s so the next pass starts a few minutes after this one did."
             sleep "$wait"
           fi
           code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -X POST \

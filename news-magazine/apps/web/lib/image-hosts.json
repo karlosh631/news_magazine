@@ -34,5 +34,18 @@
   { "protocol": "https", "hostname": "**.nepalhomes.com" },
   { "protocol": "https", "hostname": "**.setopati.com" },
   { "protocol": "https", "hostname": "**.bbci.co.uk" },
-  { "protocol": "https", "hostname": "**.hugedomains.com" }
+  { "protocol": "https", "hostname": "**.hugedomains.com" },
+  { "protocol": "https", "hostname": "**.linodeobjects.com" },
+  { "protocol": "https", "hostname": "osnepal.com" },
+  { "protocol": "https", "hostname": "**.osnepal.com" },
+  { "protocol": "https", "hostname": "thahakhabar.com" },
+  { "protocol": "https", "hostname": "**.thahakhabar.com" },
+  { "protocol": "https", "hostname": "newsofnepal.com" },
+  { "protocol": "https", "hostname": "**.newsofnepal.com" },
+  { "protocol": "https", "hostname": "baahrakhari.com" },
+  { "protocol": "https", "hostname": "**.ujyaaloonline.com" },
+  { "protocol": "https", "hostname": "rajdhanidaily.com" },
+  { "protocol": "https", "hostname": "**.nepalitimes.com" },
+  { "protocol": "https", "hostname": "nepalsamaya.com" },
+  { "protocol": "https", "hostname": "**.karobardaily.com" }
 ]

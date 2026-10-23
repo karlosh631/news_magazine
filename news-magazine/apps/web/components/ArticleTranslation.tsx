@@ -24,13 +24,37 @@ import {
  * largest text on the page — in the original language.
  */
 
-function useSiteLanguage(): Lang {
-  const [language, setLanguage] = useState<Lang>("en");
+/**
+ * The language the reader has CHOSEN, or null if they have not chosen.
+ *
+ * Null is not "English". The site renders in Nepali by default — the
+ * document is declared `lang="ne"` and the headlines are overwhelmingly
+ * Nepali — and the toggle in the header is what changes that. So a
+ * reader who has never touched the toggle has not asked for English;
+ * they have not asked for anything.
+ *
+ * The distinction matters here, because "no choice" used to read as
+ * "English", and that made every article page machine-translate its
+ * headline and its four key points through a third-party service the
+ * moment it opened:
+ *
+ *   - five requests to api.mymemory.translated.net on EVERY article
+ *     page, before the reader had asked for a translation;
+ *   - the article's own words sent to a company outside the site;
+ *   - a text swap after the page had painted, which moved everything
+ *     below the headline — that was the article page's layout shift.
+ *
+ * lib/translate.ts says outright that the service "is only ever called
+ * when the reader has actually asked for a translation". This is where
+ * that promise is kept.
+ */
+function useSiteLanguage(): Lang | null {
+  const [language, setLanguage] = useState<Lang | null>(null);
 
   useEffect(() => {
     const read = () => {
       const stored = localStorage.getItem("site-language");
-      setLanguage(stored === "ne" ? "ne" : "en");
+      setLanguage(stored === "en" || stored === "ne" ? stored : null);
     };
 
     read();
@@ -65,7 +89,9 @@ export function ArticleTranslation({
   const source: Lang = language === "en" ? "en" : "ne";
   const wanted = otherLanguage(source);
 
-  const needsTranslation = siteLanguage === wanted;
+  // Only when the reader has chosen a language AND that language is
+  // not the one the outlet wrote in. See useSiteLanguage above.
+  const needsTranslation = siteLanguage !== null && siteLanguage === wanted;
   const hasLocalPoints =
     Array.isArray(translatedPoints) && translatedPoints.length > 0;
   const hasLocalHeadline = Boolean(translatedHeadline);

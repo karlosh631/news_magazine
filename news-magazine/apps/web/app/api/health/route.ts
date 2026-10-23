@@ -19,7 +19,10 @@ export const dynamic = "force-dynamic";
  * row counts — just liveness.
  */
 export async function GET(request: Request) {
-  const supabase = createPublicSupabaseClient();
+  // Never cached. A health check that answers from a cache is not a
+  // health check; it is a report of what was true when the answer was
+  // first computed.
+  const supabase = createPublicSupabaseClient({ revalidate: 0 });
   const probe = await supabase.from("categories").select("id").limit(1);
 
   if (probe.error) {

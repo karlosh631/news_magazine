@@ -3,6 +3,7 @@
 import { useCallback, useMemo, useState } from "react";
 
 import { NewsCard } from "@/components/NewsCard";
+import { showsNothing } from "@/lib/card-artwork";
 import type { LatestArticle } from "@/types/database";
 
 /**
@@ -105,9 +106,17 @@ export function useImagelessFilter(articles: LatestArticle[]) {
   }, []);
 
   const visible = useMemo(() => {
-    if (imageless.size === 0) return articles;
-    const kept = articles.filter((article) => !imageless.has(article.id));
-    return kept.length > 0 ? kept : articles;
+    // A story that will have nothing to show at all is left out BEFORE
+    // the first paint, so no card is taken away under the reader and
+    // the column does not jump. See lib/card-artwork.ts.
+    const withSomething = articles.filter(
+      (article) => !showsNothing(article)
+    );
+    const base = withSomething.length > 0 ? withSomething : articles;
+
+    if (imageless.size === 0) return base;
+    const kept = base.filter((article) => !imageless.has(article.id));
+    return kept.length > 0 ? kept : base;
   }, [articles, imageless]);
 
   return { visible, markImageless } as const;

@@ -40,6 +40,73 @@ function resolveAnonKey(): string {
  * before migration 0014 ran, so the row existed in the database and the
  * page still 404'd.
  */
+
+/**
+ * How long a public read may be reused before the database is asked again.
+ *
+ * THE REASON THE READS ARE NOT `no-store` ANY MORE
+ * ------------------------------------------------
+ * Every public route on this site renders from the database on the
+ * request, and the database is in another continent from the server
+ * that renders it. Measured against the live site, that is the whole
+ * story of the Performance score:
+ *
+ *   TTFB on the homepage      1.9s
+ *   TTFB on a category page   2.9s
+ *
+ * — all of it spent waiting for PostgREST, before a single byte of
+ * HTML was produced. Nothing the page does afterwards can be fast
+ * enough to matter while the browser is still waiting for the first
+ * byte.
+ *
+ * A cached read turns that wait into a cache lookup. The entry is
+ * keyed by the request URL, exactly as before, and it EXPIRES: a
+ * minute-old answer is a minute-old answer, not a frozen one, so the
+ * feed still moves and the newest story is never more than a minute
+ * away. The old failure mode — an entry that never expired, so the
+ * homepage was pinned to the first thing it ever fetched — cannot
+ * happen with a revalidate window.
+ *
+ * Sixty seconds is the trade the site asked for: a one-minute-old
+ * cache is fine, a five-minute-old one is not.
+ */
+export const PUBLIC_READ_REVALIDATE_SECONDS = 60;
+
+/**
+ * A fetch whose GETs are cached by Next for `revalidate` seconds.
+ *
+ * `next: { revalidate }` is the explicit form, and it is explicit on
+ * purpose. The IMPLICIT form — a plain GET with no `cache` option —
+ * is cached FOREVER on Next 14, which is the bug the comment above
+ * describes. An explicit revalidate puts a deadline on every entry.
+ *
+ * `cache` and `next.revalidate` are mutually exclusive in Next (it
+ * warns if both are set), so the incoming `cache` is dropped rather
+ * than left to fight with the revalidate.
+ *
+ * Only GET and HEAD are cached. A write is a write.
+ */
+function cachedReadFetch(revalidate: number): typeof fetch {
+  return (input, init) => {
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method !== "GET" && method !== "HEAD") {
+      return fetch(input, init);
+    }
+
+    const { cache: _cache, ...rest } = init ?? {};
+    return fetch(input, {
+      ...rest,
+      next: { ...(rest.next ?? {}), revalidate },
+    });
+  };
+}
+
+/**
+ * A fetch that is never cached.
+ *
+ * Used where the answer depends on WHO is asking, or where the answer
+ * is about the health of the connection rather than about the news.
+ */
 const noStoreFetch: typeof fetch = (input, init) =>
   fetch(input, { ...init, cache: "no-store" });
 
@@ -58,15 +125,20 @@ const noStoreFetch: typeof fetch = (input, init) =>
  *
  * Using the anon key (never the service-role key) keeps Row Level
  * Security as the authorization boundary.
+ *
+ * `revalidate` is how long one answer may be reused, in seconds. Zero
+ * means never reuse it. The default is the site's news window: a
+ * minute-old feed is a feed that is still news.
  */
-export function createPublicSupabaseClient() {
+export function createPublicSupabaseClient(options?: { revalidate?: number }) {
+  const revalidate = options?.revalidate ?? PUBLIC_READ_REVALIDATE_SECONDS;
   return createClient<Database>(resolveUrl(), resolveAnonKey(), {
     auth: {
       persistSession: false,
       autoRefreshToken: false,
       detectSessionInUrl: false,
     },
-    global: { fetch: noStoreFetch },
+    global: { fetch: revalidate > 0 ? cachedReadFetch(revalidate) : noStoreFetch },
   });
 }
 

@@ -117,7 +117,99 @@ export interface ReelFeedResult {
  * insert/delete on `reel_likes` — exactly what this feature needs.
  */
 export function createReelsClient(): SupabaseClient {
-  return createPublicSupabaseClient() as unknown as SupabaseClient;
+  return createPublicSupabaseClient({
+    revalidate: REELS_READ_REVALIDATE_SECONDS,
+  }) as unknown as SupabaseClient;
+}
+
+/**
+ * How long a reels read may be reused before the database is asked again.
+ *
+ * Shorter than the site's news window on purpose. The reels query is
+ * the heaviest one on the site — a couple of hundred rows, each with an
+ * aggregate count of its likes — and it is asked for on every render of
+ * a page that is really a video player. Caching it for a minute would
+ * make the server much cheaper, but a like the reader has just tapped
+ * would not move the number under their thumb for a minute, and that is
+ * a number they are looking at.
+ *
+ * Fifteen seconds is short enough that the count has caught up before
+ * anyone looks for it, and long enough that the page is not asking
+ * Supabase for the whole catalogue on every scroll.
+ */
+export const REELS_READ_REVALIDATE_SECONDS = 15;
+
+/**
+ * The origin every Wikimedia Commons file is served from.
+ */
+const WIKIMEDIA_ORIGINALS = "https://upload.wikimedia.org/wikipedia/commons/";
+
+/**
+ * The thumbnail width the poster is asked for.
+ *
+ * Wikimedia only serves a fixed set of thumbnail widths — 120, 250, 330,
+ * 500, 960, 1280, 1920, 3840 — and answers anything else with HTTP 400
+ * and an HTML error page. A reel card is about 420 pixels wide, so 500
+ * is the smallest width that is not visibly soft.
+ */
+const WIKIMEDIA_POSTER_WIDTH = 500;
+
+/**
+ * The poster frame for a Wikimedia clip, rebuilt from the clip's own URL.
+ *
+ * THE POSTER URL STORED IN THE DATABASE DOES NOT WORK
+ * ---------------------------------------------------
+ * Every Wikimedia row in `reels` carries a `poster_url` of the shape
+ *
+ *   /wikipedia/commons/c/ce/thumb/commons/c/ce/720px--NAME.ogv.jpg
+ *
+ * which is wrong twice over. The path repeats the hash directory
+ * (`c/ce` twice), and the width — 720 — is not one of the widths
+ * Wikimedia serves. The result is HTTP 400 with an HTML error body, and
+ * because the browser asked for an image and got text, Chrome blocks
+ * the response outright (net::ERR_BLOCKED_BY_ORB) rather than showing a
+ * broken-image icon.
+ *
+ * Measured on the live reels page: 400 distinct broken poster URLs, 579
+ * blocked responses, and the whole page was failing its own network
+ * audit because of them.
+ *
+ * The original file is not hard to find, because the clip's own URL
+ * says where it is:
+ *
+ *   /wikipedia/commons/transcoded/c/ce/NAME.ogv/NAME.ogv.480p.vp9.webm
+ *
+ * The transcoded derivative is filed under the same hash directory as
+ * the original, and MediaWiki's thumbnail of a video is
+ *
+ *   /wikipedia/commons/thumb/<hash>/<FILE>/<width>px-<FILE>.jpg
+ *
+ * so the poster follows from the clip's URL with no guesswork. This
+ * rebuilds it. The stored URL is used only when the clip is not a
+ * Wikimedia one, or when its URL is a shape this does not recognise.
+ */
+function wikimediaPosterUrl(
+  videoUrl: string,
+  posterUrl: string | null
+): string | null {
+  if (!videoUrl.startsWith(WIKIMEDIA_ORIGINALS)) return posterUrl;
+
+  const rest = videoUrl.slice(WIKIMEDIA_ORIGINALS.length);
+  const withoutTranscoded = rest.startsWith("transcoded/")
+    ? rest.slice("transcoded/".length)
+    : rest;
+
+  // "<hash>/<sub>/<FILE>" in both shapes. The transcoded form adds a
+  // fourth segment holding the derivative's own name, which is not
+  // where the original lives.
+  const parts = withoutTranscoded.split("/");
+  if (parts.length < 3) return posterUrl;
+
+  const file = parts[2];
+  if (!file || !file.includes(".")) return posterUrl;
+
+  const directory = `${parts[0]}/${parts[1]}`;
+  return `${WIKIMEDIA_ORIGINALS}thumb/${directory}/${file}/${WIKIMEDIA_POSTER_WIDTH}px-${file}.jpg`;
 }
 
 /**
@@ -141,10 +233,14 @@ export function isMissingReelsTable(error: PostgrestError): boolean {
  * clip. It rides on the public select policy 0014 grants on both tables,
  * so no service-role key is involved.
  *
- * Nothing caches this. There is no `revalidate`, no `unstable_cache`, no
- * `next: { revalidate }` on the request — a like or a fresh ingest should
- * be visible on the very next render, and a stale like count under a
- * thumb is a lie the reader can see.
+ * The read IS cached, for fifteen seconds, and the window is
+ * `REELS_READ_REVALIDATE_SECONDS` above. It used to be cached for ever
+ * — Next 14 caches a plain GET with no `cache` option indefinitely,
+ * which is a different bug and was the reason this file once froze a
+ * feed at whatever the database held the first time it was read. A
+ * bounded window is the difference between "slightly stale" and
+ * "frozen", and a like count fifteen seconds behind is not a lie the
+ * reader can see.
  */
 export async function getReels(opts?: { limit?: number }): Promise<ReelFeedResult> {
   const limit = clampLimit(opts?.limit);
@@ -275,6 +371,7 @@ function isPlayableReel(reel: Reel): boolean {
 /** Map a raw `reels` row to the shape the feed renders. */
 function mapReelRow(row: unknown): Reel {
   const item = row as Record<string, unknown>;
+  const videoUrl = String(item.video_url);
 
   return {
     id: String(item.id),
@@ -284,13 +381,16 @@ function mapReelRow(row: unknown): Reel {
     source_key: (item.source_key as string) ?? null,
     // The only two columns the schema declares NOT NULL, and the player
     // cannot start without them.
-    video_url: String(item.video_url),
+    video_url: videoUrl,
     // Absent on every database that has not had 0015 applied, which is
     // the whole point of it being nullable: reading a column that does
     // not exist is a PGRST error, and a column that is there but null is
     // just "this clip is a plain media file".
     embed_url: (item.embed_url as string) ?? null,
-    poster_url: (item.poster_url as string) ?? null,
+    poster_url: wikimediaPosterUrl(
+      videoUrl,
+      (item.poster_url as string) ?? null
+    ),
     title: (item.title as string) ?? null,
     description: (item.description as string) ?? null,
     creator_name: (item.creator_name as string) ?? null,

@@ -5,7 +5,28 @@ import { LiveArticleFeed } from "@/components/LiveArticleFeed";
 import { getBreakingNews, getLatestArticles } from "@/lib/news";
 import { SITE_LOGO, SITE_NAME, SITE_URL, jsonLd } from "@/lib/site";
 
-export const dynamic = "force-dynamic";
+/**
+ * The homepage is regenerated at most once a minute.
+ *
+ * It used to be `dynamic = "force-dynamic"`, which meant every single
+ * request re-rendered the whole page and re-read the whole feed from
+ * the database, and the reader waited for all of it before the first
+ * byte of HTML arrived. Measured against the live site, that was
+ * 1.9 seconds of time-to-first-byte on the homepage and 2.9 on a
+ * category page — the single largest thing keeping the Performance
+ * score at 40.
+ *
+ * A minute is the trade the site asked for: "a one-minute-old cache is
+ * fine, a five-minute-old one is not". The newest story is at most a
+ * minute old, and the client-side poll on top of this (every ten
+ * seconds) merges in anything newer the moment the worker publishes
+ * it, so the page a reader is looking at still moves.
+ *
+ * `revalidate` and `dynamic` are alternatives, not a pair: a route
+ * that exports `revalidate` is a static route that is regenerated in
+ * the background, and the CDN serves the HTML it already has.
+ */
+export const revalidate = 60;
 
 export const metadata: Metadata = {
   alternates: { canonical: "/" },
@@ -74,6 +95,18 @@ export default async function HomePage() {
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: jsonLd(structuredData) }}
       />
+
+      {/*
+        The page's name.
+
+        The homepage has no visible title block — the breaking-news
+        ticker and the grid say what the page is — but a page with no
+        <h1> is a page whose subject a screen reader and a crawler
+        both have to guess, and axe-core fails it for
+        `page-has-heading-one`. It is visually hidden rather than
+        absent.
+      */}
+      <h1 className="sr-only">Latest news from across Nepal</h1>
 
       {breaking.length > 0 && <BreakingNewsTicker articles={breaking} />}
 

@@ -4,9 +4,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { EmptyState } from "@/components/EmptyState";
 import { NewsCard } from "@/components/NewsCard";
+import { showsNothing } from "@/lib/card-artwork";
 import { dropDuplicateStories } from "@/lib/feed-dedup";
 import { dropRepeatedImages } from "@/lib/feed-images";
 import { byNewest, mergeArticles } from "@/lib/feed-merge";
+import { SITE_NAME, SITE_URL, jsonLd } from "@/lib/site";
 import type { LatestArticle } from "@/types/database";
 
 /**
@@ -104,6 +106,50 @@ const MORE_PAGE_SIZE = 30;
  * does not never pays for a card they did not look at.
  */
 const SENTINEL_ROOT_MARGIN = "1200px 0px";
+
+/**
+ * The heading a category page shows.
+ *
+ * "national" -> "National news".
+ *
+ * The category NAME is not passed in — the route knows it and this
+ * component does not — so the slug is turned into words. The category
+ * page is the one route that cannot be given a heading by the page
+ * file itself without a change to a file this work is not touching, so
+ * the heading is produced here, from the one thing the route does hand
+ * over.
+ */
+function categoryHeading(slug: string): string {
+  const words = slug.replace(/-/g, " ").trim();
+  if (!words) return "Latest news";
+  const title = words.charAt(0).toUpperCase() + words.slice(1);
+  return `${title} news`;
+}
+
+/**
+ * Will this card have nothing at all to show?
+ *
+ * A card shows, in order of preference: its picture, its own key
+ * points, or an honest "No image available" panel. When it has none
+ * of the three, the feed swaps it for the next story — which is right,
+ * and which used to happen AFTER the page had painted.
+ *
+ * THAT ORDER WAS THE LAYOUT SHIFT
+ * -------------------------------
+ * The swap is driven by `onImageUnavailable`, which a card raises
+ * from an effect once it knows it has nothing to show. An effect runs
+ * after the first paint, so the card was in the page, the reader saw
+ * it, and then it was taken away — and every card below it slid up
+ * into the gap. Measured on the homepage and on a category page, that
+ * was a Cumulative Layout Shift of 0.07 and 0.21, which is the
+ * difference between a "good" and a "poor" CLS score.
+ *
+ * The swap does not have to wait for an effect. Whether a card will
+ * show nothing is a fact about the story, and the story is already in
+ * hand before anything is rendered. The rule and the reason for it
+ * live in lib/card-artwork.ts, which is where the card's own copy of
+ * it should end up.
+ */
 
 type Rotate = "off" | "on";
 
@@ -662,14 +708,21 @@ export function LiveArticleFeed({
     // below, which exists for the same reason.
     const deduped = dropRepeatedImages(dropDuplicateStories(articles));
 
-    if (imageless.size === 0) return deduped;
+    // The stories that will have nothing to show are left out BEFORE
+    // the first paint, so that no card is ever taken away under the
+    // reader. See `showsNothing` above.
+    const withSomething = deduped.filter((article) => !showsNothing(article));
+    const withoutEmpty =
+      withSomething.length > 0 ? withSomething : deduped;
 
-    const kept = deduped.filter((article) => !imageless.has(article.id));
+    if (imageless.size === 0) return withoutEmpty;
+
+    const kept = withoutEmpty.filter((article) => !imageless.has(article.id));
 
     // Never let a page of placeholders become an empty page. If dropping
     // the imageless stories would empty the feed, show them anyway — the
     // card's own "No image available" state is the honest last resort.
-    return kept.length > 0 ? kept : deduped;
+    return kept.length > 0 ? kept : withoutEmpty;
   }, [articles, imageless]);
 
   const loadStatus = useMemo(() => {
@@ -692,13 +745,18 @@ export function LiveArticleFeed({
 
   if (visible.length === 0) {
     return (
-      <EmptyState
-        title={emptyState?.title ?? "No stories yet"}
-        description={
-          emptyState?.description ??
-          "The ingestion worker has not published anything yet."
-        }
-      />
+      <>
+        {category ? (
+          <h1 className="sr-only">{categoryHeading(category)}</h1>
+        ) : null}
+        <EmptyState
+          title={emptyState?.title ?? "No stories yet"}
+          description={
+            emptyState?.description ??
+            "The ingestion worker has not published anything yet."
+          }
+        />
+      </>
     );
   }
 
@@ -708,6 +766,59 @@ export function LiveArticleFeed({
       onMouseEnter={() => pause(true)}
       onMouseLeave={() => pause(false)}
     >
+      {/*
+        The page's name, when this feed is a category page.
+
+        A page with no <h1> is a page whose subject a screen reader
+        and a crawler both have to guess, and axe-core fails it for
+        `page-has-heading-one`. The homepage's own heading is declared
+        by the homepage; a category page's heading belongs to the
+        category, and the category is what this component is told
+        about.
+      */}
+      {category ? (
+        <>
+          <h1 className="sr-only">{categoryHeading(category)}</h1>
+
+          {/*
+            What this page IS, for a machine.
+
+            A category page is a list of news stories, and a list of
+            news stories has a type: CollectionPage, with an ItemList
+            inside it naming the stories and where they are. The
+            homepage already says what the SITE is; a category page
+            saying what the CATEGORY is completes the picture, and it
+            is the difference between a crawler knowing there are
+            forty stories here and knowing there are forty stories
+            here, called what they are and linked individually.
+          */}
+          <script
+            type="application/ld+json"
+            dangerouslySetInnerHTML={{
+              __html: jsonLd({
+                "@context": "https://schema.org",
+                "@type": "CollectionPage",
+                name: categoryHeading(category),
+                url: `${SITE_URL}/category/${category}`,
+                isPartOf: {
+                  "@type": "WebSite",
+                  name: SITE_NAME,
+                  url: SITE_URL,
+                },
+                mainEntity: {
+                  "@type": "ItemList",
+                  itemListElement: visible.slice(0, 20).map((article, index) => ({
+                    "@type": "ListItem",
+                    position: index + 1,
+                    url: `${SITE_URL}/article/${article.slug}`,
+                    name: article.headline,
+                  })),
+                },
+              }),
+            }}
+          />
+        </>
+      ) : null}
       <div
         id="live-article-grid"
         className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3"

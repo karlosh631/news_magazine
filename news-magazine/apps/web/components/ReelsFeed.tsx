@@ -22,6 +22,7 @@ import {
   shouldDriftRun,
 } from "@/lib/drift";
 import type { Reel } from "@/lib/reels";
+import { SITE_NAME, SITE_URL, jsonLd } from "@/lib/site";
 import type { LatestArticle } from "@/types/database";
 
 /**
@@ -103,6 +104,58 @@ const FEED_SCROLL =
   "h-full min-h-0 w-full snap-y snap-mandatory overflow-y-scroll overscroll-contain scroll-smooth bg-gray-950";
 const FEED_ITEM = "h-full w-full shrink-0 snap-start scroll-smooth";
 const COLUMN_WINDOW = "h-full min-h-0 overflow-hidden";
+
+/**
+ * How many reels are mounted at once.
+ *
+ * THE CATALOGUE IS NOT THE PAGE
+ * -----------------------------
+ * The page is a video feed, and a video feed is a thing the reader
+ * scrolls through one screen at a time. Rendering the whole catalogue
+ * up front put every clip in the document twice — once for the phone
+ * layout and once for the desktop one — which on the live site was:
+ *
+ *   166 reels x 2 layouts   332 reel cards
+ *   + the drifting columns  ~48 news cards
+ *                             ---
+ *                             380 cards, 17,000 DOM nodes
+ *
+ * and the measured cost of that was a 37-second Total Blocking Time on
+ * a throttled phone. Not 37 seconds of video: 37 seconds of the main
+ * thread being told about four hundred cards nobody had scrolled to
+ * yet.
+ *
+ * A window keeps the promise the feed makes — endless, and the whole
+ * catalogue is reachable — without paying for the parts of it the
+ * reader has not reached. The window grows as the reader approaches
+ * its end, so the catalogue is still all there, and the reader's place
+ * is never disturbed by it arriving.
+ */
+const REELS_WINDOW = 8;
+
+/** How many more reels are mounted each time the reader nears the end. */
+const REELS_WINDOW_STEP = 8;
+
+/**
+ * How far ahead of the end of the feed the next batch is mounted.
+ *
+ * The reader is never made to wait for a reel: the batch is ready
+ * before they reach it.
+ */
+const REELS_WINDOW_ROOT_MARGIN = "800px 0px";
+
+/**
+ * The `inert` attribute, for the drifting columns' hidden repeats.
+ *
+ * React 18 does not know the attribute — it arrived in React 19 — and
+ * the types that do know it declare it as a boolean, which React 18
+ * would refuse to render (it drops `true` on an attribute it does not
+ * recognise, with a warning). So it is passed as the STRING value the
+ * content attribute takes: `inert` is a boolean content attribute, so
+ * present means inert whatever its value, and `inert=""` is how HTML
+ * spells "present".
+ */
+const INERT = { inert: "" } as unknown as React.HTMLAttributes<HTMLDivElement>;
 
 /**
  * One news column that drifts downwards forever.
@@ -346,6 +399,26 @@ function AutoScrollColumn({
               key={copy}
               ref={copy === 0 ? copyRef : undefined}
               aria-hidden={copy > 0}
+              // `inert` is the other half of `aria-hidden`, and the
+              // half that actually works.
+              //
+              // `aria-hidden` only removes a subtree from the
+              // ACCESSIBILITY TREE. It does not take the links out of
+              // the TAB ORDER, so a keyboard reader tabbed into a
+              // hidden copy landed on a headline that was not on the
+              // screen — and axe-core rightly failed the page for it
+              // ("aria-hidden-focus: Focusable content should have
+              // tabindex=-1 or be removed from the DOM").
+              //
+              // `inert` removes the subtree from the tab order AND from
+              // the accessibility tree AND from the pointer, which is
+              // what a decorative repeat of a list of links wants.
+              //
+              // React 18's types predate the attribute (it arrived in
+              // React 19), so it is passed as the string value the
+              // content attribute takes. `inert` is a boolean content
+              // attribute: present means inert, whatever its value.
+              {...(copy > 0 ? INERT : {})}
               // The bottom padding is the gap between this copy's last
               // card and the next copy's first one, so it is part of the
               // measured height and the wrap stays seamless.
@@ -380,6 +453,21 @@ export function ReelsFeed({
   );
   const [driftPaused, setDriftPaused] = useState(false);
   const [reduceMotion, setReduceMotion] = useState(false);
+
+  /*
+    How much of the catalogue is mounted. See REELS_WINDOW above.
+
+    The window only ever GROWS. A new clip arriving (the header
+    refreshes the server tree every so often) must not shrink the
+    list under the reader, so the count is never lowered — the feed
+    keeps whatever it has already mounted and adds to it.
+  */
+  const [windowSize, setWindowSize] = useState(REELS_WINDOW);
+
+  const mountedReels = useMemo(
+    () => reels.slice(0, Math.max(REELS_WINDOW, windowSize)),
+    [reels, windowSize]
+  );
 
   /*
     The story the reader has open, if any.
@@ -502,6 +590,61 @@ export function ReelsFeed({
   const feedRefs = useRef(new Set<HTMLDivElement>());
   const lastReelId = reels.length ? reels[reels.length - 1]?.id : null;
 
+  /*
+    Mounting more of the catalogue.
+
+    The window grows when the reader reaches the end of what is
+    mounted. The feed is a snap scroller, so "reaches the end" is a
+    scroll position rather than an element in view — and the check is
+    made against the scroller itself, which is also how the reader's
+    own gesture is what triggers it. Nothing is loaded in the
+    background: a reel is mounted when the reader is a screen away
+    from needing it.
+
+    The two layouts are both in the DOM and only one of them has a
+    height; the other measures zero and is skipped, so the window
+    grows once, not twice.
+  */
+  const growthPending = useRef(false);
+
+  useEffect(() => {
+    const containers = [...feedRefs.current];
+    if (containers.length === 0) return;
+
+    const onScroll = () => {
+      if (growthPending.current) return;
+
+      for (const container of containers) {
+        if (!container || container.clientHeight === 0) continue;
+        const remaining =
+          container.scrollHeight - container.scrollTop - container.clientHeight;
+        if (remaining > 800) continue;
+
+        growthPending.current = true;
+        setWindowSize((current) =>
+          current >= reels.length
+            ? current
+            : Math.min(reels.length, current + REELS_WINDOW_STEP)
+        );
+        break;
+      }
+    };
+
+    for (const container of containers) {
+      container.addEventListener("scroll", onScroll, { passive: true });
+    }
+    return () => {
+      for (const container of containers) {
+        container.removeEventListener("scroll", onScroll);
+      }
+    };
+  }, [reels.length]);
+
+  // A new batch has been mounted, so the next one may be requested.
+  useEffect(() => {
+    growthPending.current = false;
+  }, [mountedReels.length]);
+
   useEffect(() => {
     if (!lastReelId || activeId !== lastReelId) return;
 
@@ -530,7 +673,7 @@ export function ReelsFeed({
   // which empties the set the observer is mid-way through reading.
   const attach = useMemo(() => {
     const map = new Map<string, (element: HTMLElement | null) => void>();
-    for (const reel of reels) {
+    for (const reel of mountedReels) {
       map.set(reel.id, (element) => {
         if (element) {
           itemRefs.current.add(element);
@@ -547,7 +690,7 @@ export function ReelsFeed({
       });
     }
     return map;
-  }, [reels]);
+  }, [mountedReels]);
 
   /** Whichever on-screen reel is closest to the middle of the viewport. */
   const recompute = useCallback(() => {
@@ -688,7 +831,7 @@ export function ReelsFeed({
       tabIndex={0}
       aria-label="Reels"
     >
-      {reels.map((reel) => (
+      {mountedReels.map((reel) => (
         <div
           key={reel.id}
           data-reel-id={reel.id}
@@ -753,6 +896,58 @@ export function ReelsFeed({
     */
     <div className="relative h-full">
       {/*
+        The page's name.
+
+        The reels page is a full-viewport video experience with no
+        visible title, and a page with no <h1> is a page whose subject
+        a screen reader and a crawler both have to guess. It is
+        visually hidden rather than absent: the reader sees the video,
+        the assistive technology is told what the video is.
+      */}
+      <h1 className="sr-only">Reels — short video from around Nepal</h1>
+
+      {/*
+        What this page IS, for a machine.
+
+        A feed of short videos is a list of VideoObjects, and saying
+        so is what lets a search engine, a reader's app or an agent
+        know that the things on this page are videos — with a frame to
+        show for each one, a title, and a date — rather than having to
+        work that out from the markup.
+      */}
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{
+          __html: jsonLd({
+            "@context": "https://schema.org",
+            "@type": "CollectionPage",
+            name: "Reels",
+            url: `${SITE_URL}/category/reels`,
+            isPartOf: {
+              "@type": "WebSite",
+              name: SITE_NAME,
+              url: SITE_URL,
+            },
+            mainEntity: {
+              "@type": "ItemList",
+              itemListElement: mountedReels.map((reel, index) => ({
+                "@type": "ListItem",
+                position: index + 1,
+                item: {
+                  "@type": "VideoObject",
+                  name: reel.title ?? "Reel",
+                  description: reel.description ?? undefined,
+                  thumbnailUrl: reel.poster_url ?? undefined,
+                  uploadDate: reel.published_at ?? undefined,
+                  contentUrl: reel.video_url,
+                },
+              })),
+            },
+          }),
+        }}
+      />
+
+      {/*
         Everything the reader is not currently reading.
 
         It is one element so that a story can take the whole page out
@@ -809,7 +1004,13 @@ export function ReelsFeed({
             // controls to a screen reader.
             aria-label="Auto-scrolling news columns"
             aria-pressed={driftPaused}
-            className="absolute bottom-4 left-1/2 hidden -translate-x-1/2 rounded-full border border-gray-200 bg-white/90 px-3 py-1.5 text-[11px] font-medium uppercase tracking-wider text-gray-500 shadow-sm backdrop-blur transition-colors hover:text-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 lg:inline-flex"
+            // `text-gray-600`, not `text-gray-500`: the button is 11px,
+            // and at that size the WCAG AA threshold is 4.5:1 rather than
+            // the 3:1 that large text gets. Grey-500 on the white/90
+            // pill measured 3.87:1 — a real failure, caught by axe-core
+            // as `color-contrast`. Grey-600 measures 6.05:1 over the
+            // same composite.
+            className="absolute bottom-4 left-1/2 hidden -translate-x-1/2 rounded-full border border-gray-200 bg-white/90 px-3 py-1.5 text-[11px] font-medium uppercase tracking-wider text-gray-600 shadow-sm backdrop-blur transition-colors hover:text-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 lg:inline-flex"
           >
             {driftPaused ? "Resume news" : "Pause news"}
           </button>

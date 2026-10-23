@@ -62,7 +62,9 @@ WHAT IT DOES NOT DO
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 
 import httpx
 
@@ -80,6 +82,31 @@ PROXY_TIMEOUT_SECONDS = 30.0
 #: "this page is gone" or "this server is having a bad day". Only these
 #: send the request to the reader.
 BLOCKED_STATUS_CODES = (401, 403, 405, 406, 407, 429, 451)
+
+#: The reader's own pace.
+#:
+#: A free reader service answers about twenty requests a minute, and a
+#: sweep that asks for four hundred pages in a minute is answered with
+#: "slow down" for most of them - and a "slow down" is a page that
+#: could not be read, which is a story that keeps its broken headline.
+#:
+#: So the reader is asked at most once every three seconds, whatever
+#: the caller is doing. The wait is here rather than in the callers
+#: because the limit belongs to the reader, not to the sweep.
+READER_MIN_INTERVAL_SECONDS = 3.0
+
+_reader_lock = asyncio.Lock()
+_reader_last_call: float = 0.0
+
+
+async def _wait_for_the_reader() -> None:
+    """Hold the reader to its own pace."""
+    global _reader_last_call
+    async with _reader_lock:
+        elapsed = time.monotonic() - _reader_last_call
+        if elapsed < READER_MIN_INTERVAL_SECONDS:
+            await asyncio.sleep(READER_MIN_INTERVAL_SECONDS - elapsed)
+        _reader_last_call = time.monotonic()
 
 
 def _is_blocked(status: int) -> bool:
@@ -114,6 +141,8 @@ async def fetch_via_reader(
         "x-respond-with": "html",
         "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
     }
+
+    await _wait_for_the_reader()
 
     try:
         response = await client.get(

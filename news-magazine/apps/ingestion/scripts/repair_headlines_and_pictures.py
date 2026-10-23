@@ -187,6 +187,23 @@ async def run(limit: int, delay: float, dry_run: bool) -> int:
             )
             .eq("status", "published")
             .is_("duplicate_of", None)
+            # THE SUSPECTS, NOT THE NEWEST ROWS.
+            #
+            # Reading the newest N rows and picking the suspects out of
+            # them spends the run on rows that need nothing, and the
+            # rows that DO need it are older - they were written by
+            # the build that made the mistake, hours and days ago.
+            #
+            # So the query asks for the shape of the mistake directly:
+            # a headline carrying a domain, a headline carrying the
+            # card's date, a headline carrying the time since
+            # publication.
+            .or_(
+                "headline.ilike.*%.com%*,"
+                "headline.ilike.*GMT%*,"
+                "headline.ilike.*minutes ago%*,"
+                "headline.ilike.*मिनेट अघि%*"
+            )
             .order("published_at", desc=True)
             .limit(limit)
             .execute()
@@ -237,6 +254,14 @@ async def run(limit: int, delay: float, dry_run: bool) -> int:
                 continue
 
             if media is None:
+                # Say why. "85 rows could not be read" is a number to
+                # stare at; "85 rows could not be read, and every one
+                # of them was a page the reader proxy also could not
+                # reach" is a diagnosis.
+                print(
+                    f"  {index}/{len(suspects)} could not be read: the page "
+                    f"answered neither for us nor for the reader."
+                )
                 unreadable += 1
                 continue
 

@@ -143,6 +143,21 @@ export default async function CategoryPage({ params, searchParams }: Props) {
     return (
       <main className="min-h-screen">
         <section className="mx-auto w-full max-w-3xl px-4 py-8 sm:px-6 lg:px-8">
+          {/*
+            The page's name.
+
+            The panel carries the day's own heading, and the panel's
+            heading is an h2 — a page whose top heading is a level two
+            is a page whose subject a screen reader and a crawler both
+            have to guess. This is visually hidden rather than absent,
+            so the reader sees the same page and the machine gets a
+            heading.
+          */}
+          <h1 className="sr-only">
+            {date === today
+              ? "आजको पञ्चाङ र राशिफल"
+              : `पञ्चाङ र राशिफल — ${date}`}
+          </h1>
           <PanchangPanel
             panchang={panchang}
             signs={signs}

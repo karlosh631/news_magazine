@@ -134,6 +134,13 @@ async def run(limit: int, delay: float, dry_run: bool) -> int:
     confirmed = 0
     unproven = 0
     skipped = 0
+    # WHY each row could not be proven, and WHICH outlet it was. A run
+    # that says "149 could not be proven" and nothing else is a run
+    # that has to be repeated with more printing; a run that says
+    # "149 could not be proven: 120 of them are Kantipur, and the page
+    # came back empty" is a diagnosis.
+    reasons: dict[str, int] = {}
+    outlets: dict[str, int] = {}
 
     async with media_client() as client:
         validator = ImageValidator(
@@ -146,10 +153,14 @@ async def run(limit: int, delay: float, dry_run: bool) -> int:
                 skipped += 1
                 continue
 
+            outlet = row.get("source_name_snapshot") or "?"
+
             try:
                 page = await extract_from_article(url, client)
                 if page.is_empty():
                     unproven += 1
+                    reasons["empty page"] += 1
+                    outlets[outlet] = outlets.get(outlet, 0) + 1
                     continue
 
                 live = await resolve_live_image(
@@ -161,10 +172,14 @@ async def run(limit: int, delay: float, dry_run: bool) -> int:
             except Exception as exc:  # noqa: BLE001 - one row, not the run
                 print(f"  {index}/{len(rows)} could not be read: {exc}")
                 unproven += 1
+                reasons[type(exc).__name__] = reasons.get(type(exc).__name__, 0) + 1
+                outlets[outlet] = outlets.get(outlet, 0) + 1
                 continue
 
             if not live:
                 unproven += 1
+                reasons["no live picture on the page"] += 1
+                outlets[outlet] = outlets.get(outlet, 0) + 1
                 continue
 
             if dry_run:

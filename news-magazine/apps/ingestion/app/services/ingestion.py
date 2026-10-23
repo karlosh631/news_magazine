@@ -92,6 +92,7 @@ from app.services.sanitizer import (
     sanitize_excerpt,
     sanitize_headline,
     sanitize_plain_text,
+    strip_card_chrome,
 )
 from app.sources.body import (
     MAX_BODY_LENGTH,
@@ -2684,8 +2685,23 @@ async def run_source_sync(
                     # ---- Four-point extractive summary ----
                     # Every point is a verbatim sentence from the article the
                     # outlet published. Nothing is generated.
+                    #
+                    # The card's furniture is taken out first. A
+                    # syndicated story's own page carries the furniture
+                    # in the middle of its text:
+                    #
+                    #     नवलपुरमा अटो दुर्घटना हुँदा १४ जना घाइते
+                    #     nepalnews.com · Fri Oct 23 16:46:14 GMT 2026
+                    #     काठमाडौं । नवलपुरको देवचुली नगरपालिका: ...
+                    #
+                    # and a sentence is not allowed to straddle it, so
+                    # the reader was shown a key point that was half a
+                    # headline and half a date.
                     summary = summarize_from_html(
-                        extracted.article_text if extracted is not None else None,
+                        strip_card_chrome(
+                            extracted.article_text if extracted is not None else None
+                        )
+                        or None,
                         headline=headline,
                         fallback_excerpt=excerpt,
                         num_points=4,

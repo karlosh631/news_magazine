@@ -373,14 +373,10 @@ function applyCursor<T extends { or: (filter: string) => T }>(
  * been applied yet — this sorts whatever comes back, so the page is
  * correct either way.
  *
- * source_count breaks ties, because `published_at` is only second
- * resolution and several outlets publish the same story in the same
- * second.
- *
  * ORDER OF ARRIVAL, NOT PUBLICATION TIME
  * ---------------------------------------
  * The primary key is `ingested_at` — when WE first saw the story — and
- * `published_at` only breaks ties.
+ * the id breaks ties.
  *
  * The reader asked for the most recently FETCHED story on top, and the
  * distinction is not cosmetic. A publisher can sit on a story for an
@@ -397,31 +393,21 @@ function applyCursor<T extends { or: (filter: string) => T }>(
  */
 function newestFirst(rows: LatestArticle[]): LatestArticle[] {
   return [...rows].sort((a, b) => {
-    // THE NEWEST NEWS FIRST.
+    // THE NEWEST FETCHED FIRST.
     //
-    // Publication time, not arrival time. The pipeline reads five
-    // pages of every feed, so it fetches a lot of the ARCHIVE - and
-    // ordering by arrival put those hours-old stories at the top of
-    // the page, because they were fetched last. The reader saw an
-    // eleven o'clock story and, under it, a nine o'clock one that had
-    // simply arrived a moment ago.
-    //
-    // The newest NEWS is what a reader opens a news site for, and the
-    // client's merge puts a story that arrives on top as it arrives
-    // (see `mergeArticles` in lib/feed-merge.ts), so both rules hold
-    // at once: the page is the newest news, and a new arrival goes
-    // to the top of it.
-    const left = a.published_at ? Date.parse(a.published_at) : 0;
-    const right = b.published_at ? Date.parse(b.published_at) : 0;
-    if (right !== left) return right - left;
-
-    // The tiebreaker: the most recently fetched copy of the same
-    // moment wins, so the better picture and the higher outlet count
-    // end up on the card the reader sees.
+    // The same order the query runs, so the server's answer and the
+    // browser's sort cannot disagree and reshuffle the page.
     const arrivedA = a.ingested_at ? Date.parse(a.ingested_at) : 0;
     const arrivedB = b.ingested_at ? Date.parse(b.ingested_at) : 0;
     if (arrivedB !== arrivedA) return arrivedB - arrivedA;
 
+    // The tiebreaker, and the same one the query uses.
+    const idA = a.id ?? "";
+    const idB = b.id ?? "";
+    if (idA !== idB) return idB < idA ? -1 : 1;
+
+    // The last tiebreaker: the outlet that carried the story most
+    // often ends up on the card the reader sees.
     return (b.source_count ?? 0) - (a.source_count ?? 0);
   });
 }
@@ -462,9 +448,9 @@ async function languageSelect({
       .eq("status", "published")
       .is("duplicate_of", null)
       .eq("language", lang)
-      // Newest news first, for the same reason as the unfiltered
+      // Newest FETCHED first, for the same reason as the unfiltered
       // select: the window is the top of the feed. See directSelect.
-      .order("published_at", { ascending: false, nullsFirst: false })
+      .order("ingested_at", { ascending: false, nullsFirst: false })
       // The tiebreaker for the keyset cursor. Deterministic, so a page
       // boundary inside a run of identical timestamps cannot skip or
       // repeat rows — see applyCursor.
@@ -669,23 +655,34 @@ async function directSelect({
     )
     .eq("status", "published")
     .is("duplicate_of", null)
-    // NEWEST NEWS FIRST
-    // ------------------
+    // ORDER OF ARRIVAL: THE NEWEST FETCHED FIRST
+    // ------------------------------------------
     // The window this query fills is the top of the feed, and the feed
-    // is ordered by when the story was PUBLISHED. Ordering it by
-    // arrival instead meant the window was the most recently FETCHED
-    // rows — which, with a re-fetched old story in the database, put a
-    // story published in June at the top of the homepage, above the
-    // news of the day.
+    // is ordered by when WE fetched the story.
     //
-    // The reader asked for the latest news of the very date, and that
-    // is what this is.
+    // The reader asked for this in the same words several times:
+    // "the new articles must be shown on the top based on the time
+    // immediatley fetch ... and unitll new come new show and move old
+    // abit down". And the measurement says why it matters: of the
+    // newest 500 stories the site holds, only 15 had been fetched in
+    // the last hour, because a pass fetches about 250 rows and most
+    // of them are the archive catching up. Ordered by publication
+    // time, the top of the page barely moved — the reader reloaded and
+    // found one or two new cards and nothing else, while everything
+    // the system had just fetched sat further down.
+    //
+    // Ordered by arrival, the top of the page IS the last fetch: the
+    // whole batch lands there, in the order it arrived, and the
+    // previous batch moves down.
+    //
+    // The NEW badge is a different rule and still uses publication
+    // time — see isFreshlyPublished in components/LiveArticleFeed.tsx.
     //
     // nullsFirst: false is required, not cosmetic. PostgreSQL defaults
     // `ORDER BY ... DESC` to NULLS FIRST, so any article with no
-    // published_at sorts ABOVE every dated one — an undated row takes
+    // arrival time sorts ABOVE every dated one — an undated row takes
     // position 1 and the newest real story is pushed down the page.
-    .order("published_at", { ascending: false, nullsFirst: false })
+    .order("ingested_at", { ascending: false, nullsFirst: false })
     // The keyset tiebreaker, and a determinism fix in its own right.
     // Several outlets publish inside the same second, so without a
     // second sort key PostgreSQL is free to return that run in any

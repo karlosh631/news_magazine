@@ -105,7 +105,22 @@ BLOCKED_STATUS_CODES = (401, 403, 405, 406, 407, 429, 451)
 #: skipped, the story is still stored, and the next pass reads it
 #: again. A story that arrives late is better than a story that never
 #: arrives.
-READER_MIN_INTERVAL_SECONDS = 1.5
+#:
+#: 3.1 seconds, which is nineteen requests a minute - the free
+#: reader's actual ceiling.
+#:
+#: It used to be 1.5, which is forty a minute, and that is twice what
+#: the free reader serves. The excess came back as "slow down", and a
+#: page that is skipped is a page that is never read: no headline from
+#: the story's own page, no picture proven against it. The symptom was
+#: a page of cards whose headlines were still the listing card's whole
+#: text, each one showing its key points where the photograph should
+#: have been.
+#:
+#: Half the reads were being thrown away by a limit we set ourselves.
+#: The cost of obeying the limit is a slower pass; the cost of
+#: ignoring it is that the pictures never arrive.
+READER_MIN_INTERVAL_SECONDS = 3.1
 
 _reader_lock = asyncio.Lock()
 _reader_last_call: float = 0.0

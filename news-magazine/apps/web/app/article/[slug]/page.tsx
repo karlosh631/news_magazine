@@ -86,7 +86,7 @@ export async function generateMetadata({ params }: Props2): Promise<Metadata> {
   return {
     // No site-name suffix here. layout.tsx declares
     // title.template = "%s | Nepal News & Magazine", so appending it
-    // again produced "Headline | Nepal News & Magazine | Nepal News &
+    // again produced "Headline | Nepal News & Magazine | 
     // Magazine" in every indexable title on the site.
     title: headline,
     description: description || undefined,

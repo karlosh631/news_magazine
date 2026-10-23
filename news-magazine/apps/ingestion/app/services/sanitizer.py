@@ -94,16 +94,37 @@ def sanitize_plain_text(
 #: domain, a bullet, the date and the time, and sometimes the time
 #: since publication in the reader's own language.
 _CARD_CHROME_RE = re.compile(
-    r"[\w-]+(?:\.[\w-]+)*\.(?:com\.np|com|net|org|np|gov|edu|io)\b\s*[•|]\s*"
+    # The separator is a MIDDLE DOT on these cards and a bullet on
+    # others, and the pattern only knew the bullet - so the card's own
+    # date stayed in the story's key points:
+    #
+    #     ... nepalnews.com · Fri Oct 23 16:46:14 GMT 2026 काठमाडौं ।
+    r"[\w-]+(?:\.[\w-]+)*\.(?:com\.np|com|net|org|np|gov|edu|io)\b\s*[•·|]\s*"
     r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*\s+\w{3,}\.?\s+\d{1,2}\s+"
     r"\d{1,2}:\d{2}:\d{2}\s+(?:GMT|UTC)\s+\d{4}",
     re.IGNORECASE,
 )
 
+#: The time since publication, in the outlet's own language.
+#:
+#: The Nepali spellings are all here because a card that says "2 hours
+#: ago" in one language says it in another, and the pattern used to
+#: know only one spelling of "hours" - "घंटा", with the anusvara - so
+#: the card's own word for "two hours ago" was not recognised and the
+#: whole card stayed in the headline:
+#:
+#:     nepalnews.com · २ घण्टा अघि नवलपुरमा अटो दुर्घटना हुँदा ...
+#:
+#: "घण्टा" is the ordinary spelling. "घंटा" is kept as well, because
+#: some outlets write it that way and the cost of accepting both is
+#: zero.
+#:
+#: `\d` matches the Devanagari digits too: Python's `\d` is
+#: Unicode-aware, so "२ घण्टा अघि" is matched by `\d+`.
 _RELATIVE_CHROME_RE = re.compile(
-    r"(?:^|\s)\d+\s*(?:minutes?|mins?|hours?|hrs?)\s+ago(?:\s|$)|"
-    r"(?:^|\s)\d+\s*मिनेट\s*अघि(?:\s|$)|"
-    r"(?:^|\s)\d+\s*घंटा\s*अघि(?:\s|$)",
+    r"(?:^|\s)\d+\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|"
+    r"months?|years?)\s+ago(?:\s|$)|"
+    r"(?:^|\s)\d+\s*(?:सेकेन्ड|सेकेण्ड|मिनेट|घण्टा|घंटा|दिन|हप्ता|महिना|वर्ष)\s*अघि(?:\s|$)",
     re.IGNORECASE,
 )
 
@@ -150,9 +171,9 @@ _LEADING_CHROME_RE = re.compile(
     r"^[\w-]+(?:\.[\w-]+)*\.(?:com\.np|com|net|org|np|gov|edu|io)"
     r"\s*[•·|]?\s*"
     r"(?:"
-    r"\d+\s*(?:minutes?|mins?|hours?|hrs?)\s+ago"
-    r"|\d+\s*मिनेट\s*अघि"
-    r"|\d+\s*घंटा\s*अघि"
+    r"\d+\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|"
+    r"months?|years?)\s+ago"
+    r"|\d+\s*(?:सेकेन्ड|सेकेण्ड|मिनेट|घण्टा|घंटा|दिन|हप्ता|महिना|वर्ष)\s*अघि"
     r"|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*\s+\w{3,}\.?\s+\d{1,2}\s+"
     r"\d{1,2}:\d{2}:\d{2}\s+(?:GMT|UTC)\s+\d{4}"
     r")"

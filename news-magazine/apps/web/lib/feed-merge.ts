@@ -69,48 +69,36 @@ export type FeedOrder = {
  * the one with the better picture.
  */
 export function byNewest<T extends FeedOrder>(a: T, b: T): number {
-  // The NEWEST NEWS first, exactly as the server orders it (see
+  // The newest FETCHED first, exactly as the server orders it (see
   // `newestFirst` in lib/news.ts). The two have to agree or the page
   // visibly reshuffles on the first poll after every load.
-  const left = a.published_at ? Date.parse(a.published_at) : 0;
-  const right = b.published_at ? Date.parse(b.published_at) : 0;
-  if (right !== left) return right - left;
-
-  // The tiebreaker: the most recently fetched copy of the same moment
-  // wins, so the better picture and the higher outlet count end up on
-  // the card the reader sees.
+  //
+  // The reader asked for this in the same words several times: "the new
+  // articles must be shown on the top based on the time immediatley
+  // fetch show them on ui and unitll new come new show and move old
+  // abit down and same new always on top".
+  //
+  // The measurement says why it matters. A pass fetches about 250 rows
+  // and most of them are the archive catching up, so of the newest 500
+  // stories the site holds only 15 had been fetched in the last hour.
+  // Ordered by publication time the top of the page barely moved: the
+  // reader reloaded, found one or two new cards, and everything the
+  // system had just fetched was further down.
   const arrivedA = a.ingested_at ? Date.parse(a.ingested_at) : 0;
   const arrivedB = b.ingested_at ? Date.parse(b.ingested_at) : 0;
   if (arrivedB !== arrivedA) return arrivedB - arrivedA;
 
-  // The tiebreaker: the outlet that carried the story most often ends
-  // up on the card the reader sees.
+  // The tiebreaker: the same one the query uses, so two rows fetched in
+  // the same instant cannot swap places between the server's answer
+  // and the browser's sort.
+  const idA = a.id ?? "";
+  const idB = b.id ?? "";
+  if (idA !== idB) return idB < idA ? -1 : 1;
+
+  // The last tiebreaker: the outlet that carried the story most often
+  // ends up on the card the reader sees.
   return (b.source_count ?? 0) - (a.source_count ?? 0);
 }
-
-/**
- * How long a story stays "arriving".
- *
- * A fetched story that was published inside this window is NEWS, and it
- * goes to the top of the page when the fetch that brought it lands. A
- * fetched story that is older than this is the ARCHIVE - the pipeline
- * reads a couple of pages of every feed, so it fetches back stories the
- * site has never had - and an archive story takes its place in the order
- * instead of jumping the queue.
- *
- * The window is deliberately generous. A fetch that brings twenty
- * stories brings twenty stories from the last hour or so, and the
- * reader's complaint was that only ONE of them ever appeared at the top.
- * The old rule - "an arrival must be newer than the newest story
- * already on the page" - dropped every story in the batch that was a
- * few minutes older than the one above it, so a fetch that delivered
- * fifteen stories at once showed exactly one.
- *
- * Ninety minutes is about six fetches at the heartbeat's pace, so a
- * story that arrives late is still news when it lands, and nothing that
- * is genuinely old is promoted above the news.
- */
-export const ARRIVAL_WINDOW_MS = 90 * 60_000;
 
 /**
  * Fold a batch into the running list, newest first.
@@ -128,15 +116,10 @@ export const ARRIVAL_WINDOW_MS = 90 * 60_000;
  * That identity is the whole point: it is what lets React skip the
  * re-render, and therefore what keeps a poll that found no news from moving
  * a single pixel.
- *
- * `now` is a parameter so the rule can be tested against a fixed clock.
- * Without it the tests would pass or fail depending on the hour of the
- * day they were run.
  */
 export function mergeArticles<T extends FeedOrder>(
   current: readonly T[],
   fresh: readonly T[],
-  now: number = Date.now(),
 ): T[] {
   if (fresh.length === 0) return current as T[];
 
@@ -165,34 +148,47 @@ export function mergeArticles<T extends FeedOrder>(
   /*
     WHAT COUNTS AS AN ARRIVAL
     -------------------------
-    A row is an arrival when it is NOT on the page yet AND it is
-    RECENT - published inside the arrival window (ARRIVAL_WINDOW_MS).
+    A row is an arrival when it is NOT on the page yet AND it was
+    fetched AFTER the newest thing already on the page.
 
-    The second half matters, and it is a rule about NEWS rather than
-    about position. The poll asks for a hundred rows and the page
-    carries a hundred and twenty of them, so the rows that come back
-    that the page has never shown are the ARCHIVE, not news. Treating
-    them as arrivals put a pile of old stories on top of the page
-    every ten seconds, which is exactly what a reader saw: the newest
-    story, then a pile of old ones, then the page again.
+    The second half is what makes a whole batch land at once. A fetch
+    brings two hundred and fifty rows, every one of them fetched a
+    moment ago, and the page's newest row was fetched before the batch
+    started - so every row of the batch is an arrival, and the whole
+    batch goes on top, in the order it was fetched. The reader asked
+    for exactly that, in the same words several times:
 
-    But the window must not be so tight that a whole batch is thrown
-    away. The reader asked for the maximum number of stories from each
-    fetch, and the batch a fetch brings is stories from the last hour
-    or so - so the window is ninety minutes, and every one of them
-    lands at the top, newest first among themselves.
+        the new articles must be shown on the top based on the time
+        immediatley fetch show them on ui and unitll new come new show
+        and move old abit down and same new always on top
+
+    The rule used to be "newer than the newest row on the page" by
+    PUBLICATION time, and it was wrong twice over. A batch of fifteen
+    stories published over the last hour showed ONE of them at the top,
+    because fourteen of them were older than the story already on the
+    page - the reader's complaint, verbatim: "only showing 1,2
+    articles on top on each fecth".
+
+    The archive is not a special case any more. It is fetched in the
+    same breath as the news, it is ordered by the same clock, and it
+    arrives at the top like everything else. What the reader reads is
+    the newest NEWS, because the page says when each story was
+    published - and what the reader SEES arriving is the batch the
+    system just fetched.
   */
-  const isRecent = (article: T) => {
-    if (!article.published_at) return false;
-    const published = Date.parse(article.published_at);
-    if (Number.isNaN(published)) return false;
-    // A story from the future (a publisher whose clock is ahead) counts
-    // as recent rather than being excluded.
-    return now - published <= ARRIVAL_WINDOW_MS;
+  const newestArrivalOnPage = current[0]?.ingested_at
+    ? Date.parse(current[0].ingested_at)
+    : 0;
+
+  const arrivedAfterThePage = (article: T) => {
+    if (!article.ingested_at) return false;
+    const arrived = Date.parse(article.ingested_at);
+    if (Number.isNaN(arrived)) return false;
+    return arrived > newestArrivalOnPage;
   };
 
   const arrivals = fresh
-    .filter((article) => !known.has(article.id) && isRecent(article))
+    .filter((article) => !known.has(article.id) && arrivedAfterThePage(article))
     .sort(byNewest);
 
   const kept = current.map((article) => byId.get(article.id) ?? article);

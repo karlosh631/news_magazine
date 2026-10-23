@@ -42,7 +42,7 @@ import hashlib
 import html as html_lib
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -58,6 +58,123 @@ from app.sources.reader_proxy import (
 from app.services.dedup import normalize_title, token_fingerprint
 from app.services.sanitizer import sanitize_excerpt, sanitize_headline
 from app.sources.base import NormalizedArticle, SourceAdapter
+
+
+#: The absolute date a syndicated card prints inside its own text:
+#:
+#:     Fri Oct 23 16:46:14 GMT 2026
+#:
+#: It is the moment the ORIGINAL outlet published the story, which is
+#: the moment the story was published - the syndication happened later.
+_ABSOLUTE_CARD_DATE_RE = re.compile(
+    r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*\s+"
+    r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2})\s+"
+    r"(\d{1,2}):(\d{2}):(\d{2})\s+(?:GMT|UTC)\s+(\d{4})"
+)
+
+#: The relative date, in English.
+_RELATIVE_CARD_DATE_RE = re.compile(
+    r"(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?)\s+ago",
+    re.IGNORECASE,
+)
+
+#: The relative date, in Nepali. The unit is spelled out because the
+#: number of seconds it stands for is the whole point of reading it.
+_RELATIVE_CARD_DATE_NE_RE = re.compile(
+    r"(\d+)\s*(सेकेन्ड|सेकेण्ड|मिनेट|घण्टा|घंटा|दिन|हप्ता|महिना|वर्ष)\s*अघि"
+)
+
+#: The Nepali digits, and the English month names.
+_DEVA_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
+
+_MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+#: How long each relative unit is.
+_RELATIVE_UNITS = {
+    "second": 1, "seconds": 1, "sec": 1, "secs": 1,
+    "minute": 60, "minutes": 60, "min": 60, "mins": 60,
+    "hour": 3600, "hours": 3600, "hr": 3600, "hrs": 3600,
+    "day": 86400, "days": 86400,
+    "week": 604800, "weeks": 604800,
+    "month": 2592000, "months": 2592000,
+    "year": 31536000, "years": 31536000,
+}
+
+_RELATIVE_UNITS_NE = {
+    "सेकेन्ड": 1, "सेकेण्ड": 1,
+    "मिनेट": 60,
+    "घण्टा": 3600, "घंटा": 3600,
+    "दिन": 86400,
+    "हप्ता": 604800,
+    "महिना": 2592000,
+    "वर्ष": 31536000,
+}
+
+
+def card_published_at(text: str | None) -> str | None:
+    """
+    The publication time a listing card prints in its own text.
+
+    WHY
+    ---
+    A listing card that syndicates another outlet's story prints two
+    timestamps: the original outlet's name, and when it published. The
+    card's own markup has no element that holds the date - the date is
+    part of the card's TEXT - so the date selector found nothing, the
+    story was stored with no publication time, and the store fell back
+    to "now".
+
+    That made every syndicated row look brand new. They were then
+    ordered above the real news of the day, and the reader saw a page
+    of cards whose headlines were still the whole card:
+
+        nepalnews.com · २ घण्टा अघि नवलपुरमा अटो दुर्घटना हुँदा ...
+
+    The exact date is read when the card prints one ("Fri Oct 23
+    16:46:14 GMT 2026"), and the time since publication otherwise
+    ("२ घण्टा अघि"). Both are the ORIGINAL outlet's time, which is the
+    moment the story was published.
+    """
+    if not text:
+        return None
+
+    match = _ABSOLUTE_CARD_DATE_RE.search(text)
+    if match:
+        month, day, hour, minute, second, year = match.groups()
+        number = _MONTHS.get(month.lower())
+        if number:
+            try:
+                parsed = datetime(
+                    int(year),
+                    number,
+                    int(day),
+                    int(hour),
+                    int(minute),
+                    int(second),
+                    tzinfo=timezone.utc,
+                )
+                return parsed.isoformat()
+            except ValueError:
+                pass
+
+    match = _RELATIVE_CARD_DATE_RE.search(text)
+    if match:
+        number = int(match.group(1))
+        seconds = _RELATIVE_UNITS.get(match.group(2).lower())
+        if seconds:
+            return (datetime.now(timezone.utc) - timedelta(seconds=number * seconds)).isoformat()
+
+    match = _RELATIVE_CARD_DATE_NE_RE.search(text)
+    if match:
+        number = int(match.group(1).translate(_DEVA_DIGITS))
+        seconds = _RELATIVE_UNITS_NE.get(match.group(2))
+        if seconds:
+            return (datetime.now(timezone.utc) - timedelta(seconds=number * seconds)).isoformat()
+
+    return None
 
 logger = logging.getLogger("html_listing")
 
@@ -595,6 +712,14 @@ class HtmlListingAdapter(SourceAdapter):
                 continue
 
             published = self._parse_date(entry.get("date"))
+            if not published:
+                # The card's own markup has no date element, but its
+                # TEXT has the timestamp. Without this the row was
+                # stored with no publication time and the store used
+                # "now" - so every syndicated story looked like it had
+                # just been published, and they took the top of the
+                # page away from the real news.
+                published = card_published_at(entry.get("title"))
 
             articles.append(
                 NormalizedArticle(

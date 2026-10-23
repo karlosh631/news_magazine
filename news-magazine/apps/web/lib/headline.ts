@@ -74,8 +74,19 @@ export function cleanHeadline(text: string | null | undefined): string {
   if (!value) return value;
 
   // A domain, a bullet, and the time since publication.
+  //
+  // The Nepali units are all here, and "घण्टा" is the ordinary
+  // spelling - the pattern knew only "घंटा", with the anusvara, so
+  // the card's own word for "two hours ago" stayed in the
+  // headline:
+  //
+  //     nepalnews.com · २ घण्टा अघि नवलपुरमा अटो दुर्घटना ...
+  //
+  // The digits are written out as a class, because JavaScript's
+  // `\d` is ASCII-only and the Devanagari digits are not ASCII
+  // digits.
   const withRelative = value.match(
-    /^[\w-]+(?:\.[\w-]+)*\.(?:com\.np|com|net|org|np|gov|edu|io)\s*[•·|]?\s*(?:[\d\u0966-\u096f]+\s*(?:minutes?|mins?|hours?|hrs?)\s+ago|[\d०-९]+\s*मिनेट\s*अघि|[\d०-९]+\s*घंटा\s*अघि)\s*[•·|]?\s*/i
+    /^[\w-]+(?:\.[\w-]+)*\.(?:com\.np|com|net|org|np|gov|edu|io)\s*[•·|]?\s*(?:[\d\u0966-\u096f]+\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?)\s+ago|[\d०-९]+\s*(?:सेकेन्ड|सेकेण्ड|मिनेट|घण्टा|घंटा|दिन|हप्ता|महिना|वर्ष)\s*अघि)\s*[•·|]?\s*/i
   );
   if (withRelative) {
     const rest = value.slice(withRelative[0].length).trim();

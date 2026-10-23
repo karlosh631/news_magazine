@@ -156,12 +156,12 @@ type Rotate = "off" | "on";
 /** Where the next page of the feed starts. See FeedCursor in lib/news.ts. */
 interface FeedCursor {
   /**
-   * When the story was published.
+   * When WE fetched the story.
    *
-   * The feed is ordered by publication time, and the cursor has to
-   * address the same order or it skips rows without saying so.
+   * The feed is ordered by arrival, and the cursor has to address the
+   * same order or it skips rows without saying so.
    */
-  published_at: string;
+  ingested_at: string;
   id: string;
 }
 
@@ -322,14 +322,19 @@ export function LiveArticleFeed({
     HOW FRESH A STORY HAS TO BE TO BE MARKED NEW
     -------------------------------------------
     A badge that marks an hour-old story as NEW is worse than no
-    badge: the reader stops believing it. So the mark is on the
-    stories that arrived in the last twenty minutes - which is about
-    four passes of the five-minute heartbeat - and nothing else.
+    badge: the reader stops believing it.
 
-    The arrival time is the site's own, and it is the same clock the
-    feed is ordered by, so the badge and the order always agree.
+    The badge is about PUBLICATION time, and it is the one rule that
+    is not about arrival. The reader said so explicitly: "the new must
+    be of near by 20min +- other all old doonot highliht them". So a
+    story is badged NEW only if the PUBLISHER published it in the last
+    twenty minutes - about six passes of the three-minute heartbeat -
+    and an hour-old story that was just fetched is not badged.
+
+    The list is ordered by arrival and the badge is about publication,
+    and the two never disagree about what "new" means.
   */
-  const NEW_MINUTES = 15;
+  const NEW_MINUTES = 20;
 
   // The stories this reader has seen, from a previous visit.
   const [seenIds, setSeenIds] = useState<Set<string>>(() => new Set());
@@ -466,7 +471,13 @@ export function LiveArticleFeed({
       setChecking(true);
       try {
         const params = new URLSearchParams({
-          limit: "100",
+          // The poll window has to be wide enough to hold a whole
+          // fetch. A pass brings about two hundred and fifty rows, and
+          // the reader asked for every one of them to appear at the
+          // top - so a window of a hundred meant a hundred and fifty
+          // of the batch stayed hidden until the next poll, and the
+          // next poll's window had pushed them out of reach entirely.
+          limit: "250",
           // Defeats any intermediary cache. A cached poll is a
           // homepage frozen at whatever was newest when it was stored.
           t: String(Date.now()),
@@ -549,7 +560,7 @@ export function LiveArticleFeed({
         t: String(Date.now()),
       });
       if (from) {
-        params.set("published_at", from.published_at);
+        params.set("ingested_at", from.ingested_at);
         params.set("after_id", from.id);
       }
       if (language) params.set("language", language);

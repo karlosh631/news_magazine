@@ -9,7 +9,7 @@ import { SITE_NAME, SITE_URL, SITE_LOGO } from "@/lib/site";
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
   title: {
-    default: `${SITE_NAME} — Live news from 20+ Nepali outlets`,
+    default: `${SITE_NAME} — Live`,
     template: `%s | ${SITE_NAME}`,
   },
   description:
@@ -39,7 +39,7 @@ export const metadata: Metadata = {
     alternateLocale: ["en_US"],
     url: SITE_URL,
     siteName: SITE_NAME,
-    title: `${SITE_NAME} — Live news from 20+ Nepali outlets`,
+    title: `${SITE_NAME} — Live`,
     description:
       "Live Nepali and English news from more than 20 outlets across Nepal.",
     images: [
@@ -53,7 +53,7 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: `${SITE_NAME} — Live news from 20+ Nepali outlets`,
+    title: `${SITE_NAME} — Live `,
     description:
       "Live Nepali and English news from more than 20 outlets across Nepal.",
     images: [SITE_LOGO],

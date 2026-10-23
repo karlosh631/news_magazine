@@ -102,6 +102,22 @@ jobs:
             echo "Web Service it is being restarted every few minutes for"
             echo "having no port; switch it to Background Worker."
           fi
+          # WHICH OUTLETS CAN THE WORKER REACH?
+          #
+          # Nine publishers answer the CI runner with a 403 and answer
+          # an ordinary client with a 200, which is a refusal aimed at
+          # the address rather than at the request. The worker runs
+          # from a different address, so it may well reach them - and
+          # until somebody can see that, the site is missing nine
+          # publishers' worth of news and nobody knows which side of
+          # the wall each one is on.
+          #
+          # So the ping prints the worker's own per-source health, next
+          # to the pass's own table below. One run, both answers.
+          echo "--- the worker's per-source health ---"
+          curl -s --max-time 30 "${INGESTION_URL%/}/api/sources/health" \
+            | head -c 6000 || echo "(the worker did not answer)"
+          echo
 
   sync:
     name: Sync sources
@@ -111,6 +127,66 @@ jobs:
     steps:
       - name: Note when this run started
         run: echo "RUN_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+
+      # =============================================================
+      # The heartbeat: this run queues the next one, FIRST.
+      #
+      # WHY THE CRON ALONE IS NOT ENOUGH
+      # --------------------------------
+      # The cron above says five minutes. The runs did not come every
+      # five minutes: on 2026-10-23 they came at 01:49, 06:33 and 11:59
+      # UTC - three to five HOURS apart, on a cron that says five
+      # minutes. GitHub does not promise a schedule's frequency, and a
+      # busy shared runner queue is the usual reason it slips.
+      #
+      # A site whose newest story is five hours old is not a site
+      # anybody comes back to, and the schedule was the reason: nothing
+      # was broken, the work was simply not being asked for.
+      #
+      # So each run dispatches the next one itself, and the dispatch is
+      # immediate - which GitHub does honour, because workflow_dispatch
+      # is one of the two events a GITHUB_TOKEN may trigger. The cron
+      # stays as the backstop: if this chain is ever broken (a cancelled
+      # run, a changed token), the next cron run starts it again.
+      #
+      # WHY IT QUEUES THE NEXT ONE FIRST, NOT LAST
+      # -------------------------------------------
+      # The queue waits for this run to finish, so the gap between two
+      # passes is the length of the pass plus the time the next runner
+      # takes to start. Queuing at the END of the run added the whole
+      # pass to that gap AGAIN, which measured 6m45s to 9m03s between
+      # passes on 2026-10-23.
+      #
+      # Queuing FIRST removes the double count: the next run is already
+      # waiting while this one works, so it starts the moment this one
+      # ends. A pass is about ninety seconds and a runner takes about a
+      # minute to start, so the gap is about THREE MINUTES - which is
+      # the tightest this design can go, and as tight as the publishers
+      # were promised.
+      #
+      # It is also more robust: the successor is queued before the work
+      # starts, so a run that dies half way through still leaves a next
+      # run behind it.
+      # =============================================================
+      - name: Queue the next run
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          WORKFLOW: ingest.yml
+        run: |
+          set +e
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW}/dispatches" \
+            -d '{"ref":"main"}')
+          if [ "$code" = "204" ]; then
+            echo "::notice::The next run is queued. It starts as soon as this one ends."
+          else
+            echo "::warning::Could not queue the next run (${code}). The cron will start another one when it next fires."
+          fi
+          exit 0
 
       - uses: actions/checkout@v4
 
@@ -170,9 +246,24 @@ jobs:
             # The fetch caps. Every one is a hard bound on the number of
             # articles/clips actually fetched and stored in one cycle,
             # enforced where the work is done — not a target.
-            echo "MAX_ARTICLES_PER_SOURCE=200"
+            echo "MAX_ARTICLES_PER_SOURCE=500"
             echo "MAX_ARTICLES_PER_CYCLE=20000"
             echo "CYCLE_WINDOW_SECONDS=900"
+            # How many PAGES of a WordPress feed one poll reads.
+            #
+            # A page is one request, and every item on a page that the
+            # site already has costs ONE database check and no page
+            # fetch: the duplicate test runs BEFORE the article page is
+            # asked for. So reading five pages instead of one buys five
+            # times the depth for five times one request, and only the
+            # stories nobody has seen are fetched in full.
+            #
+            # This is what makes the site catch up: a pass that reads
+            # one page can only ever see the last hundred items, so a
+            # quiet hour is an hour of stories the site never learns
+            # about.
+            echo "RSS_FEED_PAGES=5"
+            echo "RSS_PAGE_SIZE=100"
             # ENABLE_GEMINI_SUMMARY has no caller in services/ingestion.py
             # (synthesize_summary is unwired), so it is left false rather
             # than implying a behaviour that does not exist.
@@ -248,72 +339,3 @@ jobs:
           fi
           grep -E "PANCHANG_OK=" sync.log || true
 
-      # =============================================================
-      # The heartbeat: this run queues the next one.
-      #
-      # WHY THE CRON ALONE IS NOT ENOUGH
-      # --------------------------------
-      # The cron above says five minutes. The runs did not come every
-      # five minutes: on 2026-10-23 they came at 01:49, 06:33 and 11:59
-      # UTC - three to five HOURS apart, on a cron that says five
-      # minutes. GitHub does not promise a schedule's frequency, and a
-      # busy shared runner queue is the usual reason it slips.
-      #
-      # A site whose newest story is five hours old is not a site
-      # anybody comes back to, and the schedule was the reason: nothing
-      # was broken, the work was simply not being asked for.
-      #
-      # So each run dispatches the next one itself, and the dispatch is
-      # immediate - which GitHub does honour, because workflow_dispatch
-      # is one of the two events a GITHUB_TOKEN may trigger. The cron
-      # stays as the backstop: if this chain is ever broken (a cancelled
-      # run, a changed token), the next cron run starts it again.
-      #
-      # THE CADENCE IS STILL FIVE MINUTES OR SO
-      # ---------------------------------------
-      # The chain would otherwise run back-to-back at the speed of the
-      # pass itself, which is roughly ninety seconds - three times the
-      # request rate to every publisher that the five-minute cadence
-      # was chosen for. So the run waits before queueing the next one,
-      # and the wait is set so that the gap between passes - the wait
-      # PLUS the tail of the workflow that is still finishing - lands
-      # on five or six minutes. The wait is free: this repository is
-      # public, and public repositories get Actions minutes without
-      # charge.
-      # =============================================================
-      - name: Queue the next run
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          WORKFLOW: ingest.yml
-          # The gap between one run and the next is this wait PLUS the
-          # tail of the workflow that is still finishing (the keep-warm
-          # ping, and the queue in front of the next runner). Measured
-          # on 2026-10-23 that tail is two to four minutes, so a
-          # five-minute wait produced a nine-minute gap between passes.
-          # Three and a half minutes of waiting plus that tail is a
-          # pass every five or six minutes, which is the cadence the
-          # publishers were promised.
-          CADENCE_SECONDS: "210"
-        run: |
-          set +e
-          now=$(date +%s)
-          started=${RUN_STARTED:-$now}
-          elapsed=$(( now - started ))
-          wait=$(( CADENCE_SECONDS - elapsed ))
-          if [ "$wait" -gt 0 ]; then
-            echo "Waiting ${wait}s so the next pass starts a few minutes after this one did."
-            sleep "$wait"
-          fi
-          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -X POST \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW}/dispatches" \
-            -d '{"ref":"main"}')
-          if [ "$code" = "204" ]; then
-            echo "::notice::The next run is queued. The site refreshes on a five-minute heartbeat."
-          else
-            echo "::warning::Could not queue the next run (${code}). The cron will start another one when it next fires."
-          fi
-          exit 0

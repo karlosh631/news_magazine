@@ -20,7 +20,9 @@ running without anybody watching it.
   │  THE FETCHER — apps/ingestion (Python)                        │
   │ 1. robots.txt is read once per host and cached; its Crawl-    │
   │    delay becomes a FLOOR on how often that host may be asked.  │
-  │ 2. Per-host rate limit, per-source interval, backoff.          │
+  │ 2. Per-host rate limit, per-source interval, backoff. The      │
+  │    sweep asks an outlet only when ITS interval has elapsed,   │
+  │    so the two pollers take turns instead of doubling up.      │
   │ 3. The listing page is parsed into cards: headline, url, time,│
   │    and the thumbnail the outlet itself shows.                 │
   │ 4. The article's OWN page is fetched: body, og:image, video,   │
@@ -39,8 +41,8 @@ running without anybody watching it.
   ┌────────────────────────┐        ┌────────────────────────┐
   │ ① GitHub Actions      │        │ ② Render worker        │
   │   "Ingest news"       │        │   python -m app.worker │
-  │   every 5–6 min       │        │   APScheduler, one job │
-  │   queues the next run │        │   per source, 5–15 min  │
+  │   every 3 min         │        │   APScheduler, one job │
+  │   queues the next run │        │   per source, 90 s +    │
   │   + keep-warm ping    │        │   + FastAPI :8000      │
   └───────────┬────────────┘        └───────────┬────────────┘
               │                                 │
@@ -76,7 +78,7 @@ In Mermaid, for anyone who would rather read it that way:
 flowchart TD
     PUB["THE PUBLISHERS<br/>34 Nepali outlets<br/>(rows in the `sources` table)"]
     FETCH["THE FETCHER<br/>apps/ingestion (Python)<br/>robots.txt + rate limit + interval<br/>body, og:image, video, audio<br/>dedupe vs 12 h of recent rows<br/>PROVE the picture (Referer)"]
-    GHA["① GitHub Actions<br/>'Ingest news'<br/>every 5–6 min, for ever<br/>each run queues the next"]
+    GHA["① GitHub Actions<br/>'Ingest news'<br/>every 3 min, for ever<br/>each run queues the next"]
     RND["② Render worker<br/>python -m app.worker<br/>APScheduler, one job per source<br/>+ FastAPI :8000"]
     DB[("③ SUPABASE<br/>Postgres · RLS<br/>articles · daily_rashifal<br/>daily_panchang · reels")]
     WEB["④ THE SITE<br/>apps/web, Next.js 14 on Vercel<br/>/ · /category · /article<br/>/api/live-news"]
@@ -101,8 +103,8 @@ flowchart TD
 | | ① GitHub Actions — "Ingest news" | ② Render — `python -m app.worker` |
 |---|---|---|
 | Where it runs | github.com, on a shared runner | a Render service (free tier; suspends when idle) |
-| What it is | one full pass over all 34 sources, then it exits | a long-lived process with one APScheduler job per source |
-| How often | every 5–6 minutes, for ever | each source on its own interval (5–15 min), staggered |
+| What it is | one full pass over the sources that are due, then it exits | a long-lived process with one APScheduler job per source |
+| How often | every three minutes, for ever | each source on its own interval (90 s for the outlets that answer), staggered |
 | What starts the next one | the run queues the next run itself | the scheduler, in-process |
 | Secrets | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `INGESTION_SECRET`, `CRON_SECRET` | the same, on Render |
 | If it stops | the cron restarts the chain | the keep-warm ping reports it down; the Actions pass covers the news |
@@ -127,11 +129,14 @@ GitHub does not promise that a `schedule:` trigger runs on time. On
 01:49, 06:33 and 11:59 UTC: three to five hours apart. So every run
 queues the next one (`workflow_dispatch`, which is one of the two events
 a `GITHUB_TOKEN` may trigger — no secret of its own is needed, only the
-`actions: write` permission the workflow carries for it), and the run
-waits before queueing so the gap between passes stays five or six
-minutes rather than the ninety seconds a pass actually takes. The cron
-stays as the backstop: if the chain is ever broken, the next cron run
-starts it again.
+`actions: write` permission the workflow carries for it). The run queues
+its successor FIRST, while it is still working, so the next one is
+already waiting when this one ends — a pass is about ninety seconds and
+a runner takes about a minute to start, so the gap between passes is
+about three minutes. Queuing at the end instead counted the whole pass
+twice, and measured 6m45s to 9m03s between passes. The cron stays as
+the backstop: if the chain is ever broken, the next cron run starts it
+again.
 
 ### One pass, measured
 
@@ -175,6 +180,19 @@ entirely rather than shown with someone else's photograph.
 The marker (`articles.image_verified_at`) is written in the store path,
 in the poll's repair pass, in both repair scripts and in the on-demand
 search — so every route that stores a picture proves it first.
+
+A STORY IS NOT LOST BECAUSE ITS PICTURE COULD NOT BE PROVEN
+-----------------------------------------------------------
+The feed used to drop such a story entirely. It cost 278 stories — all
+of them from publishers whose pages are rendered in JavaScript, so the
+page carries nothing to prove a picture with. The site had fetched all
+278 and shown none of them.
+
+Now the story is shown and the picture is not: the card refuses to
+render an unproven picture (`NewsCard.pickImages`) and puts the
+story's own key points where the picture would have been. The two
+rules together are the whole picture policy — never show a picture
+that might be somebody else's, and never lose a story because of it.
 
 The Referer is the picture's own page, never a foreign one. The worker
 runs from a datacentre in another country, and several Nepali CDNs
@@ -254,7 +272,7 @@ reader.
 
 | Thing | How often | What it is |
 |---|---|---|
-| The heartbeat | every 5–6 min | the Actions pass, which queues its own successor |
+| The heartbeat | every 3 min | the Actions pass, which queues its own successor |
 | The cron backstop | when GitHub gets round to it (hours) | the same workflow, started by the schedule |
 | The keep-warm ping | with the heartbeat | a courtesy GET to the Render worker, so its free instance does not suspend |
 | "Daily almanac" | 19:15 UTC | the day's panchang and the twelve horoscopes |
@@ -275,7 +293,7 @@ reader.
 | Reels (Wikimedia, Pexels, Pixabay, YouTube) | Complete; the keyless provider works alone, the keyed ones need their secrets |
 | The almanac and the horoscopes, with the week ahead | Complete; the day ahead is walked every six hours |
 | The site, the admin panel, the search | Complete |
-| The picture for publishers that render in JavaScript | **Not proven** — 278 rows are hidden rather than shown wrongly, because their pages carry nothing to prove a picture with |
+| The picture for publishers that render in JavaScript | **Not proven** — their pages carry nothing to prove a picture with, so the story is shown without one |
 | The `categories`/`tags` taxonomy | Present, but the categoriser is keyword-based |
 
 ---
@@ -292,6 +310,9 @@ reader.
   ingestion API left running on a laptop polls every publisher every 90
   seconds with whatever code it was started with. The site does not
   depend on it; the publishers do.
-- **The picture gate hides stories.** A story whose picture cannot be
-  proven is not shown at all. That is the operator's rule, and it costs
-  the feed some stories — 278 of them at the moment this was written.
+- **A story whose picture cannot be proven is shown without a
+  picture.** The picture is never shown unproven; the story is not
+  lost. Nine publishers answer the CI runner with a 403 and answer an
+  ordinary client with a 200, which is a refusal aimed at the address
+  rather than at the request — so from the runner's address those nine
+  contribute nothing, whatever the code does.

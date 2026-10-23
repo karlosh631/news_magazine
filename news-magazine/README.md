@@ -34,8 +34,8 @@ Two fetchers, one database, one site, and no human in the loop.
   ┌────────────────────────┐        ┌────────────────────────┐
   │ ① GitHub Actions      │        │ ② Render worker        │
   │   "Ingest news"       │        │   python -m app.worker │
-  │   every 5–6 min       │        │   one job per source   │
-  │   queues the next run │        │   5–15 min each        │
+  │   every 3 min         │        │   one job per source   │
+  │   queues the next run │        │   90 s, or 5–15 min    │
   │   + keep-warm ping    │        │   + FastAPI :8000      │
   └───────────┬────────────┘        └───────────┬────────────┘
               │                                 │
@@ -71,8 +71,8 @@ Two fetchers, one database, one site, and no human in the loop.
 | | ① GitHub Actions — "Ingest news" | ② Render — `python -m app.worker` |
 |---|---|---|
 | Where it runs | github.com, on a runner | a Render service (free tier; sleeps when idle) |
-| What it is | one full pass over all 34 sources, then it exits | a long-lived process with one APScheduler job per source |
-| How often | every 5–6 minutes, for ever | each source on its own interval (5–15 min), staggered so no two outlets are hit together |
+| What it is | one full pass over the sources that are due, then it exits | a long-lived process with one APScheduler job per source |
+| How often | every three minutes, for ever | each source on its own interval (90 s for the outlets that answer, 5–15 min for the ones that refuse) |
 | What starts the next one | the run queues the next run itself | the scheduler, in-process |
 | What it needs | four repository secrets | the same secrets, on Render |
 | If it stops | the cron restarts the chain — at worst a few hours later | the keep-warm ping reports it down; the Actions pass covers the news in the meantime |
@@ -114,7 +114,9 @@ The marker is written in the store path, in the poll's repair pass, in
 both repair scripts and in the on-demand search. A picture that has not
 been proven against its own page is never shown — that is the rule that
 stopped a photograph of an elephant from appearing on a story about PHP
-security.
+security. The STORY is still shown: it is still news, and hiding it
+meant the site was showing fewer stories than it had. The card puts
+the story's own key points where the picture would have been.
 
 ### Will it run without me? Yes.
 
@@ -148,7 +150,7 @@ and the cron backstop exists for exactly that.
 | | |
 |---|---|
 | **Sources** | 34 Nepali outlets — 10 with public RSS/Atom feeds, the rest scraped from their listing pages; 25 answer on a given pass |
-| **Cadence** | Every outlet is swept every 5–6 minutes by the GitHub Actions heartbeat, and each source is also polled on its own interval (5–15 min) by the long-lived worker |
+| **Cadence** | The GitHub Actions heartbeat sweeps every outlet every three minutes; each source is also polled on its own interval (90 s for the outlets that answer) by the long-lived worker |
 | **Deduplication** | Cross-outlet syndicated copies collapse into one story, with an "also reported by N outlets" count |
 | **Media** | `og:image`, YouTube/Vimeo embeds, and podcast audio scraped from each article page |
 | **Summaries** | Exactly four points per story, extracted verbatim from the article body |
@@ -1280,14 +1282,15 @@ fired at 01:49, 06:33 and 11:59 UTC: three to five hours apart, on a
 cron that says five minutes. A site whose newest story is five hours
 old is not a site anybody comes back to.
 
-So every run queues the next one. The last step of `ingest.yml`
-dispatches `ingest.yml` again, and `workflow_dispatch` is one of the
+So every run queues the next one. `workflow_dispatch` is one of the
 two events a `GITHUB_TOKEN` may trigger — no secret of its own is
 needed, only the `actions: write` permission the workflow already
-carries for it. The run waits before queueing the next one, so the
-cadence stays the one the publishers were promised rather than the
-ninety seconds a pass actually takes. The cron stays as the backstop:
-if the chain is ever broken, the next cron run starts it again.
+carries for it. The run queues its successor FIRST, while it is still
+working, so the next one is already waiting when this one ends: a pass
+is about ninety seconds and a runner takes about a minute to start, so
+the gap between passes is about three minutes. The cron stays as the
+backstop: if the chain is ever broken, the next cron run starts it
+again.
 
 GitHub's own scheduling is not precise — a scheduled workflow can run
 minutes or hours late, and on a busy repository much later — so the

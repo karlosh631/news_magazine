@@ -88,10 +88,13 @@ test.describe("a story with a picture", () => {
     ).toBe(false);
   });
 
-  test("a picture that was never confirmed is not a picture", () => {
+  test("a picture that was never confirmed is not shown, but the story is", () => {
     // The marker is null: nobody has proved the picture belongs to
-    // this story. The card does not show it, so the feed must not
-    // keep the story for it.
+    // this story. The CARD refuses to render it (see
+    // NewsCard.pickImages), so the feed must not keep the story FOR
+    // the picture - but the story is still news, and it is still
+    // shown. The card puts the story's own key points where the
+    // picture would have been.
     expect(
       showsNothing(
         article({
@@ -99,7 +102,7 @@ test.describe("a story with a picture", () => {
           image_verified_at: null,
         })
       )
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test("a picture in any of the three columns counts", () => {
@@ -146,28 +149,43 @@ test.describe("the confirmation pass, on the server", () => {
     image_verified_at: null,
   });
 
-  test("a story whose picture was never confirmed is left out", () => {
+  test("a story whose picture was never confirmed is still shown", () => {
+    // The picture is not shown; the story is. 278 stories were lost
+    // this way - every one of them from a publisher whose pages are
+    // rendered in JavaScript, so the picture could not be proven and
+    // the story went with it.
     expect(
       dropUnconfirmed([confirmed, unconfirmed], showsNothing).map((a) => a.id)
-    ).toEqual(["confirmed"]);
+    ).toEqual(["confirmed", "unconfirmed"]);
   });
 
   test("the rule runs before the page is sliced, so the slots fill", () => {
     // Twenty-four slots, of which only one story has a confirmed
-    // picture: the page shows that one story and no other. The
-    // over-fetch is what puts the other twenty-three stories in the
-    // window, and this is the pass that lets them through.
+    // picture. The over-fetch is what puts the other twenty-three
+    // stories in the window, and this is the pass that decides which
+    // of them the page shows. A story with no picture at all is still
+    // left out; a story whose PICTURE is unproven is not.
     const rows = [
       ...Array.from({ length: 23 }, (_, i) =>
-        article({ id: `u${i}`, image_verified_at: null })
+        article({
+          id: `u${i}`,
+          image_verified_at: null,
+          featured_image_url: "https://x.test/photo.jpg",
+        })
       ),
       confirmed,
     ];
-    expect(dropUnconfirmed(rows, showsNothing)).toHaveLength(1);
+    expect(dropUnconfirmed(rows, showsNothing)).toHaveLength(24);
   });
 
-  test("a feed of nothing but unconfirmed stories is still a feed", () => {
-    const rows = [unconfirmed, article({ id: "u2", image_verified_at: null })];
+  test("a feed of nothing but empty stories is still a feed", () => {
+    // The floor: two stories with no picture and no video would both
+    // be dropped, and a page with nothing on it is worse than a page
+    // of honest empty cards.
+    const rows = [
+      article({ id: "bare-1" }),
+      article({ id: "bare-2" }),
+    ];
     expect(dropUnconfirmed(rows, showsNothing)).toHaveLength(2);
   });
 
@@ -177,6 +195,14 @@ test.describe("the confirmation pass, on the server", () => {
       image_verified_at: null,
       video_url: "https://x.test/a.mp4",
     });
-    expect(dropUnconfirmed([video, unconfirmed], showsNothing)).toHaveLength(1);
+    expect(dropUnconfirmed([video, unconfirmed], showsNothing)).toHaveLength(2);
+  });
+
+  test("a story with no picture at all is still left out", () => {
+    // The rule that is NOT about the marker: a story with no picture,
+    // no video and nothing to show is the one the feed may swap for
+    // another story.
+    const bare = article({ id: "bare", image_verified_at: null });
+    expect(dropUnconfirmed([confirmed, bare], showsNothing)).toHaveLength(1);
   });
 });

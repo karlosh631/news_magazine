@@ -81,14 +81,29 @@ export function storyPoints(article: {
  *
  * True for a story with no picture and no video — the only kind of
  * story the feed may swap for another one.
+ *
+ * A PICTURE THAT WAS NEVER PROVEN IS NOT "NOTHING"
+ * -------------------------------------------------
+ * The rule used to be: a story whose picture has never been confirmed
+ * against its own page is left out of the feed entirely. That was
+ * right about the PICTURE and wrong about the STORY.
+ *
+ * The picture rule still stands, and it is enforced in the card
+ * itself: `NewsCard.pickImages` refuses to render an unproven picture,
+ * so the elephant never appears on the PHP-security story. What
+ * changed is the story: it is still news, it was fetched, and hiding
+ * it meant the site was showing fewer stories than it had.
+ *
+ * It cost 278 stories — every one of them from a publisher that
+ * renders its article pages in JavaScript, so the page carries
+ * nothing to prove a picture with. The site had fetched all 278 and
+ * shown none of them. A card with no picture shows the story's own key
+ * points, which is the outlet's own words; a card with an unproven
+ * picture is exactly as honest, and the feed is whole again.
  */
 export function showsNothing(article: LatestArticle): boolean {
   // Any video at all is something to show.
   if (article.video_url || article.video_embed_url) return false;
-
-  // A picture that was never confirmed against the story's own page is
-  // not shown at all — see the operator's rule in NewsCard.
-  if (article.image_verified_at === null) return true;
 
   return ![
     article.image_highres_url,
@@ -100,8 +115,8 @@ export function showsNothing(article: LatestArticle): boolean {
 }
 
 /**
- * The stories the feed leaves out, because nobody has proved their
- * picture belongs to them.
+ * The stories the feed leaves out, because they would show nothing at
+ * all — no picture, no video.
  *
  * THE SAME RULE, ON THE SERVER
  * ----------------------------
@@ -132,13 +147,22 @@ export function showsNothing(article: LatestArticle): boolean {
  * So the rule runs first, the slice comes last, and the server's first
  * paint is the same list the browser's first poll produces.
  *
+ * WHAT IT IS NOT, ANY MORE
+ * -------------------------
+ * It used to be the rule that removed a story whose PICTURE had never
+ * been confirmed. That rule is now the card's own: an unproven picture
+ * is not rendered (see `NewsCard.pickImages`), and the story itself is
+ * still shown. The two together are the whole picture policy: never
+ * show a picture that might be somebody else's, and never lose a story
+ * because of it.
+ *
  * THE FLOOR
  * ----------
- * A feed of nothing but unconfirmed stories is still a feed, and an
- * empty page because the site decided pictures matter more than news is a
- * worse one. So if every row would be dropped, they are all kept and the
- * card shows its honest "no picture" state. Same floor as every other
- * pass in lib/feed-images.ts.
+ * A feed of nothing but empty cards is still a feed, and an empty page
+ * because the site decided pictures matter more than news is a worse
+ * one. So if every row would be dropped, they are all kept and the card
+ * shows its honest "no picture" state. Same floor as every other pass
+ * in lib/feed-images.ts.
  */
 export function dropUnconfirmed<T extends { image_verified_at?: string | null }>(
   rows: T[],

@@ -59,10 +59,64 @@ from app.services.ingestion import db_call, run_source_sync  # noqa: E402
 CONCURRENCY = 5
 
 
+def source_interval(source: dict, floor_seconds: int = 60) -> int:
+    """
+    How long this outlet must be left alone between two polls.
+
+    The outlet's own row is the truth: `poll_interval_seconds` is what
+    the operator agreed with that publisher, and it is the same number
+    the long-lived worker uses for its own scheduler. The floor is
+    `MIN_POLL_SECONDS` (60 by default), so a row that says zero still
+    cannot turn the sweep into a load test.
+    """
+    try:
+        interval = int(source.get("poll_interval_seconds") or 0)
+    except (TypeError, ValueError):
+        interval = 0
+    return max(interval, floor_seconds)
+
+
+def source_is_due(source: dict, now: datetime, floor_seconds: int = 60) -> bool:
+    """
+    Is this outlet due to be polled again?
+
+    `last_success_at` is written by every poller - the worker's
+    scheduler and this sweep alike - the moment a poll of that outlet
+    finishes without failing. So it answers the only question that
+    matters to a publisher: has this outlet been asked recently enough
+    that asking again would be one request too many?
+
+    An outlet that has never been polled is always due. An outlet whose
+    last poll FAILED keeps its old timestamp (the store path leaves it
+    alone on failure), so a broken outlet is retried at the next pass
+    rather than being left to its own interval.
+    """
+    last = source.get("last_success_at")
+    if not last:
+        return True
+
+    if isinstance(last, str):
+        try:
+            last_at = datetime.fromisoformat(last.replace("Z", "+00:00"))
+        except ValueError:
+            return True
+    elif isinstance(last, datetime):
+        last_at = last
+    else:
+        return True
+
+    if last_at.tzinfo is None:
+        last_at = last_at.replace(tzinfo=timezone.utc)
+
+    elapsed = (now - last_at).total_seconds()
+    return elapsed >= source_interval(source, floor_seconds)
+
+
 async def main() -> int:
     settings = get_settings()
     db = get_db()
     semaphore = asyncio.Semaphore(CONCURRENCY)
+    now = datetime.now(timezone.utc)
 
     try:
         response = await db_call(
@@ -79,7 +133,53 @@ async def main() -> int:
         print("SOURCES_OK=0")
         return 2
 
+    # THE SWEEP DOES NOT ASK EVERY OUTLET EVERY TIME
+    # ----------------------------------------------
+    # This pass runs every three minutes now, and every pass used to
+    # ask every outlet - so an outlet that agreed to be polled every
+    # five minutes was being asked every three. The interval in the
+    # outlet's own row is the number that was agreed with that
+    # publisher, so this pass honours it: an outlet is polled when its
+    # interval has elapsed and left alone until then.
+    #
+    # That is what makes a three-minute sweep safe. The outlets that
+    # answer stay on a three-minute rhythm; the five that refuse us
+    # keep the slower rhythm they were given (and Ekantipur, whose poll
+    # costs a page fetch and three image probes PER CARD, keeps the
+    # slowest of all).
+    due: list[dict] = []
+    not_due: list[dict] = []
+    for source in sources:
+        if source_is_due(source, now, settings.min_poll_seconds):
+            due.append(source)
+        else:
+            not_due.append(source)
+
+    if not_due:
+        print(
+            f"{len(not_due)} outlet(s) are not due yet and will not be asked: "
+            + ", ".join(
+                f"{s.get('name', '?')} (every "
+                f"{source_interval(s, settings.min_poll_seconds)}s)"
+                for s in not_due
+            )
+            + "\n"
+        )
+
+    sources = due
+
     if not sources:
+        if not_due:
+            # Every outlet was inside its own interval. That is the
+            # sweep working, not a failure: a run that turned RED here
+            # would make the workflow report "no source was
+            # successfully synced" and teach the operator to ignore it.
+            print(
+                "Nothing was due this pass - every outlet is inside its own "
+                "interval. The next pass will pick them up."
+            )
+            print("SOURCES_OK=1")
+            return 0
         print(
             "No enabled+allowed sources. Apply migration "
             "0008_seed_nepali_sources.sql first."

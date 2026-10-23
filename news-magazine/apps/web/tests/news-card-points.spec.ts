@@ -108,6 +108,36 @@ test.describe("a card with no picture", () => {
   });
 });
 
+test.describe("a picture that was never proven", () => {
+  test("the card does not render it", () => {
+    // The story is shown; the PICTURE is not. This is the half of the
+    // rule that must never move: the marker is null, so nobody has
+    // proved the picture belongs to this story, and the card renders
+    // nothing that could be somebody else's photograph.
+    //
+    // It is what stopped the elephant appearing on the story about PHP
+    // security.
+    const html = render({
+      featured_image_url: "https://x.test/elephant.jpg",
+      image_verified_at: null,
+      summary_points: ["A point from the article."],
+    });
+
+    expect(html).not.toContain("elephant");
+    // The story's own words take the picture's place.
+    expect(html).toContain("A point from the article.");
+  });
+
+  test("a proven picture is rendered", () => {
+    const html = render({
+      featured_image_url: "https://x.test/proven.jpg",
+      image_verified_at: "2026-10-23T00:00:00Z",
+    });
+
+    expect(html).toContain("proven");
+  });
+});
+
 test.describe("the server-side pass", () => {
   test("a story with no picture is dropped, points or not", () => {
     // The operator's rule: a story whose picture is missing is a

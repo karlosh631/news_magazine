@@ -15,6 +15,10 @@
 #   - runs one full sync pass across every enabled source
 #   - prunes anything past the 48h retention window
 #   - uploads the log, and fails the run if sources are erroring
+#   - queues the NEXT run, so the five-minute promise does not depend
+#     on GitHub's scheduler keeping it (it does not: the runs of this
+#     workflow came three to five hours apart on a cron that says five
+#     minutes). See "Queue the next run" at the bottom.
 # =============================================================
 
 name: Ingest news
@@ -49,6 +53,9 @@ concurrency:
 
 permissions:
   contents: read
+  # The run queues the NEXT run (see "Queue the next run" below). That
+  # is the only thing this permission is for.
+  actions: write
 
 jobs:
   # =============================================================
@@ -86,7 +93,7 @@ jobs:
             echo "Set it to your Render URL to keep the free instance awake."
             exit 0
           fi
-          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
             "${INGESTION_URL%/}/api/health" || echo 000)
           if [ "$code" = "200" ]; then
             echo "Worker is awake (200)."
@@ -102,6 +109,9 @@ jobs:
     timeout-minutes: 25
 
     steps:
+      - name: Note when this run started
+        run: echo "RUN_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -237,3 +247,63 @@ jobs:
             echo "::warning::The almanac pass failed this run. The news sync succeeded; /category/rashifal may be showing an old day."
           fi
           grep -E "PANCHANG_OK=" sync.log || true
+
+      # =============================================================
+      # The heartbeat: this run queues the next one.
+      #
+      # WHY THE CRON ALONE IS NOT ENOUGH
+      # --------------------------------
+      # The cron above says five minutes. The runs did not come every
+      # five minutes: on 2026-10-23 they came at 01:49, 06:33 and 11:59
+      # UTC - three to five HOURS apart, on a cron that says five
+      # minutes. GitHub does not promise a schedule's frequency, and a
+      # busy shared runner queue is the usual reason it slips.
+      #
+      # A site whose newest story is five hours old is not a site
+      # anybody comes back to, and the schedule was the reason: nothing
+      # was broken, the work was simply not being asked for.
+      #
+      # So each run dispatches the next one itself, and the dispatch is
+      # immediate - which GitHub does honour, because workflow_dispatch
+      # is one of the two events a GITHUB_TOKEN may trigger. The cron
+      # stays as the backstop: if this chain is ever broken (a cancelled
+      # run, a changed token), the next cron run starts it again.
+      #
+      # THE CADENCE IS STILL FIVE MINUTES
+      # ---------------------------------
+      # The chain would otherwise run back-to-back at the speed of the
+      # pass itself, which is roughly ninety seconds - three times the
+      # request rate to every publisher that the five-minute cadence
+      # was chosen for. So the run waits out the remainder of its five
+      # minutes before queueing the next one. The wait is free: this
+      # repository is public, and public repositories get Actions
+      # minutes without charge.
+      # =============================================================
+      - name: Queue the next run
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          WORKFLOW: ingest.yml
+          CADENCE_SECONDS: "300"
+        run: |
+          set +e
+          now=$(date +%s)
+          started=${RUN_STARTED:-$now}
+          elapsed=$(( now - started ))
+          wait=$(( CADENCE_SECONDS - elapsed ))
+          if [ "$wait" -gt 0 ]; then
+            echo "Waiting ${wait}s so the next run starts five minutes after this one did."
+            sleep "$wait"
+          fi
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW}/dispatches" \
+            -d '{"ref":"main"}')
+          if [ "$code" = "204" ]; then
+            echo "::notice::The next run is queued. The site refreshes on a five-minute heartbeat."
+          else
+            echo "::warning::Could not queue the next run (${code}). The cron will start another one when it next fires."
+          fi
+          exit 0

@@ -923,6 +923,23 @@ forever without you touching it.
 | `almanac.yml` | 01:00 Nepal time (19:15 UTC the day before) | The day's almanac and the twelve horoscopes, and the week ahead of them |
 | `refresh-images.yml` | nightly, and on a button | Works through the rows whose picture has never been confirmed against their own page |
 
+**The five minutes are kept by the workflow itself, not by GitHub's
+scheduler.** GitHub does not promise that a `schedule:` trigger runs on
+time. On 2026-10-23 the `ingest.yml` cron — which says `*/5 * * * *` —
+fired at 01:49, 06:33 and 11:59 UTC: three to five hours apart, on a
+cron that says five minutes. A site whose newest story is five hours
+old is not a site anybody comes back to.
+
+So every run queues the next one. The last step of `ingest.yml`
+dispatches `ingest.yml` again, and `workflow_dispatch` is one of the
+two events a `GITHUB_TOKEN` may trigger — no secret of its own is
+needed, only the `actions: write` permission the workflow already
+carries for it. The run waits out the remainder of its five minutes
+first, so the cadence stays the one the publishers were promised
+rather than the ninety seconds a pass actually takes. The cron stays as
+the backstop: if the chain is ever broken, the next cron run starts it
+again.
+
 GitHub's own scheduling is not precise — a scheduled workflow can run
 minutes or hours late, and on a busy repository much later — so the
 long-lived worker ALSO does the almanac, hourly, and whichever lands

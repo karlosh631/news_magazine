@@ -577,6 +577,10 @@ async def verify_media_images(
         validator,
         limit=limit,
         declared=page.declared_images if page else None,
+        # The story's own page, as the Referer for the picture
+        # requests. A browser sends it, and a CDN that checks it
+        # refuses a request with no referer at all.
+        referer=page.source_url if page else None,
     )
 
     if not live:
@@ -958,6 +962,7 @@ async def refresh_stale_images(
                 validator,
                 limit=IMAGE_PROBE_CANDIDATES,
                 declared=page.declared_images,
+                referer=page.source_url,
             )
             if not live:
                 # Could not prove a picture this time. Leave the row
@@ -1123,6 +1128,7 @@ async def repair_broken_image_urls(
                 validator,
                 limit=IMAGE_PROBE_CANDIDATES,
                 declared=page.declared_images,
+                referer=page.source_url,
             )
             if not live:
                 continue
@@ -1280,6 +1286,7 @@ async def repair_missing_images(
                 validator,
                 limit=IMAGE_PROBE_CANDIDATES,
                 declared=page.declared_images,
+                referer=page.source_url,
             )
             if not live:
                 continue

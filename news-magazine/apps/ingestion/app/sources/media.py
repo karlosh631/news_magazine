@@ -210,7 +210,7 @@ _JUNK_IMAGE_RE = re.compile(
     r"icon|sprite|favicon|placeholder|loader|lazy[-_.]?|lazyload|"
     r"default[-_]?image|no[-_]?image|dummy|mock|grey|gray|loading|"
     r"preload|skeleton|shimmer|lightbox|thumb[-_]?small|statcounter|"
-    r"counter|beacon|pixel)[/_.-]",
+    r"counter|beacon|pixel|404|not[-_]?found)[/_.-]",
     re.IGNORECASE,
 )
 
@@ -335,6 +335,11 @@ class ExtractedMedia:
     description: str | None = None
     published_at: str | None = None
     canonical_url: str | None = None
+    # The page this media came from, after any redirect. It is the
+    # Referer a browser would send with a picture it loads from this
+    # page, and several Nepali CDNs refuse a picture request that
+    # carries no referer at all.
+    source_url: str | None = None
     author: str | None = None
     word_count: int | None = None
     # Plain article text, used only to feed the extractive summariser.
@@ -1179,6 +1184,9 @@ async def extract_from_article(
             or meta.get("twitter:creator")
         )
         result.canonical_url = _extract_link_rel(html, ("canonical", "alternate"), final_url)
+        # The page itself, so that a picture request can carry the
+        # Referer a browser would send. See ImageValidator.is_live.
+        result.source_url = final_url
         result.article_text = extract_article_text(html)
         result.word_count = _count_words(html)
 
@@ -1389,8 +1397,16 @@ class ImageValidator:
         """The remembered verdict for a URL, or None if never probed."""
         return self._cache.get(url)
 
-    async def is_live(self, url: str | None) -> bool:
-        """True only if this URL is proven to return a renderable image."""
+    async def is_live(self, url: str | None, referer: str | None = None) -> bool:
+        """
+        True only if this URL is proven to return a renderable image.
+
+        `referer` is the page the picture is on. A browser sends it for
+        every image it loads; a CDN that checks it refuses a request
+        that claims to come from nowhere. The verdict is cached per
+        URL, so the referer only matters on the first probe of an
+        image.
+        """
         if not url:
             return False
 
@@ -1400,7 +1416,7 @@ class ImageValidator:
             self.cache_hits += 1
             return remembered
 
-        live = await self._probe(url)
+        live = await self._probe(url, referer)
         self._cache[url] = live
         # Bounded: a long-running poll must not accumulate verdicts for
         # every URL it has ever seen. Oldest verdict goes first, which
@@ -1409,7 +1425,7 @@ class ImageValidator:
             self._cache.popitem(last=False)
         return live
 
-    async def _probe(self, url: str) -> bool:
+    async def _probe(self, url: str, referer: str | None = None) -> bool:
         self.requests += 1
         try:
             async with self._client.stream(
@@ -1423,6 +1439,15 @@ class ImageValidator:
                     "Accept": (
                         "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
                     ),
+                    # The page the picture is ON, as the Referer. A
+                    # browser sends it for every image it loads, and a
+                    # CDN that checks it - several Nepali ones do -
+                    # refuses a request that claims to come from
+                    # nowhere, or from somewhere else. The worker runs
+                    # from a datacentre in another country, and an
+                    # image request with no Referer is exactly the
+                    # shape a CDN's rule refuses.
+                    **({"Referer": referer} if referer else {}),
                     # Cap the transfer. A server that ignores this sends
                     # the whole file, so the body is read only to the
                     # byte budget below and the connection is then
@@ -1485,6 +1510,7 @@ async def resolve_live_image(
     validator: ImageValidator,
     limit: int = 3,
     declared: list[str] | None = None,
+    referer: str | None = None,
 ) -> str | None:
     """
     The first candidate that proves it loads, or None.
@@ -1501,9 +1527,12 @@ async def resolve_live_image(
     a wrong picture gets stored, and it used to pass in silence: the row
     simply carried whatever the scan found, with nothing in the logs to
     say the publisher's choice had been rejected.
+
+    `referer` is the page the picture is on, and it is sent with every
+    probe. See ImageValidator.is_live.
     """
     for url in candidates[: max(limit, 0)]:
-        if await validator.is_live(url):
+        if await validator.is_live(url, referer):
             if declared and url not in declared:
                 logger.info(
                     "Declared image(s) %s did not load; stored %s found on the page.",

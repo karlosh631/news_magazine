@@ -227,6 +227,7 @@ async def run(limit: int, delay: float, dry_run: bool) -> int:
                     validator,
                     limit=PROBE_CANDIDATES,
                     declared=page.declared_images,
+                    referer=page.source_url,
                 )
             except Exception as exc:  # noqa: BLE001 - one row, not the run
                 print(f"  {index}/{len(ordered)} could not be read: {exc}")

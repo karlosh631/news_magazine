@@ -343,3 +343,84 @@ async def store_rashifal(
         return False
 
     return True
+
+
+# =============================================================
+# IS THIS DAY'S HOROSCOPE PUBLISHED YET?
+# =============================================================
+
+def same_horoscope(
+    first: list[RashifalSign], second: list[RashifalSign]
+) -> bool:
+    """
+    True when two days carry the SAME twelve horoscopes.
+
+    THE SOURCE SERVES TODAY'S HOROSCOPE FOR DAYS IT HAS NOT PUBLISHED
+    --------------------------------------------------------------
+    Measured on 2026-10-23: the source's per-day page for tomorrow
+    carried exactly today's twelve horoscopes — the same advice, the
+    same lucky colours, the same lucky numbers — and so did the page
+    for the day after. The source publishes a day's horoscope during
+    that day; until it does, its per-day page repeats today's.
+
+    Storing that copy would put today's horoscope under tomorrow's
+    date, and under the day after's, and under six more — which is
+    exactly what the site was showing: the same twelve sentences on
+    seven different days, with a different day of the week beside
+    each one. The reader was right to call it wrong information.
+
+    So a day whose horoscope is byte-for-byte today's has NOT been
+    published, and it is not stored. The almanac for that day is a
+    different matter — the tithi and the sunrise are computed per day
+    and are correct — so only the horoscopes are withheld.
+    """
+    if not first or not second:
+        return False
+
+    if len(first) != len(second):
+        return False
+
+    by_slug = {sign.slug: sign for sign in second}
+
+    for sign in first:
+        other = by_slug.get(sign.slug)
+        if other is None:
+            return False
+        if (sign.advice or "").strip() != (other.advice or "").strip():
+            return False
+        if (sign.lucky_colour or "").strip() != (other.lucky_colour or "").strip():
+            return False
+        if (sign.lucky_number or "").strip() != (other.lucky_number or "").strip():
+            return False
+
+    return True
+
+
+async def delete_rashifal_day(db, panchang_date: date) -> bool:
+    """
+    Remove the twelve horoscopes of one day.
+
+    Used when the source has NOT published a day and the copy we hold
+    is a repeat of today's: keeping it would show today's horoscope
+    under a date it does not belong to. The almanac for the day stays —
+    that one is real — and the next pass stores the horoscope the
+    moment the source publishes it.
+
+    Never raises: a failed delete leaves yesterday's copy in place,
+    which the next pass overwrites.
+    """
+    try:
+        await db_call(
+            lambda: db.table("daily_rashifal")
+            .delete()
+            .eq("panchang_date", panchang_date.isoformat())
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "rashifal: could not remove the unpublished horoscopes for %s: %s",
+            panchang_date.isoformat(), exc,
+        )
+        return False
+
+    return True

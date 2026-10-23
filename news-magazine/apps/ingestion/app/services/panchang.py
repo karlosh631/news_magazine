@@ -958,6 +958,25 @@ async def panchang_fetched_at(db, day: date) -> datetime | None:
 PANCHANG_MAX_AGE_SECONDS = 3600
 
 
+#: How old the week ahead may be before it is walked again.
+#:
+#: THE WALK IS NOT ONLY FOR THE DAY ROLL-OVER
+#: ------------------------------------------
+#: The walk fetches the seven days after today, one per-day page each.
+#: It used to run only when the horizon fell short — which is once a
+#: day, at the rollover — and that is not often enough, because the
+#: source publishes a day's horoscope DURING that day rather than the
+#: night before. Measured on 2026-10-23: the source's per-day page for
+#: tomorrow carried TODAY's horoscope word for word, and so did the
+#: page for the day after; the horoscope for a day appears some hours
+#: after the day begins.
+#:
+#: So the week ahead is walked every six hours: twenty-eight requests
+#: a day to one publisher, which is nothing, and a horoscope that is
+#: at most six hours behind the source's own.
+PANCHANG_WALK_MAX_AGE_SECONDS = 6 * 3600
+
+
 
 # =============================================================
 # STORING
@@ -1148,8 +1167,10 @@ async def sync_panchang(
     # import in the other direction would be a cycle.
     from app.services.rashifal import (
         RashifalParseError,
+        delete_rashifal_day,
         parse_rashifal,
         parse_rashifal_day,
+        same_horoscope,
         store_rashifal,
     )
 
@@ -1184,14 +1205,36 @@ async def sync_panchang(
 
         stored = await stored_panchang_days(db, local_today)
         newest = None
-        for _, stamp in stored:
-            if stamp is not None and (newest is None or stamp > newest):
+        last_walk = None
+        for day, stamp in stored:
+            if stamp is None:
+                continue
+            if newest is None or stamp > newest:
                 newest = stamp
+            # Today's row is refreshed on its own schedule, so it says
+            # nothing about the walk. The days AHEAD are written by the
+            # walk and by nothing else, so their newest stamp IS the
+            # time of the last walk.
+            if day != local_today and (last_walk is None or stamp > last_walk):
+                last_walk = stamp
 
         horizon_short = len(stored) < ahead_days + 1
-        walk_due = horizon_short and (
-            newest is None
-            or (now - newest).total_seconds() >= PANCHANG_MAX_AGE_SECONDS
+        # The walk is due when the week ahead has not been walked for
+        # six hours, or when a day is missing from it and an hour has
+        # passed since anything was fetched. The second clause brings
+        # the new day in at the rollover; the first keeps the days
+        # ahead fresh, because the source publishes a day's horoscope
+        # during that day rather than the night before.
+        gap_walk = (
+            None if last_walk is None else (now - last_walk).total_seconds()
+        )
+        gap_any = None if newest is None else (now - newest).total_seconds()
+        walk_due = (
+            (gap_walk is not None and gap_walk >= PANCHANG_WALK_MAX_AGE_SECONDS)
+            or (
+                horizon_short
+                and (gap_any is None or gap_any >= PANCHANG_MAX_AGE_SECONDS)
+            )
         )
 
         today_fetched_at = await panchang_fetched_at(db, local_today)
@@ -1215,6 +1258,12 @@ async def sync_panchang(
         today: NepaliDay | None = None
         today_page: str | None = None
         panchang: Panchang | None = None
+        # Today's twelve horoscopes. They are the answer the walk
+        # compares each day ahead against: a day the source has not
+        # published yet carries today's horoscope word for word, and
+        # storing that would put today's horoscope under six other
+        # dates. See rashifal.same_horoscope.
+        today_signs: list = []
 
         if force or not today_fresh:
             try:
@@ -1239,6 +1288,8 @@ async def sync_panchang(
                 signs = parse_rashifal(today_html)
             except RashifalParseError as exc:
                 logger.warning("rashifal: could not read the horoscopes: %s", exc)
+
+            today_signs = signs
 
             if signs and (force or today.bs_key != _last_stored_signs_bs):
                 if await store_rashifal(
@@ -1309,6 +1360,9 @@ async def sync_panchang(
                 ahead_days=ahead_days,
                 parse_signs=parse_rashifal_day,
                 store_signs=store_rashifal,
+                today_signs=today_signs,
+                delete_signs=delete_rashifal_day,
+                is_published=same_horoscope,
             )
 
         return panchang
@@ -1330,6 +1384,9 @@ async def _walk_the_days_ahead(
     ahead_days: int,
     parse_signs,
     store_signs,
+    today_signs: list | None = None,
+    delete_signs=None,
+    is_published=None,
 ) -> list[date]:
     """
     Fetch and store the days after today.
@@ -1339,6 +1396,24 @@ async def _walk_the_days_ahead(
     is fetched is stored: the almanac in `daily_panchang` and the
     twelve horoscopes in `daily_rashifal`, because the per-day page
     carries both.
+
+    A DAY WHOSE HOROSCOPE THE SOURCE HAS NOT PUBLISHED IS NOT STORED
+    ---------------------------------------------------------------
+    The source serves TODAY's horoscope on the per-day page of a day
+    it has not published yet - measured on 2026-10-23, tomorrow's page
+    and the day after's both carried today's twelve horoscopes word
+    for word. Storing that copy would put today's horoscope under
+    six other dates: the same twelve sentences on seven different
+    days, each with a different day of the week beside it, which is
+    what the site was showing and what the reader called wrong
+    information.
+
+    So a day whose horoscope is identical to today's has not been
+    published, and its horoscopes are removed rather than stored. The
+    ALMANAC for that day is a different matter - the tithi, the
+    sunrise and the sunset are computed for the day and are correct -
+    so it is stored as usual. The next pass stores the horoscope the
+    moment the source publishes it.
 
     Returns the days it stored. Never raises: a day that cannot be
     fetched is a gap in the week ahead, not a reason to stop the
@@ -1383,7 +1458,24 @@ async def _walk_the_days_ahead(
             logger.debug("rashifal: no horoscopes on %s: %s", href, exc)
             signs = []
 
-        if signs:
+        # Has the source published THIS day's horoscope, or is it still
+        # repeating today's?
+        unpublished = bool(
+            signs
+            and today_signs
+            and is_published is not None
+            and is_published(today_signs, signs)
+        )
+
+        if unpublished:
+            logger.info(
+                "rashifal: %s still carries today's horoscope, so the source "
+                "has not published it yet; the copy we held is removed.",
+                panchang.ad_date.isoformat(),
+            )
+            if delete_signs is not None:
+                await delete_signs(db, panchang.ad_date)
+        elif signs:
             await store_signs(db, signs, panchang.ad_date, f"{PANCHANG_SOURCE}{href}")
 
         following = next_day_href(html)

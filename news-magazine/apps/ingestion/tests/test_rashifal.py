@@ -82,6 +82,7 @@ from app.services.rashifal import (
     RashifalParseError,
     parse_rashifal,
     rashifal_row,
+    same_horoscope,
     store_rashifal,
 )
 
@@ -870,3 +871,40 @@ def test_the_pass_does_not_raise_when_the_source_is_down():
 
     assert run(sync_panchang(db, client=BrokenClient())) is None
     assert db.upserts == []
+
+
+# =============================================================
+# HAS THE SOURCE PUBLISHED THIS DAY'S HOROSCOPE YET?
+#
+# Measured on 2026-10-23: the source's per-day page for tomorrow
+# carried exactly today's twelve horoscopes, and so did the page for
+# the day after. It publishes a day's horoscope during that day; until
+# it does, its per-day page repeats today's.
+#
+# Storing that copy put today's horoscope under six other dates: the
+# same twelve sentences on seven different days, each with a different
+# day of the week beside it. The reader was right to call it wrong
+# information.
+# =============================================================
+
+
+def _signs(advice: str):
+    """The twelve signs, with every advice replaced by one sentence."""
+    signs = [
+        {**sign, "descNp": advice, "descEn": ""}
+        for sign in RASHIFAL_SIGNS
+    ]
+    return parse_rashifal(_page(signs=signs))
+
+
+def test_two_days_with_the_same_advice_are_the_same_horoscope():
+    assert same_horoscope(_signs("one"), _signs("one")) is True
+
+
+def test_two_days_with_different_advice_are_not():
+    assert same_horoscope(_signs("one"), _signs("two")) is False
+
+
+def test_an_empty_day_is_never_the_same_as_a_real_one():
+    assert same_horoscope([], _signs("one")) is False
+    assert same_horoscope(_signs("one"), []) is False

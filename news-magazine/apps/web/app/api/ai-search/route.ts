@@ -141,6 +141,22 @@ function rateLimited(): boolean {
 }
 
 type ArticleContext = {
+  /**
+   * The story's OWN page on this site.
+   *
+   * This used to be missing, and its absence was the whole bug: the
+   * search dropdown decides between an internal link and an outbound
+   * link by asking whether the hit has a slug, so a hit without one
+   * opened the publisher's site in a new tab. Every result the reader
+   * searched for was on this site already - the search had found it
+   * HERE - and it still sent them somewhere else.
+   *
+   * It is nullable because a story recovered by re-scraping an outlet
+   * (the resurrection path) may not have a row here yet. Those still
+   * link out, which is right: there is no page of ours to open.
+   */
+  id: string | null;
+  slug: string | null;
   headline: string;
   excerpt: string | null;
   summary_points: string[] | null;
@@ -212,6 +228,8 @@ export async function POST(request: Request) {
   }
 
   const articles: ArticleContext[] = (result.articles ?? []).map((row) => ({
+    id: row.id ?? null,
+    slug: row.slug || null,
     headline: row.headline,
     excerpt: row.excerpt,
     summary_points: row.summary_points,
@@ -226,13 +244,26 @@ export async function POST(request: Request) {
     //     pruned story. Best fidelity: real article, real URL.
     const resurrected = await triggerResurrection(query, 5);
     if (resurrected && resurrected.articles.length > 0) {
+      // A story that was re-fetched and stored here has a page of our
+      // own, so it opens here. One that was only found on the web does
+      // not, and opens at the outlet that published it.
+      const recovered: ArticleContext[] = resurrected.articles.map((row) => ({
+        id: row.id ?? null,
+        slug: row.slug || null,
+        headline: row.headline,
+        excerpt: row.excerpt,
+        summary_points: row.summary_points,
+        source_article_url: row.source_article_url,
+        source_name_snapshot: row.source_name_snapshot,
+        published_at: row.published_at,
+      }));
       return NextResponse.json({
         query,
-        summary: `${resurrected.articles.length} matching article(s) re-fetched from source.`,
+        summary: `${recovered.length} matching article(s) re-fetched from source.`,
         key_points: [],
         confidence: "medium" as const,
-        articles: resurrected.articles,
-        sources: resurrected.articles.map((a) => ({
+        articles: recovered,
+        sources: recovered.map((a) => ({
           headline: a.headline,
           url: a.source_article_url,
           source: a.source_name_snapshot,

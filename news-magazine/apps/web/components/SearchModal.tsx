@@ -27,14 +27,16 @@ import { cleanHeadline } from "@/lib/headline";
  */
 
 export type SearchHit = {
-  id: string;
+  id: string | null;
   /**
+   * The story's own page on this site.
+   *
    * Present for rows from our own articles table. Absent for rows the
    * ai-search endpoint recovered by re-scraping, which carry the
    * outlet's own URL instead — those have to render as an outbound link,
    * or the card would point at /article/undefined.
    */
-  slug?: string;
+  slug?: string | null;
   source_article_url?: string | null;
   headline: string;
   source_name_snapshot: string | null;
@@ -54,6 +56,33 @@ export type SearchSource = {
   source: string | null;
   published_at: string | null;
 };
+
+/**
+ * Where a search hit goes.
+ *
+ * A hit that came from our own articles table has a slug, and it opens
+ * HERE, as a regular story page, exactly like the same story in the
+ * feed. That is the whole point of the site: the reader searched for a
+ * story this site is running, and the result is that story.
+ *
+ * A hit that was recovered by re-scraping an outlet has no row here
+ * yet, so there is no page of ours to open, and it opens at the outlet
+ * that published it - in a new tab, and saying so.
+ *
+ * The bug this replaces: the endpoint left the slug out of its answer,
+ * so EVERY result was treated as the second kind. The reader searched
+ * for "balen", found the story on this site, clicked it, and was sent
+ * to the publisher in a new tab.
+ */
+export function searchHitHref(hit: SearchHit): {
+  href: string;
+  external: boolean;
+} {
+  if (hit.slug) {
+    return { href: `/article/${hit.slug}`, external: false };
+  }
+  return { href: hit.source_article_url ?? "#", external: true };
+}
 
 export function SearchModal({
   open,
@@ -229,10 +258,8 @@ export function SearchModal({
             {hits.slice(0, 10).map((hit) => {
               // Our own rows link internally; anything the fallback
               // recovered links out to the outlet that published it.
-              const internal = Boolean(hit.slug);
-              const href = internal
-                ? `/article/${hit.slug}`
-                : (hit.source_article_url ?? "#");
+              const { href, external } = searchHitHref(hit);
+              const internal = !external;
 
               const body = (
                 <>
@@ -250,7 +277,7 @@ export function SearchModal({
               );
 
               return (
-                <li key={hit.id}>
+                <li key={hit.id ?? hit.slug ?? hit.headline}>
                   {internal ? (
                     <Link
                       href={href}

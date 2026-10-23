@@ -44,8 +44,18 @@ type SearchResult = {
   query: string;
   count: number;
   articles: Array<{
-    id: string;
-    slug: string;
+    id: string | null;
+    /**
+     * The story's own page on this site.
+     *
+     * The endpoint used to leave this out, and the dropdown decides
+     * between an internal link and an outbound link by asking whether
+     * the hit has one - so every result the reader searched for opened
+     * the publisher's site in a new tab instead of the story on this
+     * site. It is nullable because a story recovered by re-scraping an
+     * outlet may not have a row here yet.
+     */
+    slug: string | null;
     headline: string;
     excerpt: string | null;
     summary_points: string[] | null;
@@ -133,6 +143,38 @@ export function Header({ categories }: { categories: NavCategory[] }) {
     setSearchQuery("");
     setAiSearch(null);
     setAiSearchError("");
+  };
+
+  /**
+   * Run the search and go to the results.
+   *
+   * Navigate only. The debounced effect above already issued the
+   * search for this query, and /search runs its own server-side query,
+   * so fetching again here meant three database round trips per Enter.
+   *
+   * The one case that needs more than a navigation is the reader
+   * pressing Enter on the results page, with the same query, in front
+   * of them: the URL does not change, so the push changes nothing they
+   * can see, and the key looks broken. That case runs the search
+   * again, so a story published in the last minute shows up.
+   */
+  const runSearch = () => {
+    const query = searchQuery.trim();
+    if (!query) return;
+
+    setSearchOpen(false);
+    setMenuOpen(false);
+
+    const onTheSameResults =
+      pathname === "/search" &&
+      new URLSearchParams(window.location.search).get("q") === query;
+
+    if (onTheSameResults) {
+      router.refresh();
+      return;
+    }
+
+    router.push(`/search?q=${encodeURIComponent(query)}`);
   };
 
   const toggleLanguage = () => {
@@ -256,15 +298,27 @@ export function Header({ categories }: { categories: NavCategory[] }) {
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const query = searchQuery.trim();
-    if (!query) return;
+    runSearch();
+  };
 
-    // Navigate only. The debounced effect above already issued the
-    // search for this query, and /search runs its own server-side query,
-    // so fetching again here meant three database round trips per Enter.
-    setSearchOpen(false);
-    setMenuOpen(false);
-    router.push(`/search?q=${encodeURIComponent(query)}`);
+  /**
+   * ENTER RUNS THE SEARCH
+   * ----------------------
+   * The Enter key is handled here rather than left to the browser's
+   * implicit form submission, because that is exactly the thing that
+   * stopped working: the reader typed, pressed Enter, and nothing
+   * happened. Whatever the browser decides to do with a search input
+   * inside a form - and it decides differently across browsers and
+   * across versions - the key now does the one thing the reader means
+   * by it.
+   *
+   * `preventDefault()` on the keydown also stops the form's own submit
+   * from firing, so the search runs exactly once.
+   */
+  const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    runSearch();
   };
 
   /*
@@ -393,6 +447,7 @@ export function Header({ categories }: { categories: NavCategory[] }) {
                 setSearchQuery(e.target.value);
                 if (e.target.value.trim()) setSearchOpen(true);
               }}
+              onKeyDown={handleSearchKeyDown}
               className="h-12 w-40 rounded-md border border-gray-300 px-3 text-xs outline-none transition focus:w-56 focus:border-black focus:ring-1 focus:ring-black"
             />
           </form>
@@ -461,6 +516,7 @@ export function Header({ categories }: { categories: NavCategory[] }) {
                 setSearchQuery(e.target.value);
                 if (e.target.value.trim()) setSearchOpen(true);
               }}
+              onKeyDown={handleSearchKeyDown}
               className="h-12 w-full rounded-md border border-gray-300 px-3 text-sm outline-none focus:border-black focus:ring-1 focus:ring-black"
             />
           </form>

@@ -12,6 +12,7 @@
 
 import "server-only";
 
+import { dropUnconfirmed, showsNothing } from "@/lib/card-artwork";
 import { dropDuplicateStories } from "@/lib/feed-dedup";
 import {
   cursorAfter as feedCursorAfter,
@@ -51,8 +52,25 @@ export const PAGE_SIZE = 24;
  * covers the common case; the floor in `dropImageless` keeps the page from
  * ever going empty, and the client filter removes anything that still
  * slips through.
+ *
+ * FOUR PASSES CAN NOW VACATE A SLOT, and the fourth one is the reason
+ * this is five rather than three.
+ *
+ * The confirmation pass (`dropUnconfirmed`) removes every story whose
+ * picture has never been confirmed against its own page. On 2026-10-23
+ * that was 57 of the newest 72 articles — an ingestion build older than
+ * the confirmation rule had been writing them for hours — so a headroom
+ * of three handed back a 24-card page that was FIFTEEN cards, and the
+ * homepage painted one story and then filled itself in under the reader
+ * (a layout shift of 0.23 on a phone).
+ *
+ * The headroom is a read-side over-fetch: the ordering is still the
+ * database's, nothing is promoted, and the extra rows are only used to
+ * backfill the slots the filters vacated. Five covers the gap even while
+ * the backlog is being worked through, and it stops mattering the moment
+ * the backlog is clear — at which point three would do again.
  */
-const DEDUP_HEADROOM = 3;
+const DEDUP_HEADROOM = 5;
 
 /**
  * True when Supabase is not configured.
@@ -499,7 +517,12 @@ async function languageSelect({
   // broken. It is a filter, not a reordering, so putting it here changes
   // which rows survive and nothing about their order.
   const articles = preferIllustrated(
-    dropRepeatedImages(dropImageless(dropDuplicateStories(newestFirst(rows)))),
+    dropRepeatedImages(
+      dropUnconfirmed(
+        dropImageless(dropDuplicateStories(newestFirst(rows))),
+        showsNothing
+      )
+    ),
     limit
   );
 
@@ -706,7 +729,10 @@ async function directSelect({
   // populated by an onError that only fires after the browser has tried
   // the image, and only on surfaces that pass the callback at all.
   const articles = dropRepeatedImages(
-    dropImageless(dropDuplicateStories(mapped))
+    dropUnconfirmed(
+      dropImageless(dropDuplicateStories(mapped)),
+      showsNothing
+    )
   ).slice(0, limit);
 
   return {

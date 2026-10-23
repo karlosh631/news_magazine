@@ -98,3 +98,52 @@ export function showsNothing(article: LatestArticle): boolean {
     (url) => typeof url === "string" && /^https?:\/\//i.test(url.trim())
   );
 }
+
+/**
+ * The stories the feed leaves out, because nobody has proved their
+ * picture belongs to them.
+ *
+ * THE SAME RULE, ON THE SERVER
+ * ----------------------------
+ * This is `showsNothing` applied to a list rather than to one story, and
+ * it is here because the feed was applying it in the browser while the
+ * SERVER did not — and the two disagreed in a way the reader could see.
+ *
+ * The server fetched seventy-two rows, kept twenty-four of them, and
+ * handed those twenty-four to the card. The card then dropped the ones
+ * whose picture had never been confirmed. On 2026-10-23 that left the
+ * homepage with ONE card in its HTML, because twenty-three of the
+ * twenty-four newest rows were unconfirmed; the browser's first poll
+ * then filled the page to six, and the page moved under the reader
+ * (a layout shift of 0.23 on a phone, and a footer that jumped from the
+ * top of the screen to 2,400 pixels down).
+ *
+ * Two things were wrong with that, and both are fixed by running the
+ * rule BEFORE the list is sliced:
+ *
+ *   - the over-fetch did not backfill. The fetch reads seventy-two rows
+ *     so that the ones a filter throws away leave room for the ones
+ *     further down; the rule was running after the slice, so the
+ *     twenty-four slots it filled were gone before the rule ever saw
+ *     them;
+ *   - the server and the client disagreed about what the feed was, and
+ *     the page had to change once the client had its own answer.
+ *
+ * So the rule runs first, the slice comes last, and the server's first
+ * paint is the same list the browser's first poll produces.
+ *
+ * THE FLOOR
+ * ----------
+ * A feed of nothing but unconfirmed stories is still a feed, and an
+ * empty page because the site decided pictures matter more than news is a
+ * worse one. So if every row would be dropped, they are all kept and the
+ * card shows its honest "no picture" state. Same floor as every other
+ * pass in lib/feed-images.ts.
+ */
+export function dropUnconfirmed<T extends { image_verified_at?: string | null }>(
+  rows: T[],
+  isEmpty: (row: T) => boolean
+): T[] {
+  const kept = rows.filter((row) => !isEmpty(row));
+  return kept.length > 0 ? kept : rows;
+}

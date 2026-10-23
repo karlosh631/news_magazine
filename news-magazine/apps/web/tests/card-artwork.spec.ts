@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { showsNothing, storyPoints } from "../lib/card-artwork";
+import { dropUnconfirmed, showsNothing, storyPoints } from "../lib/card-artwork";
 import type { LatestArticle } from "../types/database";
 
 /**
@@ -131,5 +131,52 @@ test.describe("the key points", () => {
     expect(
       storyPoints({ summary_points: ["One.", "", "Two."] })
     ).toEqual(["One.", "Two."]);
+  });
+});
+
+test.describe("the confirmation pass, on the server", () => {
+  const confirmed = article({
+    id: "confirmed",
+    featured_image_url: "https://x.test/photo.jpg",
+    image_verified_at: "2026-10-23T00:00:00Z",
+  });
+  const unconfirmed = article({
+    id: "unconfirmed",
+    featured_image_url: "https://x.test/photo.jpg",
+    image_verified_at: null,
+  });
+
+  test("a story whose picture was never confirmed is left out", () => {
+    expect(
+      dropUnconfirmed([confirmed, unconfirmed], showsNothing).map((a) => a.id)
+    ).toEqual(["confirmed"]);
+  });
+
+  test("the rule runs before the page is sliced, so the slots fill", () => {
+    // Twenty-four slots, of which only one story has a confirmed
+    // picture: the page shows that one story and no other. The
+    // over-fetch is what puts the other twenty-three stories in the
+    // window, and this is the pass that lets them through.
+    const rows = [
+      ...Array.from({ length: 23 }, (_, i) =>
+        article({ id: `u${i}`, image_verified_at: null })
+      ),
+      confirmed,
+    ];
+    expect(dropUnconfirmed(rows, showsNothing)).toHaveLength(1);
+  });
+
+  test("a feed of nothing but unconfirmed stories is still a feed", () => {
+    const rows = [unconfirmed, article({ id: "u2", image_verified_at: null })];
+    expect(dropUnconfirmed(rows, showsNothing)).toHaveLength(2);
+  });
+
+  test("a story with a video is kept even without a picture", () => {
+    const video = article({
+      id: "video",
+      image_verified_at: null,
+      video_url: "https://x.test/a.mp4",
+    });
+    expect(dropUnconfirmed([video, unconfirmed], showsNothing)).toHaveLength(1);
   });
 });

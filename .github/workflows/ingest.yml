@@ -47,8 +47,24 @@ on:
 
 # Never run two syncs at once — they would race on the same rows and
 # waste requests on every outlet.
+#
+# The group was renamed when the pass was made quick. A run that is
+# already queued is pinned to the commit it was dispatched with, so it
+# keeps running the OLD code - a pass that takes twenty-five minutes
+# and dies in a database storm - however fast the new code is. Putting
+# the new code in its own group lets it start at once instead of
+# waiting behind a pass that is already obsolete.
+#
+# The old group empties itself: every run queues its successor with
+# `ref: main`, so the successor is always the newest code, and the
+# next one lands in this group.
+#
+# `cancel-in-progress` stays FALSE, and that is load-bearing. The
+# heartbeat below queues the next run at the START of this one, so a
+# true here would mean every run cancelling the one that queued it,
+# and no pass would ever finish.
 concurrency:
-  group: ingest-news
+  group: ingest-news-v2
   cancel-in-progress: false
 
 permissions:

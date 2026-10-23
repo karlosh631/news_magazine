@@ -31,6 +31,17 @@ type OptimizedImageProps = {
    * referer policy to object to.
    */
   referrerPolicy?: React.HTMLAttributeReferrerPolicy;
+  /**
+   * For the ONE picture that is the page's Largest Contentful Paint.
+   *
+   * The browser only discovers which picture that is after it has laid
+   * the page out, so it starts every image lazily and then asks for the
+   * one that mattered. The first card's picture is known before the
+   * first byte of HTML is sent — it is the first picture in the list —
+   * so it is fetched eagerly, at high priority, and the browser never
+   * has to go back for it.
+   */
+  priority?: boolean;
 };
 
 /**
@@ -55,6 +66,7 @@ export function OptimizedImage({
   className,
   onError,
   referrerPolicy,
+  priority = false,
 }: OptimizedImageProps) {
   if (canOptimizeImage(src)) {
     return (
@@ -65,6 +77,7 @@ export function OptimizedImage({
         sizes={sizes}
         className={className}
         onError={onError}
+        priority={priority}
       />
     );
   }
@@ -74,7 +87,8 @@ export function OptimizedImage({
     <img
       src={src}
       alt={alt}
-      loading="lazy"
+      loading={priority ? "eager" : "lazy"}
+      fetchPriority={priority ? "high" : "auto"}
       referrerPolicy={referrerPolicy}
       onError={onError}
       className={className}

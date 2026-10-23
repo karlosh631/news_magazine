@@ -127,7 +127,33 @@ export function PanchangPanel({
       </section>
 
       {/* ---- The twelve signs ---- */}
-      {signs.length ? (
+      {signs.length === 0 ? (
+        /*
+          The source has not published this day's horoscope yet.
+
+          It publishes a day's horoscope during that day, and until it
+          does, its own per-day page repeats today's — so the copy we
+          would have stored for this day is today's horoscope under
+          this day's date. The same twelve sentences on seven different
+          days, each with a different day of the week beside it, which
+          is what the site used to show.
+
+          So the day is not stored, and the page says so rather than
+          showing a grid of nothing. The ALMANAC above it — the tithi,
+          the nakshatra, the sun's times — is computed for the day and
+          is correct, which is why the day is still worth offering.
+        */
+        <section className="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-900">
+          <h3 className="text-sm font-bold text-gray-900 dark:text-gray-100">
+            राशिफल
+          </h3>
+          <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+            The horoscope for this day has not been published yet. It
+            appears here as soon as the publisher writes it — usually
+            during the day itself.
+          </p>
+        </section>
+      ) : (
         <section className="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-900">
           <h3 className="text-sm font-bold text-gray-900 dark:text-gray-100">
             {isToday ? "आजको राशिफल" : "राशिफल"}
@@ -192,7 +218,7 @@ export function PanchangPanel({
             ))}
           </ul>
         </section>
-      ) : null}
+      )}
 
       {/* ---- The windows ---- */}
       <div className="grid gap-4 md:grid-cols-2">

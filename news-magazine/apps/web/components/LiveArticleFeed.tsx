@@ -823,12 +823,20 @@ export function LiveArticleFeed({
         id="live-article-grid"
         className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3"
       >
-        {visible.map((article) => (
+        {visible.map((article, index) => (
           <NewsCard
             key={article.id}
             article={article}
             language={language ?? "en"}
             onImageUnavailable={markImageless}
+            /*
+              The first card's picture is the page's Largest Contentful
+              Paint, and the browser only finds that out after it has
+              laid the page out - so it starts every picture lazily and
+              then goes back for the one that mattered. The first card
+              is known before the first byte of HTML is sent.
+            */
+            priority={index === 0}
           />
         ))}
       </div>

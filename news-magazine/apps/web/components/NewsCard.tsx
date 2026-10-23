@@ -190,10 +190,22 @@ export function NewsCard({
   language = "en",
   onImageUnavailable,
   onOpen,
+  priority = false,
 }: {
   article: NewsCardArticle;
   language?: SiteLanguage;
   onImageUnavailable?: (articleId: string) => void;
+  /**
+   * This card's picture is the page's Largest Contentful Paint.
+   *
+   * The browser only finds out which picture that is after it has laid
+   * the page out, so it starts every image lazily and then goes back
+   * for the one that mattered - which on a throttled connection is a
+   * visible delay. The FIRST card in a list is known before the first
+   * byte of HTML is sent, so its picture is fetched eagerly, at high
+   * priority.
+   */
+  priority?: boolean;
   /**
    * Open the story where the reader already is, instead of navigating
    * to it.
@@ -213,6 +225,29 @@ export function NewsCard({
 
   const embed = embeddableVideo(article.video_embed_url || article.video_url);
   const file = directVideo(article.video_embed_url || article.video_url);
+
+  /*
+    A CARD DOES NOT PLAY THE VIDEO. IT SHOWS THE PICTURE OF IT.
+    -----------------------------------------------------------
+    A story with a YouTube video used to put the YouTube player in the
+    card's picture slot. Three things are wrong with that:
+
+      - the card is in a LIST. Twenty-four cards on a homepage, each
+        with a third-party player in it, is twenty-four players, each
+        with its own script, its own cookies and its own main-thread
+        work. The reel card's own comments say the same thing about
+        the reels page, and this was the same mistake in the feed.
+      - it breaks the best-practices audit: a YouTube frame sets a
+        cookie, and Chrome's Issues panel reports it, and Lighthouse
+        fails the page for it.
+      - it is the single heaviest thing on the page, and the reader
+        wanted to READ the news.
+
+    So the card shows the story's picture with a play badge over it,
+    and the story's own page plays the video. The card is a link
+    either way, and the link is where the reader was going.
+  */
+  const hasVideo = Boolean(embed || file);
 
   // Media controls must not navigate the card.
   const handleMediaClick = (e: MouseEvent) => e.stopPropagation();
@@ -302,16 +337,13 @@ export function NewsCard({
       >
         {/* ================= MEDIA ================= */}
         <div className="relative aspect-video w-full overflow-hidden bg-gray-100">
-          {embed ? (
-            <iframe
-              src={embed}
-              title={article.headline}
-              className="h-full w-full"
-              allow="accelerometer; clipboard-write; encrypted-media; picture-in-picture"
-              allowFullScreen
-              loading="lazy"
-            />
-          ) : file ? (
+          {file && !image ? (
+            /*
+              The story's OWN video file, and only that. A YouTube
+              embed is never played here - see the note above - but a
+              file the outlet published is the story's own media, and
+              it costs the page nothing but a metadata request.
+            */
             <video
               src={file}
               poster={image ?? undefined}
@@ -346,6 +378,7 @@ export function NewsCard({
               sizes={CARD_IMAGE_SIZES}
               onError={handleImageError}
               referrerPolicy="no-referrer"
+              priority={priority}
               className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
             />
           ) : noArtwork && points.length ? (
@@ -384,6 +417,25 @@ export function NewsCard({
               </span>
             </div>
           )}
+
+          {/*
+            THE PLAY BADGE
+
+            The story has a video, and the card shows the picture of it
+            rather than the player. The badge says so, because a card
+            with a video and no badge reads as a card with a
+            photograph.
+          */}
+          {hasVideo && image && !imageFailed ? (
+            <span
+              aria-hidden="true"
+              className="pointer-events-none absolute bottom-2 right-2 flex h-9 w-9 items-center justify-center rounded-full bg-black/60 text-white backdrop-blur"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M8 5v14l11-7z" />
+              </svg>
+            </span>
+          ) : null}
         </div>
 
         {/* ================= BODY =================
@@ -405,9 +457,25 @@ export function NewsCard({
             what keeps a long headline from pushing every card below
             it down the page.
 
+            THE HEIGHT IS FIXED AT THREE LINES, and that is a separate
+            thing from the clamp. The clamp says "never more than
+            three lines"; it says nothing about fewer. A one-line
+            headline therefore made its card a line shorter than its
+            neighbour's, and the row of cards was as tall as its
+            tallest - so when a new story arrived at the top of the
+            feed and took that slot, the cards around it changed size
+            and the page moved. Measured on the homepage, that was the
+            only layout shift on the page: 0.064, from a card's outlet
+            name moving.
+
+            `min-h-[3lh]` reserves the three lines the clamp allows, in
+            the headline's own line height, so every card is exactly as
+            tall as every other one and a slot that changes hands
+            changes its CONTENT and nothing else.
+
             The SERIF is the site's own voice and stays.
           */}
-          <h2 className="line-clamp-3 font-headline text-[15px] font-semibold leading-snug text-gray-900 transition group-hover:text-blue-600 sm:text-base">
+          <h2 className="line-clamp-3 min-h-[3lh] font-headline text-[15px] font-semibold leading-snug text-gray-900 transition group-hover:text-blue-600 sm:text-base">
             {article.headline}
           </h2>
 

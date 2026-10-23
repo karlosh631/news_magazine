@@ -1069,6 +1069,7 @@ async def extract_from_article(
     client: httpx.AsyncClient,
     referer: str | None = None,
     max_bytes: int = 3_000_000,
+    prefetched_html: str | None = None,
 ) -> ExtractedMedia:
     """
     Fetch one article page and extract HD media.
@@ -1088,22 +1089,28 @@ async def extract_from_article(
         return result
 
     try:
-        response = await client.get(
-            url,
-            headers={
-                "User-Agent": BROWSER_USER_AGENT,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "ne,en;q=0.8",
-                **({"Referer": referer} if referer else {}),
-            },
-            timeout=20.0,
-            follow_redirects=True,
-        )
+        if prefetched_html is not None:
+            # The page has already been read - through the reader, when
+            # the publisher refuses this address. Parse what was read.
+            html = prefetched_html
+            final_url = url
+        else:
+            response = await client.get(
+                url,
+                headers={
+                    "User-Agent": BROWSER_USER_AGENT,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "ne,en;q=0.8",
+                    **({"Referer": referer} if referer else {}),
+                },
+                timeout=20.0,
+                follow_redirects=True,
+            )
 
-        final_url = str(response.url)
-        html = ""
+            final_url = str(response.url)
+            html = ""
 
-        if response.status_code >= 400:
+        if prefetched_html is None and response.status_code >= 400:
             if not _is_refused(response.status_code):
                 logger.debug("media: %s returned %s", url, response.status_code)
                 return result
@@ -1136,7 +1143,7 @@ async def extract_from_article(
             )
             if not html:
                 return result
-        else:
+        elif prefetched_html is None:
             html = response.text
 
         html = html[:max_bytes]

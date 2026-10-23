@@ -172,6 +172,35 @@ jobs:
           fi
           exit 0
 
+      - name: Repair the headlines, the points and the pictures
+        working-directory: news-magazine/apps/ingestion
+        env:
+          LIMIT: ${{ inputs.limit || '250' }}
+          DELAY: ${{ inputs.delay || '1' }}
+        run: |
+          set +e
+          set -uo pipefail
+          # The rows whose HEADLINE is the listing card rather than the
+          # headline: "canadanepal.com . 33 minutes ago Cyber security
+          # risks ... | The web technology (PHP) ...". The card's text
+          # also became the story's four key points, and - because the
+          # page could not be read - the picture could not be proven,
+          # so the card showed the points instead of the photograph
+          # that is on the real page.
+          #
+          # This reads each such story's OWN page (through the reader
+          # when the publisher refuses this address) and takes all
+          # three from it: the headline exactly as the outlet published
+          # it, the four points in the outlet's own words, and the
+          # picture, proven.
+          python -m scripts.repair_headlines_and_pictures --limit "$LIMIT" --delay "$DELAY" 2>&1 | tee repair.log
+          if grep -q "REPAIR_OK=1" repair.log; then
+            echo "::notice::The rows that were showing a listing card have been repaired."
+          else
+            echo "::warning::The headline repair did not finish cleanly. The rows it did not reach keep their old headline."
+          fi
+          exit 0
+
       - name: Upload the run log
         if: always()
         uses: actions/upload-artifact@v4
@@ -180,4 +209,5 @@ jobs:
           path: |
             news-magazine/apps/ingestion/refresh.log
             news-magazine/apps/ingestion/fix-wrong.log
+            news-magazine/apps/ingestion/repair.log
           retention-days: 7

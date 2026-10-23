@@ -1,6 +1,6 @@
 # Nepal News & Magazine
 
-Real-time Nepali news aggregation. A Python ingestion service scrapes 27
+Real-time Nepali news aggregation. A Python ingestion service scrapes 34
 Nepali outlets on their own schedules, deduplicates syndicated stories,
 extracts high-resolution media and a four-point summary from each
 article's own page, and serves them to a Next.js frontend backed by
@@ -11,12 +11,144 @@ point comes verbatim from the outlet that published it.
 
 ---
 
+## How the system runs, in one picture
+
+Two fetchers, one database, one site, and no human in the loop.
+
+```
+  THE PUBLISHERS — 34 Nepali outlets (rows in the `sources` table)
+  10 RSS/Atom feeds · the rest scraped from their listing pages
+  Kantipur · Nagarik · OnlineKhabar · Setopati · MyRepublica · Ratopati · …
+        │
+        │  HTTPS, one request at a time, politely
+        ▼
+  ┌───────────────────────────────────────────────────────────────┐
+  │  THE FETCHER — apps/ingestion (Python)                        │
+  │  robots.txt check (Crawl-delay is a floor) · rate limit ·     │
+  │  per-source interval · backoff · body/og:image/video/audio ·  │
+  │  dedupe vs the last 12 hours · PROVE the picture (Referer)    │
+  └───────────────────────────────────────────────────────────────┘
+        │                                    │
+        │ run by ①                           │ run by ②
+        ▼                                    ▼
+  ┌────────────────────────┐        ┌────────────────────────┐
+  │ ① GitHub Actions      │        │ ② Render worker        │
+  │   "Ingest news"       │        │   python -m app.worker │
+  │   every 5–6 min       │        │   one job per source   │
+  │   queues the next run │        │   5–15 min each        │
+  │   + keep-warm ping    │        │   + FastAPI :8000      │
+  └───────────┬────────────┘        └───────────┬────────────┘
+              │                                 │
+              └───────────────┬─────────────────┘
+                              ▼
+                   ┌─────────────────────┐
+                   │ ③ SUPABASE          │
+                   │ Postgres · RLS      │
+                   │ articles · sources  │
+                   │ daily_panchang      │
+                   │ daily_rashifal      │
+                   │ reels               │
+                   └──────────┬──────────┘
+                              │ anon key (RLS enforced)
+                              ▼
+                   ┌─────────────────────────────────────┐
+                   │ ④ THE SITE — apps/web on Vercel     │
+                   │ / · /category · /article · /search  │
+                   │ /admin · /api/live-news · /feed.xml │
+                   │                                     │
+                   │ ► THE PICTURE GATE: a story is shown│
+                   │   only if its picture was proven    │
+                   │   against its own page. Otherwise it│
+                   │   is LEFT OUT, never shown with     │
+                   │   someone else's picture.           │
+                   └──────────────┬──────────────────────┘
+                                  ▼
+                           THE READER (browser)
+```
+
+### The two fetchers, and why there are two
+
+| | ① GitHub Actions — "Ingest news" | ② Render — `python -m app.worker` |
+|---|---|---|
+| Where it runs | github.com, on a runner | a Render service (free tier; sleeps when idle) |
+| What it is | one full pass over all 34 sources, then it exits | a long-lived process with one APScheduler job per source |
+| How often | every 5–6 minutes, for ever | each source on its own interval (5–15 min), staggered so no two outlets are hit together |
+| What starts the next one | the run queues the next run itself | the scheduler, in-process |
+| What it needs | four repository secrets | the same secrets, on Render |
+| If it stops | the cron restarts the chain — at worst a few hours later | the keep-warm ping reports it down; the Actions pass covers the news in the meantime |
+
+They overlap on purpose. The Actions pass is the one that never sleeps and
+never goes stale — it always runs the code that is on `main` this minute.
+The Render worker is the one with the tighter interval, but it only runs
+the code it was last **deployed** with, so a change on `main` is not live
+on Render until it is redeployed. When the two disagree, the one on
+`main` wins the argument: it writes the picture marker, and a story
+without the marker is not shown.
+
+One pass fetches about 450 articles from 34 outlets, of which roughly 160
+are new, 249 are the same story from another outlet, and 40 are rejected.
+
+### The picture gate — the rule that decides what a reader sees
+
+```
+  the article's own page
+            │
+            ▼
+  candidate_images()  ─── junk names rejected (404.jpg, logo, sprite, …)
+            │          ─── resizer URLs unwrapped to the real image
+            ▼
+  the image is LOADED (ranged GET, the page's URL as the Referer)
+            │
+      ┌─────┴──────┐
+      │            │
+   200 / 206    403 / 404
+      │            │
+      ▼            ▼
+  image_verified_at = now     marker stays NULL
+      │            │
+      ▼            ▼
+  the site shows it            the site LEAVES IT OUT
+```
+
+The marker is written in the store path, in the poll's repair pass, in
+both repair scripts and in the on-demand search. A picture that has not
+been proven against its own page is never shown — that is the rule that
+stopped a photograph of an elephant from appearing on a story about PHP
+security.
+
+### Will it run without me? Yes.
+
+| Thing | What could stop it | What happens if it does |
+|---|---|---|
+| The heartbeat (GitHub Actions) | the repository is deleted or archived, or Actions is switched off | the cron run starts the chain again — at worst a few hours later |
+| The runner minutes | nothing — a public repository's Actions minutes are free and unbounded | — |
+| The Render worker | Render's free tier suspends an idle instance | the keep-warm ping wakes it, and the Actions pass fetches the news anyway |
+| Supabase | the free tier suspends a project after a week with no activity | there is a write every few minutes, so it never does |
+| Vercel | nothing — there is no server to keep awake | — |
+| **Your laptop** | nothing — the laptop is not in this picture | the site keeps running with the laptop closed |
+
+The one thing a laptop *was* in: a stale copy of the ingestion API was
+still running locally and polling every publisher every 90 seconds with
+eight-day-old code. It has to be stopped, and it is the only thing in
+this picture that you have to do by hand.
+
+### How long it runs
+
+As long as the repository exists and the four repository secrets are
+set. There is no lease, no trial and no process to babysit: the chain
+queues its own successor, so it runs for as long as the repository is
+there. The first thing to break it would be deleting the repository, the
+second would be a change to the workflow file that stops the dispatch —
+and the cron backstop exists for exactly that.
+
+---
+
 ## What this does
 
 | | |
 |---|---|
-| **Sources** | 27 Nepali outlets, 25 active — 10 with public RSS/Atom feeds, 15 scraped from their listing pages |
-| **Cadence** | Each source polls on its own interval (3–30 min), staggered so outlets are not hit simultaneously |
+| **Sources** | 34 Nepali outlets — 10 with public RSS/Atom feeds, the rest scraped from their listing pages; 25 answer on a given pass |
+| **Cadence** | Every outlet is swept every 5–6 minutes by the GitHub Actions heartbeat, and each source is also polled on its own interval (5–15 min) by the long-lived worker |
 | **Deduplication** | Cross-outlet syndicated copies collapse into one story, with an "also reported by N outlets" count |
 | **Media** | `og:image`, YouTube/Vimeo embeds, and podcast audio scraped from each article page |
 | **Summaries** | Exactly four points per story, extracted verbatim from the article body |
@@ -29,6 +161,10 @@ point comes verbatim from the outlet that published it.
 
 ## Architecture
 
+The full picture is above, under **"How the system runs, in one
+picture"**. In short: two fetchers write to one Postgres, and one Next.js
+app reads it.
+
 ```
    ┌──────────────────┐        ┌────────────────────────┐
    │  Next.js (web)   │  anon  │      Supabase          │
@@ -39,8 +175,8 @@ point comes verbatim from the outlet that published it.
          │                                │
    ┌─────┴──────────────────┐   ┌────────┴───────────┐
    │  FastAPI (ingestion)   │   │  worker.py daemon  │
-   │  :8000                 │   │  polls 27 outlets  │
-   │  /api/scrape-on-demand │   │  every 3–30 min    │
+   │  :8000                 │   │  polls 34 outlets  │
+   │  /api/scrape-on-demand │   │  every 5–15 min    │
    └────────────────────────┘   └────────────────────┘
 ```
 
@@ -49,7 +185,221 @@ owns the HTTP surface. Running them in one process works for local
 development but must not be scaled horizontally — two schedulers means
 two sets of requests to every publisher.
 
+The third fetcher is not in this picture because it has no server: the
+GitHub Actions heartbeat runs the same code, one pass at a time, and
+queues its own successor.
+
 See `ARCHITECTURE.md` for the full diagram and design rationale.
+
+---
+
+## The database
+
+One Postgres database, on Supabase. Every headline, picture and horoscope
+the site shows lives in it — and so does everything the pipeline knows
+about the outlets it reads. There is no second store, and no other
+database anywhere in the system.
+
+The web app reads it with the **anon key**, so Row Level Security is the
+real boundary for every browser-facing request: the only rows an
+anonymous reader can select are the articles whose `status` is
+`'published'`. Only the ingestion service and the admin panel hold the
+**service-role key**, which bypasses RLS. That is how articles are
+written, how the almanac is written, and how the admin tables are read.
+
+### The shape of it
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ THE READER — apps/web · anon key · RLS: published rows only │
+├──────────────────────────────────────────────────────────────┤
+│                                                             │
+│   articles ──────────────▶ categories                       │
+│      │  │                                                   │
+│      │  └── duplicate_of ──▶ articles (the copy it hides)   │
+│      └──── source_id ─────▶ sources                         │
+│                                                             │
+│   articles ──▶ article_sources ──▶ sources                  │
+│   articles ──▶ article_views                                │
+│   articles ──▶ analytics_events                             │
+│   articles ──▶ /article/<slug>                              │
+│                                                             │
+│   reels ──▶ reel_likes        reels_source_health           │
+│   daily_panchang              1 row per day                 │
+│   daily_rashifal              12 rows per day               │
+├──────────────────────────────────────────────────────────────┤
+│ THE FETCHER — apps/ingestion · service role (writes)        │
+├──────────────────────────────────────────────────────────────┤
+│   articles                    upserted on slug              │
+│   source_sync_logs ──▶ source_errors                        │
+│   scrape_requests             the resurrection audit        │
+│   admin_users ──▶ admin_sessions                            │
+│   admin_login_attempts        the guess counters            │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### What each table is for
+
+| Table | What it holds | Who writes it |
+|---|---|---|
+| `articles` | Every story, one row each: the headline, the excerpt, the picture columns, the four key points, the slug, the timestamps and the source snapshot | the ingestion worker (service role), upserted on `slug` |
+| `sources` | The 34 outlets: their feed or listing URL, their poll interval, `allowed`, `enabled`, their robots.txt verdict, their CSS selectors | migrations and the admin panel; the worker only reads it |
+| `categories` | The section taxonomy the navigation, the routing and the sitemap are built from | migrations only |
+| `article_sources` | Every outlet that carried a story, so "also reported by N outlets" can be shown | the worker, one row per sighting |
+| `source_sync_logs`, `source_errors` | What each pass fetched, and what failed | the worker |
+| `daily_panchang` | The almanac: one row per day — the Bikram Sambat date, the tithi, the nakshatra, sunrise and sunset, and the शुभ / अशुभ windows | the almanac job, upserted on `panchang_date` |
+| `daily_rashifal` | The twelve horoscopes: twelve rows a day, one per sign, with the advice verbatim | the almanac job, upserted on `(panchang_date, sign)` |
+| `reels` | The short-video clips — metadata and a provider URL only, never video bytes | the reels worker, on `(source_key, external_id)` |
+| `reel_likes` | One row per visitor per clip, keyed by a salted hash of IP + user agent | the reader's own browser |
+| `reels_source_health` | One row per video provider: on or off, and which environment variable is missing when it is off | the reels worker |
+| `article_views` | One row per view, with the referrer | `increment_article_view()`, called by `POST /api/articles/view` |
+| `analytics_events` | The reader events — view, search, share, click | `recordEvent()`, with the anon key |
+| `scrape_requests` | The audit trail of on-demand re-fetches, and the rate-limit source | the search-resurrection endpoint |
+| `admin_users`, `admin_sessions` | The admin credential (a PBKDF2 hash) and one row per signed-in browser | the login route, service role |
+| `admin_login_attempts` | The durable brute-force counters, one per email address and one per IP | `admin_login_failure()` |
+| `user_roles` | The other sign-in path: which role a Supabase Auth user has | the dashboard |
+
+### The `articles` table
+
+The columns that decide what a reader sees:
+
+| Column | What it is |
+|---|---|
+| `id` | The row's identity, and the tiebreak for the feed's keyset cursor |
+| `slug` | The URL. Unique, and built from the headline, the sector, a hash prefix and the date, so two outlets filing the same story cannot collide |
+| `headline` | The outlet's own words. Never overwritten — a machine translation lives in `headline_translated` instead |
+| `status` | `ingested → pending_review → editor_review → approved → published → scheduled → archived → rejected`. The worker writes `published` directly; every read path filters on it |
+| `published_at` | When the OUTLET published it. The feed's primary sort key |
+| `ingested_at` | When WE first saw it. The tiebreak when two stories share a publication second, and the arrival time the feed's own sort falls back on |
+| `featured_image_url` | The picture the card shows |
+| `image_highres_url` | The full-size picture, preferred over the thumbnail |
+| `featured_image_alt` | The picture's alt text |
+| `image_verified_at` | **The picture gate.** The moment a picture was proven against this story's OWN page. Null means "not proven", and a story with a picture but no marker is left out of the feed, not shown with someone else's picture |
+| `gif_url`, `video_url`, `video_embed_url`, `audio_url` | The other media the outlet published |
+| `duplicate_of` | Set when this row is a syndicated copy of another story. Every read path filters it out, so the copy is never shown |
+| `source_id` | The outlet that filed it |
+| `source_name_snapshot` | That outlet's name **as it was when the story was stored**, so the card still credits the outlet if the source row is later renamed or removed |
+| `source_article_url` | The link out to the original article — the card's "Read the full story" |
+| `canonical_url` | The outlet's canonical link, used for duplicate detection |
+| `title_normalized`, `content_hash` | The dedup keys: a normalised title for fuzzy matching, and a content hash that is UNIQUE where it is not null |
+| `summary_points` | The four key points, verbatim sentences from the source article — never generated text |
+| `language` | `ne` or `en`. Both editions of most outlets are ingested, so the language toggle shows genuinely different stories |
+| `source_count` | How many distinct outlets carried the story |
+| `last_seen_at` | When the outlet was last seen carrying it |
+| `view_count` | The article's view counter, bumped atomically by `increment_article_view()` |
+| `body_html` | The full body — only where the outlet's licence allows republishing; otherwise an excerpt only |
+
+### How the site reads it
+
+**The query.** The feed is a plain PostgREST read of `articles`, not the
+`latest_articles()` SQL function. That function used to sort by
+`is_breaking` before `published_at`, which made the feed's contents
+depend on how many rows you asked for — asking for more rows returned
+*older* news. It was dropped from the read path; migration 0012 fixed
+the function itself, but the site no longer depends on that migration
+having been applied.
+
+**The filters**, on every read:
+
+| Filter | Where it comes from |
+|---|---|
+| `status = 'published'` | The reader's own RLS policy already enforces it; the query states it too |
+| `duplicate_of is null` | A syndicated copy is never shown |
+| `primary_category_id = <id>` | Only on a category page |
+| `language = 'ne'` or `'en'` | Only when the language toggle is on; a thin edition is topped up from the other one |
+| `id not in (…)` | Only when the browser asks to skip rows it already has |
+
+**The order.** `published_at desc nulls last`, then `id desc`.
+`nullsFirst: false` is required, not cosmetic: PostgreSQL defaults
+`ORDER BY … DESC` to NULLS FIRST, so an undated row would otherwise sort
+above every dated one and take position 1. The `id` tiebreak exists
+because several outlets publish inside the same second, and without it
+Postgres may return that run in any order — which makes a page boundary
+inside it skip and repeat rows.
+
+**The limit.** The query asks for `limit × 5` rows (a page is 24) and
+the answer is sliced back to 24. The over-fetch is what lets a card that
+is dropped for a duplicate, a missing picture, an unproven picture or a
+repeated photograph be backfilled by the next story down instead of
+leaving a hole in the grid.
+
+**The four passes**, applied to those rows before the slice, in this
+order. Each one is a filter and never a reordering — "newest first" is
+the promise the page rests on:
+
+1. **Duplicate stories** — two rows for one story, where the worker
+   missed the link.
+2. **No artwork** — no picture and no video.
+3. **Unconfirmed** — `image_verified_at is null`: the picture was never
+   proven against the story's own page, so it may belong to a different
+   story. **This is the picture gate**, applied on the server so the
+   first paint and the first poll agree.
+4. **Repeated pictures** — the same photograph on two different stories.
+   The second card loses the picture, not the story.
+
+Every pass has a floor: a pass that would empty the page keeps the rows
+instead, because a feed of unproven pictures is still a feed. A fifth
+step, `preferIllustrated`, then lets a story that HAS a picture take the
+slot of one that does not — but only of the same age, because
+"newest first" is the promise the page rests on.
+
+**Paging.** A keyset cursor on `(published_at, id)` — never `OFFSET`,
+so rows arriving above the cursor cannot make the second page repeat
+the first. The filter is spelled out for PostgREST as
+`published_at.lt.<ts>,and(published_at.eq.<ts>,id.lt.<id>)`, without
+its own parentheses, because PostgREST adds its own.
+
+**Search** is the one read that still goes through a SQL function:
+`search_articles()`, which mixes Postgres full-text (the `simple`
+tsvector config, because English stemming degrades Devanagari) with
+trigram similarity, and is called with `p_include_pruned = true` so an
+aged-out story can still be found and re-fetched.
+
+**The cache.** Every public read goes out through
+`createPublicSupabaseClient()`, whose fetch sets `next: { revalidate:
+60 }` — Next's Data Cache holds the answer for a minute. On top of that:
+
+| Surface | How it is cached |
+|---|---|
+| `/` (the homepage) | `export const revalidate = 60` — a static route regenerated in the background, so the CDN serves the HTML it already has |
+| `/category/[slug]`, `/article/[slug]`, `/search` | `dynamic = "force-dynamic"` — the HTML is rendered per request, but the database read behind it is still the 60-second cached one |
+| `/api/live-news` | the ten-second browser poll; the response is sent with `Cache-Control: no-store` so no shared cache can hold it |
+| the almanac and the horoscopes | `unstable_cache` with a 300-second window, in `lib/daily-info.ts` |
+| anything session-scoped or admin | `cache: "no-store"` — a cached credential is a credential that outlives the change that revoked it |
+
+### How a row goes away
+
+There is no soft delete and no `deleted_at` column. A row leaves by
+being deleted.
+
+**The TTL.** `prune_expired_articles(p_retention_hours := 48,
+p_max_rows := 10000)` does it in two passes:
+
+1. **TTL** — every published, non-duplicate, non-breaking, non-featured
+   row older than 48 hours goes, oldest first.
+2. **Row cap** — if the table is still over 10 000 rows, the oldest
+   non-breaking, non-featured rows go until it is not.
+
+Breaking and featured rows are never pruned automatically. The TTL pass
+is itself bounded — it removes at most `max(p_max_rows, 1000)` rows per
+call, oldest first, so a prune can never turn into a mass delete. The
+delete cascades: `article_sources`, `article_views`, `media`,
+`article_media`, `comments`, `likes`, `bookmarks` and `reading_history`
+all reference the article with `on delete cascade`, so nothing is left
+pointing at a row that is gone. The prune runs at the end of every source
+poll, with the two numbers coming from the ingestion service's
+configuration (`retention_hours`, `max_article_rows`).
+
+**Ageing out and coming back.** A pruned story is not lost. The search
+page reads with `p_include_pruned = true`, so an old row still surfaces
+in search, and `/api/scrape-on-demand` re-polls the outlets for it and
+re-inserts it with `resurrected_at` set and `scrape_query` recording
+which search brought it back. The re-fetched row then ages out again on
+its own TTL.
+
+**A duplicate is never TTL-pruned.** A row with `duplicate_of` set is
+invisible to every read path *and* is skipped by the TTL pass, so it can
+only ever leave through the row-cap pass.
 
 ---
 

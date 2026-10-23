@@ -176,6 +176,23 @@ interface FeedCursor {
  * lib/news.ts): if the server sorts one way and the client another, the list
  * visibly reshuffles on the first poll after every page load.
  */
+/**
+ * Did this story arrive in the last few minutes?
+ *
+ * The site's own clock: when the worker brought the story in. A story
+ * published an hour ago and fetched five minutes ago is new to this
+ * site, and it is new to the reader's page too.
+ */
+export function isFreshlyArrived(
+  article: { ingested_at?: string | null },
+  minutes: number
+): boolean {
+  if (!article.ingested_at) return false;
+  const arrived = Date.parse(article.ingested_at);
+  if (Number.isNaN(arrived)) return false;
+  return Date.now() - arrived <= minutes * 60_000;
+}
+
 export function LiveArticleFeed({
   initialArticles,
   initialCursor = null,
@@ -263,6 +280,19 @@ export function LiveArticleFeed({
   // can mark them. A live feed that changes silently is
   // indistinguishable from a live feed that is broken.
   const [newIds, setNewIds] = useState<Set<string>>(() => new Set());
+
+  /*
+    HOW FRESH A STORY HAS TO BE TO BE MARKED NEW
+    -------------------------------------------
+    A badge that marks an hour-old story as NEW is worse than no
+    badge: the reader stops believing it. So the mark is on the
+    stories that arrived in the last twenty minutes - which is about
+    four passes of the five-minute heartbeat - and nothing else.
+
+    The arrival time is the site's own, and it is the same clock the
+    feed is ordered by, so the badge and the order always agree.
+  */
+  const NEW_MINUTES = 20;
   const ids = useRef(new Set(initialArticles.map((a) => a.id)));
   const lastArrivalAt = useRef<number | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
@@ -843,7 +873,9 @@ export function LiveArticleFeed({
             article={article}
             language={language ?? "en"}
             onImageUnavailable={markImageless}
-            isNew={newIds.has(article.id)}
+            isNew={
+              newIds.has(article.id) && isFreshlyArrived(article, NEW_MINUTES)
+            }
             /*
               The first card's picture is the page's Largest Contentful
               Paint, and the browser only finds that out after it has

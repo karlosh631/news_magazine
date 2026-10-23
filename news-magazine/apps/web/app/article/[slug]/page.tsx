@@ -12,6 +12,7 @@ import { getArticleBySlug, getCategories, getRelatedArticles } from "@/lib/news"
 import { formatNewsDate } from "@/lib/date";
 import { SITE_LOGO, SITE_NAME, SITE_URL, clampDescription, jsonLd } from "@/lib/site";
 import { excerptWithoutOverlap } from "@/lib/excerpt";
+import { cleanHeadline } from "@/lib/headline";
 import { dropDuplicateStories } from "@/lib/feed-dedup";
 import { dropRepeatedImages } from "@/lib/feed-images";
 
@@ -57,6 +58,10 @@ export async function generateMetadata({ params }: Props2): Promise<Metadata> {
     return { title: "Article not found" };
   }
 
+  // The headline as the outlet published it - the listing card's
+  // furniture is not part of it.
+  const headline = cleanHeadline(article.headline);
+
   // A picture that was never confirmed against this story's OWN page
   // is not this story's picture, and the story's own page is the last
   // place it must not appear. See the operator's rule in
@@ -74,7 +79,7 @@ export async function generateMetadata({ params }: Props2): Promise<Metadata> {
     // outlet it came from.
     clampDescription(
       (article.summary_points ?? []).join(" ") ||
-        `${article.headline} — ${article.source_name_snapshot ?? SITE_NAME}`
+        `${headline} — ${article.source_name_snapshot ?? SITE_NAME}`
     );
   const url = `${SITE_URL}/article/${article.slug}`;
 
@@ -83,11 +88,11 @@ export async function generateMetadata({ params }: Props2): Promise<Metadata> {
     // title.template = "%s | Nepal News & Magazine", so appending it
     // again produced "Headline | Nepal News & Magazine | Nepal News &
     // Magazine" in every indexable title on the site.
-    title: article.headline,
+    title: headline,
     description: description || undefined,
     alternates: { canonical: url },
     openGraph: {
-      title: article.headline,
+      title: headline,
       description: description || undefined,
       type: "article",
       url,
@@ -99,12 +104,12 @@ export async function generateMetadata({ params }: Props2): Promise<Metadata> {
         ? [article.source_name_snapshot]
         : undefined,
       images: image
-        ? [{ url: image, width: 1200, height: 630, alt: article.headline }]
+        ? [{ url: image, width: 1200, height: 630, alt: headline }]
         : [{ url: SITE_LOGO, width: 192, height: 192, alt: SITE_NAME }],
     },
     twitter: {
       card: "summary_large_image",
-      title: article.headline,
+      title: headline,
       description: description || undefined,
       images: image ? [image] : [SITE_LOGO],
     },
@@ -130,6 +135,11 @@ export default async function ArticlePage({ params }: Props) {
 
   const article = await getArticleBySlug(slug);
   if (!article) notFound();
+
+  // The headline as the outlet published it: the listing card's
+  // furniture - the outlet's domain, the time since publication - is
+  // not part of it, and the reader is not the site's own address bar.
+  const headline = cleanHeadline(article.headline);
 
   const [categories, relatedArticlesRaw] = await Promise.all([
     getCategories(),
@@ -196,7 +206,7 @@ export default async function ArticlePage({ params }: Props) {
   const structuredData = {
     "@context": "https://schema.org",
     "@type": "NewsArticle",
-    headline: article.headline,
+    headline: headline,
     description: description || undefined,
     datePublished: article.published_at ?? undefined,
     dateModified: article.updated_at ?? article.published_at ?? undefined,
@@ -263,7 +273,7 @@ export default async function ArticlePage({ params }: Props) {
             },
           ]
         : []),
-      { "@type": "ListItem", position: category ? 3 : 2, name: article.headline, item: articleUrl },
+      { "@type": "ListItem", position: category ? 3 : 2, name: headline, item: articleUrl },
     ],
   };
 
@@ -303,7 +313,7 @@ export default async function ArticlePage({ params }: Props) {
           )}
 
           <ArticleTranslation
-            headline={article.headline}
+            headline={headline}
             points={points}
             language={article.language}
             translatedHeadline={article.headline_translated ?? null}

@@ -48,3 +48,48 @@ export function collapseRepeatedHeadline(text: string | null | undefined): strin
 
   return value;
 }
+
+/**
+ * The headline, exactly as the outlet published it.
+ *
+ * The listing card is the publisher's own summary of the story, and
+ * on a client-rendered listing that summary is the whole card. The
+ * card's furniture - the outlet's domain, the time since publication,
+ * the date and the time - is not part of the headline, and a reader
+ * was being shown all of it:
+ *
+ *     gorkhapatraonline.com . 55 minutes ago Budhanilkanada's one
+ *     death ...
+ *
+ * The rule strips that furniture from the FRONT of the headline and
+ * leaves the rest exactly as the outlet wrote it.
+ *
+ * It is the same rule the ingestion side applies on the way into the
+ * database (`sanitize_headline` in app/services/sanitizer.py), so the
+ * rows that are already stored and the rows that arrive now are read
+ * the same way.
+ */
+export function cleanHeadline(text: string | null | undefined): string {
+  const value = collapseRepeatedHeadline(text);
+  if (!value) return value;
+
+  // A domain, a bullet, and the time since publication.
+  const withRelative = value.match(
+    /^[\w-]+(?:\.[\w-]+)*\.(?:com\.np|com|net|org|np|gov|edu|io)\s*[•·|]?\s*(?:[\d\u0966-\u096f]+\s*(?:minutes?|mins?|hours?|hrs?)\s+ago|[\d०-९]+\s*मिनेट\s*अघि|[\d०-९]+\s*घंटा\s*अघि)\s*[•·|]?\s*/i
+  );
+  if (withRelative) {
+    const rest = value.slice(withRelative[0].length).trim();
+    if (rest) return rest;
+  }
+
+  // A domain, a bullet, and the absolute date and time.
+  const withDate = value.match(
+    /^[\w-]+(?:\.[\w-]+)*\.(?:com\.np|com|net|org|np|gov|edu|io)\s*[•·|]?\s*(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*\s+\w{3,}\.?\s+\d{1,2}\s+\d{1,2}:\d{2}:\d{2}\s+(?:GMT|UTC)\s+\d{4}\s*[•·|]?\s*/i
+  );
+  if (withDate) {
+    const rest = value.slice(withDate[0].length).trim();
+    if (rest) return rest;
+  }
+
+  return value;
+}

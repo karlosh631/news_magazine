@@ -136,6 +136,43 @@ def strip_card_chrome(text: str | None) -> str:
     cleaned = _RELATIVE_CHROME_RE.sub(" ", cleaned)
     return re.sub(r"\s+", " ", cleaned).strip()
 
+
+#: The card's furniture at the FRONT of a headline: the outlet's own
+#: domain, a bullet, and the time since publication or the absolute
+#: date. The reader was being shown all of it:
+#:
+#:     gorkhapatraonline.com . 55 minutes ago Budhanilkanada's one
+#:     death ...
+#:
+#: The rest of the string is the outlet's headline, exactly as it
+#: published it.
+_LEADING_CHROME_RE = re.compile(
+    r"^[\w-]+(?:\.[\w-]+)*\.(?:com\.np|com|net|org|np|gov|edu|io)"
+    r"\s*[•·|]?\s*"
+    r"(?:"
+    r"\d+\s*(?:minutes?|mins?|hours?|hrs?)\s+ago"
+    r"|\d+\s*मिनेट\s*अघि"
+    r"|\d+\s*घंटा\s*अघि"
+    r"|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*\s+\w{3,}\.?\s+\d{1,2}\s+"
+    r"\d{1,2}:\d{2}:\d{2}\s+(?:GMT|UTC)\s+\d{4}"
+    r")"
+    r"\s*[•·|]?\s*",
+    re.IGNORECASE,
+)
+
+
+def strip_leading_card_chrome(text: str) -> str:
+    """
+    Take the card's furniture off the front of a headline.
+
+    The headline is the outlet's own, exactly as it published it, and
+    the domain and the time were never part of it.
+    """
+    if not text:
+        return text
+    stripped = _LEADING_CHROME_RE.sub("", text, count=1)
+    return stripped.strip() or text
+
 def collapse_repeated_headline(text: str) -> str:
     """
     A headline that says the same thing twice, said once.
@@ -194,10 +231,12 @@ def sanitize_headline(
     Sanitize an article headline.
     """
 
-    return collapse_repeated_headline(
-        sanitize_plain_text(
-            value,
-            MAX_HEADLINE_LENGTH,
+    return strip_leading_card_chrome(
+        collapse_repeated_headline(
+            sanitize_plain_text(
+                value,
+                MAX_HEADLINE_LENGTH,
+            )
         )
     )
 

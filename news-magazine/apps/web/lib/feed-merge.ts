@@ -69,17 +69,20 @@ export type FeedOrder = {
  * the one with the better picture.
  */
 export function byNewest<T extends FeedOrder>(a: T, b: T): number {
-  const left = a.published_at ? Date.parse(a.published_at) : 0;
-  const right = b.published_at ? Date.parse(b.published_at) : 0;
-  if (right !== left) return right - left;
-
-  // The tiebreaker: the most recently fetched copy of the same moment
-  // wins, so the better picture and the higher outlet count end up on
-  // the card the reader sees.
+  // The NEWEST FETCHED first, exactly as the server orders it (see
+  // `newestFirst` in lib/news.ts). Arrival is what the site knows
+  // first-hand, and it is the order that does not change when the
+  // reader scrolls or the page re-renders.
   const arrivedA = a.ingested_at ? Date.parse(a.ingested_at) : 0;
   const arrivedB = b.ingested_at ? Date.parse(b.ingested_at) : 0;
   if (arrivedB !== arrivedA) return arrivedB - arrivedA;
 
+  const left = a.published_at ? Date.parse(a.published_at) : 0;
+  const right = b.published_at ? Date.parse(b.published_at) : 0;
+  if (right !== left) return right - left;
+
+  // The tiebreaker: the outlet that carried the story most often ends
+  // up on the card the reader sees.
   return (b.source_count ?? 0) - (a.source_count ?? 0);
 }
 

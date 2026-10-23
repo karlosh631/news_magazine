@@ -397,19 +397,28 @@ function applyCursor<T extends { or: (filter: string) => T }>(
  */
 function newestFirst(rows: LatestArticle[]): LatestArticle[] {
   return [...rows].sort((a, b) => {
-    // The newest NEWS first. The client sorts the same way — see
-    // `byNewest` in lib/feed-merge.ts — and the two have to agree or
-    // the page visibly reshuffles on the first poll after every load.
-    const left = a.published_at ? Date.parse(a.published_at) : 0;
-    const right = b.published_at ? Date.parse(b.published_at) : 0;
-    if (right !== left) return right - left;
-
-    // The tiebreaker: the most recently fetched copy of the same
-    // moment, so the better picture and the higher outlet count end
-    // up on the card the reader sees.
+    // THE NEWEST FETCHED FIRST.
+    //
+    // The reader asked for this in as many words: the story the site
+    // has just brought in goes to the top, and the ones that were
+    // there move down. Arrival is what the site knows first-hand, and
+    // it is the order that does not change when the reader scrolls or
+    // the page re-renders.
+    //
+    // Publication time is the tiebreaker: two stories fetched in the
+    // same second are ordered by when the publisher published them,
+    // and then by how many outlets carried them.
+    //
+    // The client sorts the same way — see `byNewest` in
+    // lib/feed-merge.ts — and the two have to agree or the page
+    // visibly reshuffles on the first poll after every load.
     const arrivedA = a.ingested_at ? Date.parse(a.ingested_at) : 0;
     const arrivedB = b.ingested_at ? Date.parse(b.ingested_at) : 0;
     if (arrivedB !== arrivedA) return arrivedB - arrivedA;
+
+    const left = a.published_at ? Date.parse(a.published_at) : 0;
+    const right = b.published_at ? Date.parse(b.published_at) : 0;
+    if (right !== left) return right - left;
 
     return (b.source_count ?? 0) - (a.source_count ?? 0);
   });
@@ -578,12 +587,29 @@ function nextCursorFor(
 function preferIllustrated(rows: LatestArticle[], limit: number): LatestArticle[] {
   if (rows.length <= limit) return rows;
 
-  const illustrated = rows.filter((row) =>
-    Boolean(row.image_highres_url || row.featured_image_url)
+  // The order is the reader's: the newest fetched at the top. This
+  // pass used to REORDER the page to put the illustrated stories
+  // first, which meant the top of the page was not the top of the
+  // news - and a story that arrived a minute ago could sit below one
+  // that arrived an hour ago, because the older one had a picture.
+  //
+  // So the order is kept, and only the TAIL is filled: the page
+  // takes its rows in order, and if the last row has no picture at
+  // all, an illustrated row from further down takes its place. The
+  // top of the page is exactly what the reader came for.
+  const kept = rows.slice(0, limit);
+  const missing = kept.findIndex(
+    (row) => !row.image_highres_url && !row.featured_image_url
   );
-  if (illustrated.length < limit) return rows.slice(0, limit);
+  if (missing === -1) return kept;
 
-  return illustrated.slice(0, limit);
+  const spare = rows
+    .slice(limit)
+    .find((row) => Boolean(row.image_highres_url || row.featured_image_url));
+  if (!spare) return kept;
+
+  kept[missing] = spare;
+  return kept;
 }
 
 /** Map a raw `articles` row to the card shape. */

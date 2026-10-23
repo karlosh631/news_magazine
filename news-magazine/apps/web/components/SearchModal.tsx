@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef } from "react";
 
 import { formatNewsDate } from "@/lib/date";
-import { collapseRepeatedHeadline } from "@/lib/headline";
+import { cleanHeadline } from "@/lib/headline";
 
 /**
  * Search results dropdown.
@@ -209,7 +209,7 @@ export function SearchModal({
                     className="block px-4 py-2.5 transition hover:bg-gray-50 dark:hover:bg-gray-800"
                   >
                     <p className="line-clamp-2 text-sm font-medium leading-snug text-gray-900 dark:text-gray-100">
-                      {collapseRepeatedHeadline(source.headline)}
+                      {cleanHeadline(source.headline)}
                     </p>
                     <p className="mt-1 text-[11px] text-gray-500">
                       {source.source ?? "External source"}
@@ -237,7 +237,7 @@ export function SearchModal({
               const body = (
                 <>
                   <p className="line-clamp-2 text-sm font-medium leading-snug text-gray-900 dark:text-gray-100">
-                    {collapseRepeatedHeadline(hit.headline)}
+                    {cleanHeadline(hit.headline)}
                   </p>
                   <p className="mt-1 text-[11px] text-gray-500">
                     {hit.source_name_snapshot ?? ""}

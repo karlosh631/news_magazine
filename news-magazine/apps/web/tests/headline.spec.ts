@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { collapseRepeatedHeadline } from "../lib/headline";
+import { cleanHeadline, collapseRepeatedHeadline } from "../lib/headline";
 
 /**
  * A headline that says the same thing twice.
@@ -57,5 +57,28 @@ test.describe("a headline that repeats itself", () => {
     expect(collapseRepeatedHeadline(doubled)).toBe(
       "नेपालले आज पनि विदेशी मुद्राको सटोर बढाउने निर्णय गर्‍यो।"
     );
+  });
+});
+
+test.describe("a headline carrying the card's furniture", () => {
+  test("the domain and the relative time go", () => {
+    const cleaned = cleanHeadline(
+      "gorkhapatraonline.com · ५५ मिनेट अघि खुदर्दुर्नामा एकको मृत्यु"
+    );
+    expect(cleaned).toBe("खुदर्दुर्नामा एकको मृत्यु");
+  });
+
+  test("the domain and the absolute date go", () => {
+    const cleaned = cleanHeadline(
+      "nagariknews.nagariknetwork.com · Fri Oct 23 16:10:16 GMT 2026 चार्ली कर्कोको मुद्दा"
+    );
+    expect(cleaned).not.toContain("nagariknews");
+    expect(cleaned).not.toContain("GMT");
+    expect(cleaned).toContain("चार्ली");
+  });
+
+  test("a clean headline is untouched", () => {
+    const headline = "Nepal-India ties no longer defined by anti-India sentiment";
+    expect(cleanHeadline(headline)).toBe(headline);
   });
 });

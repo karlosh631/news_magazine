@@ -193,8 +193,12 @@ def test_without_a_title_selector_the_headline_would_be_the_whole_card():
     assert adapter().parse(LISTING_HTML)[0]["title"] == (
         "इजरायलमा वामपन्थ र दक्षिणपन्थको अर्थ के हो ? विपक्षी को हो ?"
     )
-    assert "onlinekhabar.com" in fallback[0]["title"]
-    assert "मिनेट अघि" in fallback[0]["title"]
+    # And the fallback is now CLEANED: the card's furniture - the
+    # outlet's domain, the time since publication, the "read the full
+    # story at source" line - is not part of a headline, so it is not
+    # stored as one. The headline itself is untouched.
+    assert "onlinekhabar.com" not in fallback[0]["title"]
+    assert "मिनेट अघि" not in fallback[0]["title"]
     assert "निर्वाचनले" in fallback[0]["title"]
 
 

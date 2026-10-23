@@ -3,8 +3,8 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
 import { getAdminData, type AdminData, type Bucket } from "@/lib/analytics";
-import { ADMIN_COOKIE, readSession, sessionSecret } from "@/lib/admin-auth";
-import { createServiceRoleClient } from "@/lib/supabase/server";
+import { ADMIN_COOKIE } from "@/lib/admin-auth";
+import { checkAdminSession } from "@/lib/admin-session";
 
 export const dynamic = "force-dynamic";
 
@@ -65,36 +65,21 @@ export default async function AdminPage({
   // The cookie says who; the session row says whether that is still
   // true. Deleting the row ends the session immediately, so the row
   // is the authority and the cookie is only the claim.
-  const secret = sessionSecret();
-  const session = await readSession(
-    (await cookies()).get(ADMIN_COOKIE)?.value,
-    secret
+  //
+  // The check lives in one place (`lib/admin-session.ts`) and it FAILS
+  // CLOSED: if the row cannot be read, the answer is no. It also
+  // checks that the account is still active, so deactivating an admin
+  // ends their sessions at once.
+  const check = await checkAdminSession(
+    (await cookies()).get(ADMIN_COOKIE)?.value
   );
 
-  if (!session) {
+  if (!check.ok) {
     const target = `/login?redirect=${encodeURIComponent("/admin")}`;
     redirect(target);
   }
 
-  let sessionLive = true;
-  try {
-    const supabase = createServiceRoleClient();
-    const { data, error } = await supabase
-      .from("admin_sessions")
-      .select("id, expires_at")
-      .eq("id", session.sid)
-      .maybeSingle();
-    sessionLive = !error && Boolean(data);
-  } catch {
-    // The table is missing, so migration 0017 has not been applied.
-    // The cookie is still signed and unexpired, so the operator is let
-    // in - and the panel will say the tables are not there.
-    sessionLive = true;
-  }
-
-  if (!sessionLive) {
-    redirect(`/login?redirect=${encodeURIComponent("/admin")}`);
-  }
+  const session = check.session;
 
   const data = await getAdminData(filters);
 

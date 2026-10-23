@@ -36,6 +36,14 @@ const PBKDF2_ITERATIONS = 210_000;
 const SALT_BYTES = 16;
 const KEY_BITS = 256;
 
+/*
+ * The iteration count has to match the one in `lib/admin-auth.ts`.
+ * The count travels WITH the hash, so the two do not have to agree
+ * for the hash to verify - but they should, so that the account is
+ * not silently spending less time on its password than the rest of
+ * the system does.
+ */
+
 const encoder = new TextEncoder();
 
 function toBase64(bytes) {
@@ -78,10 +86,11 @@ if (!password) {
   process.exit(1);
 }
 
-if (password.length < 10) {
+if (password.length < 16) {
   console.error(
-    "That password is shorter than ten characters. A password on a panel " +
-      "that can read the whole database should not be short."
+    "That password is shorter than sixteen characters. A password on a " +
+      "panel that can read the whole database should not be short, and " +
+      "the hash is published wherever this script's output is pasted."
   );
   process.exit(1);
 }
@@ -100,4 +109,10 @@ console.log("");
 console.log(
   "Run it, then sign in with the new password. The old one stops " +
     "working the moment the row is updated."
+);
+console.log("");
+console.log(
+  "The salt in this hash is random, and it is not published - but " +
+    "the hash itself is, if you paste it into a migration. Keep it " +
+    "out of the repository, and keep the password out of both."
 );

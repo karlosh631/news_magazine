@@ -1,39 +1,85 @@
 import { NextRequest, NextResponse } from "next/server";
+
+import { ADMIN_COOKIE, constantTimeStringEqual } from "@/lib/admin-auth";
+import { checkAdminSession } from "@/lib/admin-session";
+import { crossSiteReason, isSameOriginRequest } from "@/lib/same-origin";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
 /**
  * Triggers the Python ingestion service's /api/sync endpoint.
  *
- * Two allowed callers, both authenticated server-side — never trust a
+ * Three allowed callers, all authenticated server-side — never trust a
  * client-supplied "admin=true" flag (spec section 24):
  *   1. An authenticated admin/super_admin user via the dashboard.
- *   2. A cron service (e.g. Vercel Cron) presenting CRON_SECRET as a
+ *   2. An operator signed in with the admin cookie, whose session row
+ *      has been checked.
+ *   3. A cron service (e.g. Vercel Cron) presenting CRON_SECRET as a
  *      bearer token, matched against the server-only env var.
  *
  * The actual INGESTION_SECRET used to call the Python service never
  * reaches the browser — it's attached here, server-side, only.
  */
 export async function POST(req: NextRequest) {
+  /*
+    A request from another site is not this site's request. The cron
+    sends no `Origin` and no `Sec-Fetch-Site` — it is not a browser
+    — so it is allowed through, and a browser on another site is not.
+  */
+  if (!isSameOriginRequest(req.headers)) {
+    console.warn(
+      `[admin] refused a sync from another site (${crossSiteReason(
+        req.headers
+      )})`
+    );
+    return NextResponse.json(
+      {
+        success: false,
+        error: {
+          code: "CROSS_SITE_REQUEST",
+          message: "This request did not come from this site.",
+        },
+      },
+      { status: 403 },
+    );
+  }
+
   const authHeader = req.headers.get("authorization");
   const cronSecret = process.env.CRON_SECRET;
   const ingestionUrl = process.env.INGESTION_SERVICE_URL;
   const ingestionSecret = process.env.INGESTION_SECRET;
-  const isCron = Boolean(cronSecret && authHeader === `Bearer ${cronSecret}`);
+
+  // The comparison is constant-time. A `===` answers a little faster
+  // for every matching prefix, and a caller who can time the answers
+  // can walk the secret out one character at a time.
+  const isCron = Boolean(
+    cronSecret &&
+      authHeader &&
+      constantTimeStringEqual(authHeader, `Bearer ${cronSecret}`)
+  );
 
   if (!isCron) {
-    const supabase = createServerSupabaseClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
+    // The second door: the signed admin cookie, with its session row
+    // checked. The cookie alone is not enough — a revoked session must
+    // not be able to trigger a sync.
+    const check = await checkAdminSession(req.cookies.get(ADMIN_COOKIE)?.value);
 
-    if (!user) {
-      return NextResponse.json({ success: false, error: { code: "UNAUTHENTICATED", message: "Sign in required." } }, { status: 401 });
-    }
+    if (check.ok) {
+      // Signed in as an operator. Nothing else to check.
+    } else {
+      const supabase = createServerSupabaseClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
 
-    const { data: roles } = await supabase.from("user_roles").select("role").eq("user_id", user.id);
-    const isAdmin = roles?.some((r) => r.role === "admin" || r.role === "super_admin");
-    if (!isAdmin) {
-      return NextResponse.json({ success: false, error: { code: "FORBIDDEN", message: "Admin role required." } }, { status: 403 });
+      if (!user) {
+        return NextResponse.json({ success: false, error: { code: "UNAUTHENTICATED", message: "Sign in required." } }, { status: 401 });
+      }
+
+      const { data: roles } = await supabase.from("user_roles").select("role").eq("user_id", user.id);
+      const isAdmin = roles?.some((r) => r.role === "admin" || r.role === "super_admin");
+      if (!isAdmin) {
+        return NextResponse.json({ success: false, error: { code: "FORBIDDEN", message: "Admin role required." } }, { status: 403 });
+      }
     }
   }
 

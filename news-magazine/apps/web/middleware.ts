@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 
-import { ADMIN_COOKIE, readSession, sessionSecret } from "@/lib/admin-auth";
+import { ADMIN_COOKIE, readSessionWithSecrets, sessionSecrets } from "@/lib/admin-auth";
 
 /**
  * Server-side gate for every /admin/* route. This runs before any admin
@@ -31,10 +31,13 @@ export async function middleware(request: NextRequest) {
 
   // Door 2: the signed admin cookie. Checked first because it is the
   // cheaper of the two — no network call to Supabase's auth server.
-  const secret = sessionSecret();
-  const adminSession = await readSession(
+  //
+  // The cookie is verified against every signing key in use, so that a
+  // key that is being rotated does not sign the operator out of the
+  // panel while it is being replaced.
+  const adminSession = await readSessionWithSecrets(
     request.cookies.get(ADMIN_COOKIE)?.value,
-    secret
+    sessionSecrets()
   );
 
   if (adminSession) {

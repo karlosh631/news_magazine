@@ -958,10 +958,10 @@ reels feed. Everything else has a working default — see
 
 ```bash
 cd apps/ingestion
-.venv/Scripts/python.exe -m pytest            # 432 tests
+.venv/Scripts/python.exe -m pytest            # 551 tests
 
 cd apps/web
-npx playwright test                            # 142 tests
+npx playwright test                            # 143 tests
 ```
 
 The ingestion suite covers URL normalisation (including the srcset and

@@ -111,7 +111,13 @@ export function StoryDialog({
   // the article page does it — otherwise the story says the same
   // thing twice on one screen.
   const body = excerptWithoutOverlap(article.excerpt, points);
-  const image = article.image_highres_url ?? article.featured_image_url ?? null;
+  // A picture that was never confirmed against this story's OWN page
+  // is not this story's picture. The dialog is a second place the
+  // same wrong picture would otherwise appear.
+  const image =
+    article.image_verified_at === null
+      ? null
+      : article.image_highres_url ?? article.featured_image_url ?? null;
 
   /*
     The card that opened the story, in a ref.

@@ -54,7 +54,14 @@ export async function generateMetadata({ params }: Props2): Promise<Metadata> {
     return { title: "Article not found" };
   }
 
-  const image = article.image_highres_url ?? article.featured_image_url ?? undefined;
+  // A picture that was never confirmed against this story's OWN page
+  // is not this story's picture, and the story's own page is the last
+  // place it must not appear. See the operator's rule in
+  // components/NewsCard.tsx.
+  const image =
+    article.image_verified_at === null
+      ? undefined
+      : article.image_highres_url ?? article.featured_image_url ?? undefined;
   const description = clampDescription(article.excerpt ?? article.subtitle);
   const url = `${SITE_URL}/article/${article.slug}`;
 
@@ -150,8 +157,15 @@ export default async function ArticlePage({ params }: Props) {
           .filter(Boolean)
           .join("\n\n")
       : excerptWithoutOverlap(article.excerpt, points);
+  // The same rule as the page's own metadata picture above: an
+  // unconfirmed picture is not shown.
   const image =
-    article.image_highres_url ?? article.featured_image_url ?? article.gif_url ?? null;
+    article.image_verified_at === null
+      ? null
+      : article.image_highres_url ??
+        article.featured_image_url ??
+        article.gif_url ??
+        null;
   const embed = embeddableVideo(article.video_embed_url ?? article.video_url);
 
   const articleUrl = `${SITE_URL}/article/${article.slug}`;

@@ -22,9 +22,27 @@
  *
  * But whether a card will show nothing is a fact about the STORY, and
  * the story is in hand before anything is rendered. A story with no
- * picture, no points and no video is a story with nothing to show,
- * and the feed can leave it out of the very first paint. Nothing
- * moves, because nothing was ever there.
+ * picture is a story the feed can leave out of the very first paint.
+ * Nothing moves, because nothing was ever there.
+ *
+ * A STORY WITH NO PICTURE IS NOT SHOWN
+ * ------------------------------------
+ * The operator's rule, and the last word on it: a picture must belong
+ * to the story it is shown with, and a story whose picture is missing
+ * is not shown at all. So a story with no picture is dropped from the
+ * feed, and the next story down slides into its place.
+ *
+ * The key points do not save it. They were the answer to a
+ * DIFFERENT question — what to show when a picture that WAS there
+ * turns out to be dead — and keeping a picture-less story because it
+ * happens to have some text turned the feed into a wall of key
+ * points, which is what the reader was looking at when they asked for
+ * the pictures to be right.
+ *
+ * The key points are still the right answer to the other question:
+ * a story whose picture is present but 404s shows its points rather
+ * than a broken tile. That is the card's own business, in
+ * components/NewsCard.tsx.
  *
  * WHERE THE RULE LIVES
  * --------------------
@@ -32,12 +50,6 @@
  * card, and the two have to agree — a card that shows a panel the
  * feed thought was empty, or the other way round, is a card that is
  * either removed for no reason or kept when it should have gone.
- *
- * The card's own copy of the rule could not be imported from here
- * when this was written, because that file was being edited by
- * another change at the same time; it lives in the card because the
- * card is what renders the states. When that file is next touched,
- * the two should be folded into this one.
  *
  * The video test here is deliberately the LOOSER one: any video at
  * all counts as something to show, where the card accepts only an
@@ -52,8 +64,8 @@ import type { LatestArticle } from "@/types/database";
 /**
  * The story's own key points, if it has any.
  *
- * A card shows them where the picture would be, so a story with
- * points has something to show even with no picture at all.
+ * A card shows them where the picture would be, so a story whose
+ * picture is dead still has something to show.
  */
 export function storyPoints(article: {
   summary_points?: string[] | null;
@@ -67,12 +79,10 @@ export function storyPoints(article: {
 /**
  * Will this card have nothing at all to show?
  *
- * True for a story with no picture, no key points and no video — the
- * only kind of story the feed may swap for another one.
+ * True for a story with no picture and no video — the only kind of
+ * story the feed may swap for another one.
  */
 export function showsNothing(article: LatestArticle): boolean {
-  if (storyPoints(article).length > 0) return false;
-
   // Any video at all is something to show.
   if (article.video_url || article.video_embed_url) return false;
 

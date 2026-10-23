@@ -151,7 +151,7 @@ export function PanchangPanel({
                         {sign.emoji}
                       </span>
                     ) : null}
-                    <span className="text-base font-bold text-red-700 dark:text-red-400">
+                    <span className="text-base font-bold text-blue-700 dark:text-blue-400">
                       {sign.nameNe ?? sign.name ?? sign.slug ?? `Sign ${sign.sign}`}
                     </span>
                   </div>
@@ -251,7 +251,7 @@ function DayPicker({
             aria-current={active ? "date" : undefined}
             className={`shrink-0 rounded-lg border px-3 py-2 text-center transition-colors ${
               active
-                ? "border-red-600 bg-red-600 text-white"
+                ? "border-blue-600 bg-blue-600 text-white"
                 : "border-gray-200 bg-white text-gray-700 hover:border-gray-400 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:border-gray-500"
             }`}
           >
@@ -261,7 +261,7 @@ function DayPicker({
             <span
               className={`mt-0.5 block text-[10px] ${
                 active
-                  ? "text-red-50"
+                  ? "text-blue-50"
                   : "text-gray-400 dark:text-gray-500"
               }`}
             >

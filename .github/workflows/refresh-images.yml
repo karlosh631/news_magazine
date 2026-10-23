@@ -1,0 +1,130 @@
+# =============================================================
+# Re-resolve the artwork of the rows the marker has not visited
+#
+# WHY THIS IS A SEPARATE WORKFLOW
+# -------------------------------
+# The poll's own repair pass re-resolves five rows a poll per
+# source. That is the right shape for a steady state - a row is
+# fetched exactly once, ever, and the marker stops it being fetched
+# again.
+#
+# It is the wrong shape for a BACKLOG. There were rows whose picture
+# had never been confirmed against their own page, because an
+# ingestion build older than the fix had been writing them for days
+# without the marker. At five a poll per source, the biggest
+# contributors would take days to clear, and every one of those rows
+# is a card on the site with no picture on it.
+#
+# So this walks the backlog directly, newest first, across every
+# source, and it is dispatched by hand (or on a schedule) rather than
+# run on every poll.
+#
+# WHAT IT DOES AND DOES NOT DO
+# ----------------------------
+# It only ever replaces a picture with one that was found on the
+# story's OWN page, and it marks the row so the site will show it. A
+# picture that cannot be proven is left unverified, and the site
+# shows the story without one - which is the operator's rule: a
+# picture must belong to its story, and a story with no picture is
+# fine.
+#
+# It never invents a picture, and it never takes one from a feed.
+# =============================================================
+
+name: Refresh images
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "How many rows to touch in this run"
+        required: false
+        default: "250"
+      delay:
+        description: "Seconds to wait between rows"
+        required: false
+        default: "1"
+  schedule:
+    # 03:40 UTC every day - a quiet hour, and after the 01:00 Nepal
+    # almanac fetch so the two do not compete for the publishers.
+    - cron: "40 3 * * *"
+
+concurrency:
+  group: refresh-images
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    name: Re-resolve the artwork
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: news-magazine/apps/ingestion/requirements.txt
+
+      - name: Install ingestion dependencies
+        working-directory: news-magazine/apps/ingestion
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Write .env from repository secrets
+        working-directory: news-magazine/apps/ingestion
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          INGESTION_SECRET: ${{ secrets.INGESTION_SECRET }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for var in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY INGESTION_SECRET CRON_SECRET; do
+            if [ -z "${!var:-}" ]; then
+              echo "::error::Missing secret: $var"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Add these under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          {
+            echo "SUPABASE_URL=$SUPABASE_URL"
+            echo "SUPABASE_SERVICE_ROLE_KEY=$SUPABASE_SERVICE_ROLE_KEY"
+            echo "INGESTION_SECRET=$INGESTION_SECRET"
+            echo "CRON_SECRET=$CRON_SECRET"
+            echo "SCHEDULER_ENABLED=false"
+            echo "LOG_LEVEL=INFO"
+            echo "LOG_FORMAT=console"
+          } > .env
+
+      - name: Re-resolve the artwork
+        working-directory: news-magazine/apps/ingestion
+        env:
+          LIMIT: ${{ inputs.limit || '250' }}
+          DELAY: ${{ inputs.delay || '1' }}
+        run: |
+          set -uo pipefail
+          python -m scripts.refresh_images --limit "$LIMIT" --delay "$DELAY" 2>&1 | tee refresh.log
+          if grep -q "REFRESH_OK=1" refresh.log; then
+            echo "::notice::The artwork backlog has been worked through."
+          else
+            echo "::warning::The artwork refresh did not finish cleanly. The rows it did not reach keep their unverified picture, and the site shows those stories without one."
+          fi
+
+      - name: Upload the run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: refresh-images-log-${{ github.run_number }}
+          path: news-magazine/apps/ingestion/refresh.log
+          retention-days: 7

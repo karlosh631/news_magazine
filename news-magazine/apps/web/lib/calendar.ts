@@ -289,6 +289,60 @@ export async function fetchCalendarDay(
 }
 
 /**
+ * The whole year, as twelve months.
+ *
+ * The source's calendar page carries the month asked for and the one
+ * before it and the one after it, so a year is four reads: the first
+ * month, the fourth, the seventh and the tenth. Between them they
+ * cover all twelve, and the four reads are made at once.
+ */
+async function readCalendarYear(yearBs: number): Promise<CalendarMonth[] | null> {
+  const starts = [1, 4, 7, 10];
+  const views = await Promise.all(
+    starts.map((month) => readCalendarMonth(yearBs, month))
+  );
+
+  const byKey = new Map<string, CalendarMonth>();
+  for (const view of views) {
+    if (!view) continue;
+    for (const month of view.months) {
+      byKey.set(`${month.yearBs}-${month.monthBs}`, month);
+    }
+  }
+
+  const months = [...byKey.values()].filter(
+    (month) => month.yearBs === yearBs
+  );
+  if (months.length === 0) return null;
+
+  months.sort((a, b) => a.monthBs - b.monthBs);
+  return months;
+}
+
+const readCachedYear = unstable_cache(
+  async (yearBs: number) => readCalendarYear(yearBs),
+  ["calendar-year"],
+  { revalidate: 3600 }
+);
+
+/**
+ * The twelve months of a Bikram Sambat year.
+ *
+ * Null when the source cannot be read. The widget shows the months it
+ * has and says nothing about the ones it does not.
+ */
+export async function fetchCalendarYear(
+  yearBs: number
+): Promise<CalendarMonth[] | null> {
+  if (!Number.isFinite(yearBs) || yearBs < 2000 || yearBs > 2200) return null;
+  try {
+    return await readCachedYear(yearBs);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The address of a day on the source, for the reader who wants the
  * whole page.
  */

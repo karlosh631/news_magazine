@@ -254,6 +254,25 @@ export default async function CategoryPage({ params, searchParams }: Props) {
           <h1 className="sr-only">{pageTitle}</h1>
 
           {/*
+            THE CALENDAR, AT THE TOP OF THE PAGE
+
+            The reader asked for it there. And it is the right place
+            for it on its own account: the calendar is how a reader
+            CHOOSES a day, and the almanac below it is what the
+            chosen day says. A calendar under the thing it navigates
+            is a calendar nobody navigates.
+
+            It is here and nowhere else: a calendar on the front page
+            would be a thing nobody came for.
+          */}
+          <NepaliCalendar
+            months={calendarView?.months ?? []}
+            today={calendarView?.today ?? null}
+            initialDay={calendarView?.today ?? null}
+            period={period}
+          />
+
+          {/*
             THE FOUR TABS
 
             The source's own page has them, and so does this one: a
@@ -266,7 +285,7 @@ export default async function CategoryPage({ params, searchParams }: Props) {
           */}
           <nav
             aria-label="राशिफलको अवधि"
-            className="mb-6 flex flex-wrap gap-2"
+            className="mb-6 mt-8 flex flex-wrap gap-2"
           >
             {RASHIFAL_PERIODS.map((entry) => {
               const active = entry.key === period;
@@ -298,21 +317,6 @@ export default async function CategoryPage({ params, searchParams }: Props) {
               { weekday: "long", timeZone: "UTC" }
             )}
             weekdayNe=""
-          />
-
-          {/*
-            THE CALENDAR
-
-            It sits under the almanac and above the attribution, and
-            it is here and nowhere else: the reader asked for the
-            calendar to be added to the Rashifal page, and a calendar
-            on the front page would be a thing nobody came for.
-          */}
-          <NepaliCalendar
-            months={calendarView?.months ?? []}
-            today={calendarView?.today ?? null}
-            initialDay={calendarView?.today ?? null}
-            period={period}
           />
 
           {panchang?.sourceUrl ? (

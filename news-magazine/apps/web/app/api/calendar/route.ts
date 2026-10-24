@@ -5,7 +5,11 @@ import {
   bsKey,
   parseBsDate,
 } from "@/lib/calendar-core";
-import { fetchCalendarDay, fetchCalendarMonth } from "@/lib/calendar";
+import {
+  fetchCalendarDay,
+  fetchCalendarMonth,
+  fetchCalendarYear,
+} from "@/lib/calendar";
 
 /**
  * The Nepali calendar, for the widget on the Rashifal page.
@@ -80,10 +84,34 @@ export async function GET(request: Request) {
     );
   }
 
+  // A year.
+  if (year && !month) {
+    const yearBs = Number(year);
+    if (!Number.isFinite(yearBs)) {
+      return NextResponse.json(
+        { error: "The year must be a number." },
+        { status: 400, headers: CACHE_HEADERS }
+      );
+    }
+
+    const months = await fetchCalendarYear(yearBs);
+    if (!months || months.length === 0) {
+      return NextResponse.json(
+        { error: "That year could not be read.", months: [] },
+        { status: 200, headers: CACHE_HEADERS }
+      );
+    }
+
+    return NextResponse.json(
+      { months, days: allDays(months), requested: { year: yearBs } },
+      { headers: CACHE_HEADERS }
+    );
+  }
+
   // A month.
   if (!year || !month) {
     return NextResponse.json(
-      { error: "Ask for a month with ?year=2083&month=7, or for a day with ?date=2083-7-7." },
+      { error: "Ask for a month with ?year=2083&month=7, a year with ?year=2083, or a day with ?date=2083-7-7." },
       { status: 400, headers: CACHE_HEADERS }
     );
   }

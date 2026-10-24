@@ -15,6 +15,7 @@ import {
   allDays,
   bsKey,
   CALENDAR_VIEWS,
+  ENGLISH_MONTHS,
   englishDate,
   englishDay,
   WEEKDAYS_EN,
@@ -108,6 +109,73 @@ const WEEKDAY_HEADERS_EN = [
   "Saturday",
 ];
 
+/**
+ * The Gregorian months a Bikram Sambat month covers: "Oct/Nov 2026".
+ *
+ * A Nepali month is not a Western one — कार्तिक runs from the middle
+ * of October to the end of November — so the reader who wants to know
+ * which Western month to look in needs both names. It is built from
+ * the month's own cells, so it is a fact about this month and not a
+ * table somebody has to keep up to date.
+ */
+function gregorianRange(month: CalendarMonth | null): string | null {
+  if (!month) return null;
+  const days = month.days.filter((day) => day.inMonth);
+  if (days.length === 0) return null;
+
+  const first = /^(\d{4})-(\d{2})-/.exec(days[0]?.dateAd ?? "");
+  const last = /^(\d{4})-(\d{2})-/.exec(days[days.length - 1]?.dateAd ?? "");
+  if (!first || !last) return null;
+
+  const firstMonth = ENGLISH_MONTHS[Number(first[2]) - 1];
+  const lastMonth = ENGLISH_MONTHS[Number(last[2]) - 1];
+  if (!firstMonth || !lastMonth) return null;
+
+  const year = first[1];
+  return firstMonth.slice(0, 3) === lastMonth.slice(0, 3)
+    ? `${firstMonth.slice(0, 3)} ${year}`
+    : `${firstMonth.slice(0, 3)}/${lastMonth.slice(0, 3)} ${year}`;
+}
+
+/**
+ * What a cell says to a screen reader.
+ *
+ * The visible cell is a picture: a corner date, a day, a tithi and
+ * whatever happens that day. A reader who cannot see it needs the
+ * same thing in words, and the events are the part that matters —
+ * they are why somebody is looking at this cell at all.
+ */
+function cellLabel(day: CalendarDay, month: CalendarMonth): string {
+  const parts = [
+    `${day.dayBsNp} ${month.monthNameNe}`,
+    englishDate(day.dateAd) ?? "",
+    day.tithiShort ?? "",
+    day.events.map((event) => event.title).join(", "),
+  ];
+  return parts.filter(Boolean).join(", ");
+}
+
+/**
+ * Open a day from the year grid.
+ *
+ * The year grid is a different component from the month grid, and it
+ * does not have the month grid's `onOpenDay` to call. So the day is
+ * opened through the same route the rest of the widget uses: a custom
+ * event on the section, which the widget listens for.
+ */
+function onOpenDayOf(
+  month: CalendarMonth,
+  day: CalendarDay,
+  trigger: HTMLElement | null
+): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(
+    new CustomEvent("nepali-calendar:open-day", {
+      detail: { day, trigger },
+    })
+  );
+}
+
 export function NepaliCalendar({
   months,
   today,
@@ -126,6 +194,7 @@ export function NepaliCalendar({
   const router = useRouter();
   const [view, setView] = useState<CalendarView>("month");
   const [read, setRead] = useState<CalendarMonth[]>(months);
+  const [yearMonths, setYearMonths] = useState<CalendarMonth[]>([]);
   const [selected, setSelected] = useState<string | null>(
     initialDay ? bsKey(initialDay) : null
   );
@@ -221,6 +290,43 @@ export function NepaliCalendar({
   }, []);
 
   /*
+    READING A YEAR
+    --------------
+    A year is four reads of the source's calendar page — the first
+    month, the fourth, the seventh and the tenth — and the twelve
+    months between them. It is only read when the reader asks for the
+    year view, and it is cached for an hour on the server like
+    everything else.
+  */
+  const readYear = useCallback(async (year: number) => {
+    setBusy(true);
+    setProblem(null);
+    try {
+      const response = await fetch(
+        `/api/calendar?year=${year}&t=${Date.now()}`,
+        { cache: "no-store" }
+      );
+      if (!response.ok) {
+        setProblem("यो वर्षको पात्रो पढ्न मिलेन।");
+        return;
+      }
+      const payload = (await response.json()) as {
+        months?: CalendarMonth[];
+        error?: string;
+      };
+      if (!payload.months || payload.months.length === 0) {
+        setProblem(payload.error ?? "यो वर्षको पात्रो पढ्न मिलेन।");
+        return;
+      }
+      setYearMonths(payload.months);
+    } catch {
+      setProblem("यो वर्षको पात्रो पढ्न मिलेन।");
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  /*
     OPENING A DAY
     -------------
     The grid's cell knows the tithi and the events, but the panchang
@@ -294,6 +400,27 @@ export function NepaliCalendar({
     },
     [today, router, period]
   );
+
+  /*
+    A DAY OPENED FROM THE YEAR GRID
+    -------------------------------
+    The year grid is a different component, and the day it opens has to
+    open the same panel the month grid opens. The grid announces the
+    day and this listens for it — one event, one panel, one set of
+    rules.
+  */
+  useEffect(() => {
+    const onOpen = (event: Event) => {
+      const detail = (event as CustomEvent).detail as
+        | { day: CalendarDay; trigger: HTMLElement | null }
+        | undefined;
+      if (!detail?.day) return;
+      void openDay(detail.day, detail.trigger ?? null);
+    };
+    window.addEventListener("nepali-calendar:open-day", onOpen);
+    return () =>
+      window.removeEventListener("nepali-calendar:open-day", onOpen);
+  }, [openDay]);
 
   /*
     THE DAY TURNS
@@ -416,7 +543,7 @@ export function NepaliCalendar({
     <section
       id="nepali-calendar"
       aria-labelledby="nepali-calendar-heading"
-      className="mt-8 overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm dark:border-gray-700 dark:bg-gray-900"
+      className="overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm dark:border-gray-700 dark:bg-gray-900"
     >
       {/* ================= HEAD ================= */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 px-4 py-3 sm:px-5 dark:border-gray-700">
@@ -453,7 +580,18 @@ export function NepaliCalendar({
               <button
                 key={entry.key}
                 type="button"
-                onClick={() => setView(entry.key)}
+                onClick={() => {
+                  setView(entry.key);
+                  // The year is four reads of the publisher, so it is
+                  // only made when the reader asks for it.
+                  if (
+                    entry.key === "year" &&
+                    yearMonths.length === 0 &&
+                    today
+                  ) {
+                    void readYear(today.yearBs);
+                  }
+                }}
                 aria-pressed={active}
                 className={
                   active
@@ -475,7 +613,19 @@ export function NepaliCalendar({
       ) : null}
 
       {/* ================= THE GRID ================= */}
-      {view === "month" ? (
+      {view === "year" ? (
+        <YearGrid
+          months={yearMonths}
+          todayKey={today ? bsKey(today) : null}
+          selectedKey={selected}
+          busy={busy}
+          onOpenMonth={(year, month) => {
+            setView("month");
+            setCursor({ year, month });
+            void readMonth(year, month);
+          }}
+        />
+      ) : view === "month" ? (
         <MonthGrid
           month={month}
           todayKey={today ? bsKey(today) : null}
@@ -487,6 +637,21 @@ export function NepaliCalendar({
           }
           onNext={() =>
             month && goMonth(month.next.year, month.next.month)
+          }
+          onToday={
+            today
+              ? () => {
+                  const home = monthOf(read, {
+                    yearBs: today.yearBs,
+                    monthBs: today.monthBs,
+                  });
+                  if (!home) return;
+                  setCursor({ year: home.yearBs, month: home.monthBs });
+                  setSelected(bsKey(today));
+                  setDetail(today);
+                  void readMonth(home.yearBs, home.monthBs);
+                }
+              : null
           }
         />
       ) : view === "week" ? (
@@ -701,6 +866,7 @@ function MonthGrid({
   onOpenDay,
   onPrev,
   onNext,
+  onToday,
 }: {
   month: CalendarMonth | null;
   todayKey: string | null;
@@ -709,6 +875,7 @@ function MonthGrid({
   onOpenDay: (day: CalendarDay, trigger: HTMLElement | null) => void;
   onPrev: () => void;
   onNext: () => void;
+  onToday: (() => void) | null;
 }) {
   if (!month) {
     return (
@@ -729,11 +896,13 @@ function MonthGrid({
         >
           <span aria-hidden="true">‹</span>
         </button>
-        <p className="font-headline text-base font-bold text-gray-900 dark:text-gray-100">
+        <p className="text-center font-headline text-base font-bold text-gray-900 dark:text-gray-100">
           {month.monthNameNe} {month.yearBsNe}
-          {month.monthNameEn ? (
+          {month.monthNameEn || gregorianRange(month) ? (
             <span className="ml-2 text-xs font-normal text-gray-500 dark:text-gray-400">
-              {month.monthNameEn} {month.yearBs}
+              {month.monthNameEn}
+              {month.monthNameEn && gregorianRange(month) ? " · " : ""}
+              {gregorianRange(month)}
             </span>
           ) : null}
         </p>
@@ -746,6 +915,26 @@ function MonthGrid({
           <span aria-hidden="true">›</span>
         </button>
       </div>
+
+      {/*
+        TODAY.
+
+        A reader who has walked three months forward and then wants
+        today does not want to walk three months back, and a calendar
+        that can only be moved one month at a time is a calendar that
+        loses the reader.
+      */}
+      {onToday ? (
+        <div className="mb-3 flex justify-center">
+          <button
+            type="button"
+            onClick={onToday}
+            className="inline-flex min-h-[36px] items-center rounded-full border border-blue-600 bg-blue-600 px-4 text-sm font-semibold text-white transition hover:bg-blue-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-2 dark:border-blue-500 dark:bg-blue-600 dark:hover:bg-blue-500"
+          >
+            आज
+          </button>
+        </div>
+      ) : null}
 
       <div className="grid grid-cols-7 gap-1">
         {WEEKDAY_HEADERS.map((name) => (
@@ -772,10 +961,10 @@ function MonthGrid({
               key={key}
               type="button"
               onClick={(event) => onOpenDay(day, event.currentTarget)}
-              aria-label={`${day.dayBsNp} ${month.monthNameNe}, ${day.tithiShort ?? ""}`}
+              aria-label={cellLabel(day, month)}
               aria-current={isToday ? "date" : undefined}
               className={[
-                "flex min-h-[64px] flex-col items-center justify-center rounded-lg border px-1 py-1.5 text-center transition",
+                "relative flex min-h-[88px] flex-col items-center rounded-lg border px-1.5 pb-1.5 pt-1 text-center transition",
                 "focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-1",
                 isSelected
                   ? "border-blue-600 bg-blue-600 text-white"
@@ -785,34 +974,63 @@ function MonthGrid({
                 day.inMonth ? "" : "opacity-50",
               ].join(" ")}
             >
-              <span className="text-sm font-bold leading-none">
-                {day.dayBsNp}
-              </span>
               {/*
-                THE GREGORIAN DAY, IN ENGLISH NUMERALS.
+                THE GREGORIAN DAY, IN THE CORNER.
 
                 The Bikram Sambat day is the one a Nepali reader reads
-                first, but the date they have to write on a form, or
-                look up in a Western diary, is the Gregorian one. So
-                every cell carries both: ७ above 24.
+                first, and it is the one that is right for them. But
+                the date they have to write on a form, or look up in a
+                Western diary, is the Gregorian one - so it sits in
+                the corner of the cell, in the same place the source
+                puts it, and the cell reads in both calendars at once.
               */}
               {englishDay(day.dateAd) ? (
                 <span
                   className={
                     isSelected
-                      ? "mt-0.5 block text-[10px] font-medium leading-none text-blue-100"
-                      : "mt-0.5 block text-[10px] font-medium leading-none text-gray-500 dark:text-gray-400"
+                      ? "absolute right-1.5 top-1 text-[10px] font-medium leading-none text-blue-100"
+                      : "absolute right-1.5 top-1 text-[10px] font-medium leading-none text-gray-400 dark:text-gray-500"
                   }
                 >
                   {englishDay(day.dateAd)}
                 </span>
               ) : null}
+
+              {/*
+                WHAT HAPPENS ON THIS DAY.
+
+                A festival, a public holiday, a fast - the things a
+                Nepali reader is looking at the calendar FOR. They are
+                the busiest thing in the cell and they are the reason
+                the cell is as tall as it is.
+              */}
+              {day.events.length > 0 ? (
+                <span
+                  className={
+                    isSelected
+                      ? "mt-2 line-clamp-2 w-full text-[10px] font-medium leading-tight text-blue-100"
+                      : "mt-2 line-clamp-2 w-full text-[10px] font-medium leading-tight text-blue-700 dark:text-blue-300"
+                  }
+                >
+                  {day.events.map((event) => event.title).join(" / ")}
+                </span>
+              ) : null}
+
+              <span
+                className={
+                  day.events.length > 0
+                    ? "mt-1 font-headline text-xl font-bold leading-none"
+                    : "mt-4 font-headline text-xl font-bold leading-none"
+                }
+              >
+                {day.dayBsNp}
+              </span>
               {day.tithiShort ? (
                 <span
                   className={
                     isSelected
-                      ? "mt-1 hidden max-w-full truncate text-[10px] leading-tight text-blue-100 sm:block"
-                      : "mt-1 hidden max-w-full truncate text-[10px] leading-tight text-gray-500 dark:text-gray-400 sm:block"
+                      ? "mt-1 block max-w-full truncate text-[10px] leading-tight text-blue-100"
+                      : "mt-1 block max-w-full truncate text-[10px] leading-tight text-gray-500 dark:text-gray-400"
                   }
                 >
                   {day.tithiShort}
@@ -823,8 +1041,8 @@ function MonthGrid({
                   aria-hidden="true"
                   className={
                     isSelected
-                      ? "mt-1 h-1.5 w-1.5 rounded-full bg-red-300"
-                      : "mt-1 h-1.5 w-1.5 rounded-full bg-red-500"
+                      ? "absolute left-1.5 top-1 h-1.5 w-1.5 rounded-full bg-red-300"
+                      : "absolute left-1.5 top-1 h-1.5 w-1.5 rounded-full bg-red-500"
                   }
                 />
               ) : null}
@@ -832,6 +1050,108 @@ function MonthGrid({
           );
         })}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The year, as twelve months.
+ *
+ * A Nepali year is twelve months of 29 to 32 days, and a reader who
+ * wants to know "when is Dashain this year" does not want to page
+ * through twelve month views to find out. So the year is laid out the
+ * way a year is: twelve small calendars, three across on a wide
+ * screen and one on a phone, each with the days in place and today
+ * marked.
+ *
+ * Clicking a month opens it.
+ */
+function YearGrid({
+  months,
+  todayKey,
+  selectedKey,
+  busy,
+  onOpenMonth,
+}: {
+  months: CalendarMonth[];
+  todayKey: string | null;
+  selectedKey: string | null;
+  busy: boolean;
+  onOpenMonth: (year: number, month: number) => void;
+}) {
+  if (months.length === 0) {
+    return (
+      <p className="px-4 py-8 text-center text-sm text-gray-500 dark:text-gray-400">
+        {busy ? "पात्रो लोड हुँदैछ…" : "यो वर्षको पात्रो पढ्न मिलेन।"}
+      </p>
+    );
+  }
+
+  return (
+    <div
+      className={`grid grid-cols-1 gap-4 p-3 sm:grid-cols-2 sm:p-4 lg:grid-cols-3 ${
+        busy ? "opacity-60" : ""
+      }`}
+    >
+      {months.map((month) => {
+        const cells = month.days;
+        return (
+          <section
+            key={`${month.yearBs}-${month.monthBs}`}
+            className="rounded-xl border border-gray-200 p-3 dark:border-gray-700"
+          >
+            <button
+              type="button"
+              onClick={() => onOpenMonth(month.yearBs, month.monthBs)}
+              className="block w-full text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600"
+            >
+              <h3 className="font-headline text-sm font-bold text-gray-900 dark:text-gray-100">
+                {month.monthNameNe}{" "}
+                <span className="font-normal text-gray-500 dark:text-gray-400">
+                  {month.monthNameEn}
+                </span>
+              </h3>
+            </button>
+
+            <div className="mt-2 grid grid-cols-7 gap-px text-center text-[9px] leading-none text-gray-400 dark:text-gray-500">
+              {["आ", "सो", "मं", "बु", "बि", "शु", "श"].map((name) => (
+                <span key={name}>{name}</span>
+              ))}
+            </div>
+
+            <div className="mt-1 grid grid-cols-7 gap-px text-center">
+              {cells.map((day) => {
+                const key = bsKey(day);
+                const isToday = key === todayKey;
+                const isSelected = key === selectedKey;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onOpenDayOf(month, day, event.currentTarget);
+                    }}
+                    aria-label={cellLabel(day, month)}
+                    aria-current={isToday ? "date" : undefined}
+                    className={[
+                      "flex h-5 items-center justify-center rounded text-[10px] leading-none",
+                      isSelected
+                        ? "bg-blue-600 font-semibold text-white"
+                        : isToday
+                          ? "bg-blue-50 font-bold text-blue-700 dark:bg-blue-950/50 dark:text-blue-200"
+                          : "text-gray-700 dark:text-gray-300",
+                      day.inMonth ? "" : "opacity-40",
+                    ].join(" ")}
+                  >
+                    {day.dayBs}
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        );
+      })}
     </div>
   );
 }

@@ -278,17 +278,19 @@ test.describe("the months that were read", () => {
   });
 });
 
-test.describe("the three readings", () => {
-  test("are the day, the week and the month", () => {
+test.describe("the four readings", () => {
+  test("are the day, the week, the month and the year", () => {
     expect(CALENDAR_VIEWS.map((view) => view.key)).toEqual([
       "day",
       "week",
       "month",
+      "year",
     ]);
     expect(CALENDAR_VIEWS.map((view) => view.label)).toEqual([
       "दिन",
       "हप्ता",
       "महिना",
+      "वर्ष",
     ]);
   });
 });

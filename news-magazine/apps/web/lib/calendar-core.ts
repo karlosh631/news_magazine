@@ -111,13 +111,14 @@ export interface CalendarDayDetail extends CalendarDay {
   yearBsNe: string | null;
 }
 
-/** The three views the calendar can be read in. */
-export type CalendarView = "day" | "week" | "month";
+/** The four views the calendar can be read in. */
+export type CalendarView = "day" | "week" | "month" | "year";
 
 export const CALENDAR_VIEWS: Array<{ key: CalendarView; label: string }> = [
   { key: "day", label: "दिन" },
   { key: "week", label: "हप्ता" },
   { key: "month", label: "महिना" },
+  { key: "year", label: "वर्ष" },
 ];
 
 /**

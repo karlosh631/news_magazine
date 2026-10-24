@@ -1388,16 +1388,135 @@ Every reels provider is a **search over somebody else's fixed
 catalogue**, and a search over a fixed catalogue runs out. Wikimedia
 Commons is asked for the newest Nepal videos, gets the same hundred
 files back for ever, finds them all already stored, and adds nothing
-— so the Reels page said "245 clips in the catalogue, 0 clips fetched
+- so the Reels page said "245 clips in the catalogue, 0 clips fetched
 today" while the ingestion log said the pass was fine. The search was
 not broken, the store was not broken, and the corpus was finished.
 
-So there is a provider that searches nothing at all: `ArticlesSource`,
-which reads the articles this site has already published and turns the
-newest ones that carry a **verified** photograph into reels. A new
-article is a new reel by construction, so the category moves in step
-with the news page, and it cannot be exhausted. The id of the reel is
-the id of the article, which is what makes it idempotent.
+### The feed is entertainment, and it is measured
+
+The reader asked for the Reels page to be **entertainment** - songs,
+music, clips, the kind of thing a reels feed is for - and it was
+serving the Himalaya, the Everest, the Kathmandu Valley and a handful
+of public service announcements about cancer, and the same handful for
+ever.
+
+So the term list is a measured entertainment catalogue: thirty-four
+terms in two groups, and the grouping is a marker in the list itself.
+A term marked `ne:` is a Nepali one; everything else is the wider
+Hindi and international pool.
+
+```python
+# apps/ingestion/app/config.py
+reels_search_terms: str | None = (
+    "folk song,music video,official video,song,stage performance,"
+    "live performance,dance performance,ne:tharu folk song,ne:sangeet,"
+    ...
+)
+```
+
+**Every term in that list was measured against the live Commons API
+and its results were read one title at a time**, because a term can
+return twelve results that are exactly what was wanted or twelve that
+are not:
+
+| Term | What it actually returns |
+| --- | --- |
+| `tharu folk song` | twelve clips, all of them music |
+| `sangeet` | "Rabindra Sangeet - 38th International" |
+| `newari` | "Bhairab Dance", "Music Newari Culture" |
+| `dhol` | "Shiv Garjana Dhol Tasha Pathak Group" |
+| `kirtan` | "Ratha Jatra Kirtan at Koksara" |
+| `tribal dance` | "Santali tribal Dance, Mayurbhanja, Odisha" |
+
+And these were measured and **rejected**, and are pinned by a test so
+that nobody puts them back:
+
+| Rejected term | What it actually returns |
+| --- | --- |
+| `pop` | NASA's "Pop-Up" videos |
+| `music` | military "Range Reel (Music Only)" videos |
+| `madal` | "Trump Is Mad About Mueller Report" |
+| `band` | the air force band |
+| `ghat` | "Forest Fires in Ghat, Chamoli, Uttarakhand" |
+| `tharu` | the "Eastern Tharu riddle" series |
+| `nepali` | "How to write in Nepali wiki", a login tutorial |
+| `nepalese` | "Nepal Railway, Janakpur", a note about a diplomatic presence |
+
+### The mix is seventy-thirty, and it is enforced
+
+The reader asked for roughly seventy per cent of the reels from the
+wider pool and thirty from the Nepali one. The provider applies that
+to the **clips**, not to the search results, because Commons holds
+twenty-five results for `dance` and one for `bollywood song` - without
+a cap the wider group takes everything and the Nepali group is a
+rumour.
+
+The rule is a plain function, `apply_language_mix`, so the split can
+be checked without running a pass against the live API. A group that
+comes up short gives its place to the other one: a feed that is empty
+because Commons had no Nepali material this week is not better than a
+feed that is all Nepali.
+
+### One term may not fill the feed
+
+"Reels mostly are duplicates." The files were different files, so the
+store's deduplication never saw them as the same - but the screen said
+the same thing nine times: nine clips from one series, found by one
+term. So a term may contribute at most **three** clips to a pass, and
+a feed of thirty draws on at least seven terms.
+
+### The rate limit, and why the Nepali group was empty for so long
+
+Wikimedia Commons answers a burst of searches with **HTTP 429** and a
+`Retry-After` header. That reply used to be thrown away and reported
+as *"upstream returned a body that is not JSON"* - which is true, and
+useless: it named a decoding failure where the truth was a throttle.
+
+The damage was specific. Twenty-one searches went through and the
+twenty-second was throttled, so every term after it failed - and the
+Nepali terms sit in the second half of the list, so **the Nepali group
+was not missing because Commons had no Nepali material. It was missing
+because the pass was throttled halfway through.**
+
+Three things fix it, and all three are measured:
+
+- the reply is **waited out**, honouring `Retry-After`, rather than
+  thrown away;
+- the requests carry **`Api-User-Agent`**, the header Wikimedia's rate
+  limiter reads - a request with only the ordinary `User-Agent` is
+  counted as an unidentified client and gets the strictest limit;
+- the pace is **a second and a half** between searches, not half a
+  second. At half a second the twenty-second search of a pass was
+  throttled. At a second and a half, all thirty-four terms answered.
+
+The budget is spent on **coverage first**: every term's newest page is
+asked for before any term is asked for twice. The budget used to reach
+ten terms out of thirty-six, and the other twenty-six were never
+searched at all.
+
+### The feed is about Nepal, and that is a filter
+
+A clip has to carry a Nepal signal in its title **or** its description
+to be stored at all - "Landing and taking off at the most dangerous
+airport in the world" is Lukla, and its title does not say so, but its
+description does. This is what keeps NASA timelapses out of a Nepali
+news site's feed, and it is also why the wider entertainment pool is
+not quite as wide as it looks: "Issele Uku" and "Rabindra Sangeet"
+carry the signal, and a NASA launch does not.
+
+### A story without a video is not a reel
+
+`ArticlesSource` reads the articles this site has already published and
+turns the newest ones that carry a **video of their own** into reels.
+A story with no video of its own is a picture: it used to become an
+image reel with a "Replay unavailable" panel over it, which is what the
+reader complained about, and a hundred rows a pass that no card could
+play. The photograph still reaches the reader, on the news page, where
+it belongs.
+
+So a new article is a new reel by construction, the category moves in
+step with the news page, and it cannot be exhausted. The id of the reel
+is the id of the article, which is what makes it idempotent.
 
 The reels table grows with the news now, so the storage guard prunes it
 twice: by age (three days) and by count (twenty thousand rows).

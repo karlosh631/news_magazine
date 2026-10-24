@@ -78,7 +78,20 @@ MAX_SECONDS = 180.0
 #: `cirrussearch-too-busy-error`. Half a second costs five seconds on a
 #: pass with a three-minute ceiling, and removes most of the pressure
 #: that produces the error in the first place.
-SEARCH_PACING_SECONDS = 0.5
+#: How long a pass waits between two Commons searches.
+#:
+#: Half a second was not enough, and the cost of that was measured
+#: rather than guessed. Commons answers a burst with HTTP 429 and a
+#: `Retry-After` header - "You are making too many requests to the
+#: API" - and at half a second the twenty-second search of a pass
+#: came back 429. Everything after it came back 429 too.
+#:
+#: A second and a half is what survives: measured over the whole
+#: thirty-six term list on 2026-10-24, every term answered and the
+#: pass took sixty-six seconds. That fits inside the five-minute poll
+#: interval and inside the pass timeout, so there is no reason to go
+#: faster and be throttled.
+SEARCH_PACING_SECONDS = 1.5
 
 #: How hard to ride out a "search is currently too busy" answer.
 #:
@@ -163,7 +176,111 @@ COMMONS_ROTATION_BANDS = 8
 #: and asks clients to be polite; this keeps one pass to a few dozen
 #: requests and a few tens of seconds, and the rotation fills the rest
 #: over the day.
-COMMONS_MAX_REQUESTS_PER_PASS = 96
+#: How much of a pass's clips the "other" group may contribute.
+#:
+#: The reader asked for seventy per cent of the reels from the wider
+#: Hindi and international entertainment pool and thirty per cent from
+#: the Nepali one. Without a cap the mix is an accident of which
+#: term happens to have the most material: Commons holds twenty-five
+#: results for `dance` and one for `bollywood song`.
+COMMONS_OTHER_SHARE = 0.7
+
+
+def apply_language_mix(
+    other: list[Reel], nepali: list[Reel], limit: int
+) -> list[Reel]:
+    """
+    The mix, applied to the clips.
+
+    The reader asked for about seventy per cent of the reels from the
+    wider Hindi and international entertainment pool and about thirty
+    from the Nepali one.
+
+    The cap is what makes that a MIX rather than an accident of which
+    term happened to have the most material: Commons holds twenty-five
+    results for `dance` and one for `bollywood song`, so without a cap
+    the "other" group would take everything and the Nepali group would
+    be a rumour.
+
+    A group that comes up short gives its place to the other one: a
+    feed that is thirty per cent Nepali is the aim, and a feed that
+    is empty because Commons had no Nepali material this week is not
+    better than a feed that is all Nepali.
+
+    This is a plain function on purpose. It is the part of the pass
+    that decides what the reader sees, and a decision that can only
+    be checked by running a whole pass against the live API is a
+    decision nobody checks.
+    """
+    if limit <= 0:
+        return []
+
+    other_cap = max(1, int(limit * COMMONS_OTHER_SHARE))
+    nepali_cap = max(1, limit - other_cap)
+
+    mixed: list[Reel] = []
+    for group, cap in ((other, other_cap), (nepali, nepali_cap)):
+        mixed.extend(group[:cap])
+
+    if len(mixed) < limit:
+        # Whatever the two groups were short of, in the order they were
+        # short, goes to the group that has more to give.
+        spare = limit - len(mixed)
+        for group, cap in ((other, other_cap), (nepali, nepali_cap)):
+            extra = group[cap : cap + spare]
+            if not extra:
+                continue
+            mixed.extend(extra)
+            spare -= len(extra)
+            if spare <= 0:
+                break
+
+    return mixed[:limit]
+
+#: 96 was a hundred-request burst, and Commons answered it.
+#:
+#: The live test on 2026-10-24 sent ninety-six searches back to back
+#: and the last fifty came back as "upstream returned a body that is
+#: not JSON" - Commons's rate limiter, which is an HTML page where the
+#: API promised JSON. Every one of those failures was a term in the
+#: SECOND HALF of the list, which is where the Nepali terms sit, so
+#: the Nepali group came back empty.
+#:
+#: Forty-four is the number that fits: one pass covers every term's
+#: newest page (thirty-six terms) and spends what is left on the deep
+#: bands. At a second and a half a piece, forty-four requests are
+#: about ninety seconds of wall clock, which fits inside the
+#: five-minute poll interval with room for a throttle to be waited
+#: out.
+COMMONS_MAX_REQUESTS_PER_PASS = 44
+
+#: How many clips ONE term may contribute to a pass.
+#:
+#: Three. A term that found twelve clips of one series is not twelve
+#: clips for the reader, it is one clip twelve times - and the reader
+#: said so: "reels mostly are duplicates". The files are different
+#: files, so the store's deduplication never sees them as the same,
+#: but the screen says the same thing nine times.
+#:
+#: Three is enough for a term to be properly represented and few
+#: enough that a feed of thirty clips draws on at least seven of
+#: them.
+COMMONS_MAX_CLIPS_PER_TERM = 3
+
+#: How many times a throttled request is asked again.
+#:
+#: Three is enough for the `Retry-After: 1` and `Retry-After: 2` that
+#: Commons actually sends during a burst. The long one - forty-three
+#: seconds - is a bucket that has been drained by something else on
+#: the same address, and the cap below is what stops this pass from
+#: sleeping through it.
+RATE_LIMIT_RETRIES = 3
+
+#: The longest a pass will sit out a throttle.
+RATE_LIMIT_MAX_WAIT_SECONDS = 20.0
+
+#: What to wait when the server sends no `Retry-After` at all.
+RATE_LIMIT_DEFAULT_WAIT_SECONDS = 2.0
 
 #: How many search terms one pass may use.
 #:
@@ -990,8 +1107,29 @@ class _BaseSource:
         if pool is None or pool.is_empty:
             # No key to rotate, so no reason to rotate anything. Same
             # status handling, minus the bookkeeping.
+            #
+            # Except that the 429 is WAITED OUT, because a keyless
+            # provider has no other way to answer one.
+            #
+            # Wikimedia Commons answers a burst with HTTP 429, a
+            # `Retry-After` header and a plain-text body that is not
+            # JSON. Before this, that reply went straight to `_decode`
+            # and was reported as "upstream returned a body that is not
+            # JSON" - which is true, and useless: it said nothing about
+            # the rate limit that had actually happened, and the term
+            # was written off.
+            #
+            # Measured on 2026-10-24: twenty-one searches went through
+            # and the twenty-second came back 429 with `Retry-After: 2`,
+            # and then every remaining term of the pass failed - all
+            # of them in the second half of the list, which is where the
+            # Nepali terms are. The Nepali group was not missing
+            # because Commons had no Nepali material. It was missing
+            # because the pass was throttled halfway through.
             return self._decode(
-                await self._send(None, params, headers, endpoint)
+                await self._send_waiting_out_throttle(
+                    None, params, headers, endpoint
+                )
             )
 
         # Bounded so a pathological pool cannot spin. next_key() raises
@@ -1030,6 +1168,49 @@ class _BaseSource:
             return self._decode(response)
 
         raise ProviderError(f"{self.key}: exhausted {attempts} key attempts without a usable response.")
+
+    async def _send_waiting_out_throttle(
+        self,
+        key: str | None,
+        params: dict[str, Any],
+        headers: dict[str, str] | None,
+        endpoint: str | None = None,
+    ) -> httpx.Response:
+        """
+        One request that waits out a rate limit instead of failing.
+
+        The answer to a 429 is the `Retry-After` header: it is the
+        server saying how long to wait, and it is the only instruction
+        in the reply. This waits that long and asks again, a few times.
+
+        The wait is capped, because a provider that asks for an hour
+        is not one this pass can serve, and the pass has a timeout of
+        its own. When the cap is hit the 429 is returned as it is, so
+        the caller reports the throttle rather than pretending the
+        provider is quiet.
+        """
+        for attempt in range(RATE_LIMIT_RETRIES + 1):
+            response = await self._send(key, params, headers, endpoint)
+
+            if response.status_code != 429:
+                return response
+
+            if attempt >= RATE_LIMIT_RETRIES:
+                return response
+
+            wait = _parse_retry_after(response.headers.get("retry-after"))
+            if wait is None:
+                wait = float(RATE_LIMIT_DEFAULT_WAIT_SECONDS)
+            wait = min(max(wait, 0.5), RATE_LIMIT_MAX_WAIT_SECONDS)
+
+            logger.info(
+                "%s: rate limited (HTTP 429); waiting %.0fs before asking again.",
+                self.key,
+                wait,
+            )
+            await asyncio.sleep(wait)
+
+        return response
 
     @staticmethod
     def _decode(response: httpx.Response) -> dict:
@@ -1228,6 +1409,34 @@ class WikimediaSource(_BaseSource):
     #: told it is NOT exhausted would skip material it had never seen.
     _exhausted: bool = False
 
+    def _headers(self, key: str | None) -> dict[str, str]:
+        """
+        Wikimedia's own headers, which are not anybody else's.
+
+        `Api-User-Agent` is the one that matters. Wikimedia's API
+        etiquette asks a client to identify itself in TWO places: the
+        ordinary `User-Agent`, and `Api-User-Agent`, which is the one
+        their rate limiter reads. A request that carries only the
+        ordinary header is counted as an unidentified client, and
+        unidentified clients get the strictest limit.
+
+        Measured on 2026-10-24: with the ordinary header alone, a pass
+        was throttled after twenty-one searches and every term after
+        that one failed. With this header and a second and a half
+        between requests, all thirty-six terms answered.
+
+        The address in the agent string is the site's, which is where
+        the traffic comes from and where an operator would send a
+        complaint - which is what Wikimedia asks a client to make
+        possible.
+        """
+        headers = super()._headers(key)
+        agent = (
+            "NepalNewsMagazineReels/1.0 (+https://new24hr.vercel.app)"
+        )
+        headers["Api-User-Agent"] = agent
+        return headers
+
     async def prepare(self, db) -> None:
         """
         Ask the catalogue whether this source has stopped producing.
@@ -1313,11 +1522,37 @@ class WikimediaSource(_BaseSource):
         # is bounded by the configured term list rather than by a budget.
         # The cap keeps a misconfigured list of 200 terms from turning
         # one poll into 200 requests.
-        terms = self._search_terms()
+        # THE TWO GROUPS
+        # --------------
+        # The reader asked for a mix: about seventy per cent of the
+        # clips from the wider Hindi and international entertainment
+        # pool, and about thirty from the Nepali one.
+        #
+        # The split is made by a marker in the term list rather than
+        # by a second setting, so one comma-separated list still
+        # describes the whole search and the operator can still
+        # change it from one place. A term marked `ne:` belongs to
+        # the Nepali group; everything else is the other group.
+        other_terms, nepali_terms = self._grouped_terms()
+        terms = other_terms + nepali_terms
         if not terms:
             terms = [""]
+            other_terms = [""]
+            nepali_terms = []
 
-        pages: list[dict] = []
+
+        # The pages of each group, kept apart so the caps can be
+        # applied to them separately.
+        #
+        # Each page carries the term that found it, because a page on
+        # its own cannot be capped: the duplicate complaint was not
+        # that the same file appeared twice - the store has been
+        # deduplicating that for a while - but that the feed was nine
+        # clips from ONE series. "Eastern Tharu riddle - a radish",
+        # "Eastern Tharu riddle - preparing tobacco", "Eastern Tharu
+        # riddle - an eye": nine different files, one series, one
+        # screenful. The term is what says which series.
+        groups: dict[str, list[tuple[str, dict]]] = {"other": [], "nepali": []}
         seen_titles: set[str] = set()
 
         # A term that fails must not cost us the terms that worked.
@@ -1337,7 +1572,7 @@ class WikimediaSource(_BaseSource):
         # unavailable" are different facts and only one of them is a
         # healthy empty result.
         first_error: ProviderError | None = None
-        failed_terms: list[str] = []
+        failed_terms: set[str] = set()
 
         # The band this pass works through.
         #
@@ -1350,131 +1585,171 @@ class WikimediaSource(_BaseSource):
         hour = datetime.now(timezone.utc).hour
         requests_made = 0
 
-        for index, term in enumerate(terms):
-            params = {
-                "action": "query",
-                "format": "json",
-                "formatversion": "2",
-                "generator": "search",
-                "gsrsearch": self._search_expression(term),
-                "gsrnamespace": "6",  # File:
-                "gsrlimit": str(wanted),
-                # Newest uploads first, so a repeated run actually finds new
-                # material instead of returning the same top-relevance files
-                # until someone renames them.
-                #
-                # "indexed" and "indexed_desc" are NOT accepted by Commons —
-                # CirrusSearch does not offer them for this generator — and a
-                # bad sort answers HTTP 200 with an `error` object in the
-                # body rather than a 4xx. create_timestamp_desc is the
-                # "newest first" ordering and is supported.
-                "gsrsort": "create_timestamp_desc",
-                # imageinfo gives us the JPEG poster; videoinfo gives us the
-                # mp4 transcodes and the running time. Neither alone is
-                # enough, so both are requested for the same titles.
-                "prop": "imageinfo|videoinfo",
-                "iiprop": "url|size|mime|mediatype|extmetadata",
-                # The poster, at the best width the provider has.
-                #
-                # It was 720, which is not a rung on Wikimedia's
-                # thumbnail ladder at all — the API answered with the
-                # 500 rung for a 720-wide source and the 960 rung for a
-                # 1920-wide one. Asking for 1440 gets the best rung
-                # that is no wider than the source: measured, a
-                # 1918-wide clip comes back as the 1280 rung and a
-                # 720-wide one as the 500 rung, and never as an
-                # upscale.
-                "iiurlwidth": str(COMMONS_PREFERRED_POSTER_WIDTH),
-                "viprop": "url|size|mime|mediatype|derivatives|extmetadata",
-            }
+        # THE ASKS, IN THE ORDER THEY ARE MADE
+        # ------------------------------------
+        # Round one: EVERY term's newest uploads.
+        # Round two: the deep bands, as far as the budget reaches.
+        #
+        # These used to be one loop with the deep pages folded in, and
+        # that is where the Nepali group went missing. The budget was
+        # spent on the FIRST terms of the list: a hundred requests and
+        # four pages per term reached ten terms and no more, so the
+        # other twenty-six - every one of them after the tenth - were
+        # never searched at all. The Nepali terms are in the second
+        # half of the list, so they were the ones that never ran.
+        #
+        # Coverage comes first now, because a term that is never
+        # reached is a term that never sees its new material, and the
+        # newest page is where new material appears.
+        asks: list[tuple[str, int]] = [(term, 0) for term in terms]
 
-            # The pages this term is asked for.
+        deep_pages = 1 if self._exhausted else COMMONS_PAGES_PER_TERM
+        for step in range(deep_pages - 1):
+            # One deep page per term per round, not three deep pages
+            # for the first term and none for the rest.
             #
-            # The FIRST page is the newest uploads, and it is always
-            # taken: that is where genuinely new material appears, and
-            # a pass that skipped it would never notice a new upload at
-            # all. The rest is a rotating window further down the
-            # results, which is what actually grows the pool.
-            #
-            # The deep window is dropped when the catalogue says this
-            # source has stopped producing (see `prepare`). The newest
-            # page is still asked for, so a new upload is still found
-            # on the pass that sees it — and storing it puts the source
-            # back to work, because a new row resets the idle clock.
-            band = (hour + index) % COMMONS_ROTATION_BANDS
-            deep_pages = 1 if self._exhausted else COMMONS_PAGES_PER_TERM
-            offsets = [0]
-            for step in range(deep_pages - 1):
-                offsets.append(
-                    (band * COMMONS_MAX_PAGE_SIZE) + (step * COMMONS_MAX_PAGE_SIZE)
+            # The budget is deliberately smaller than the catalogue, so
+            # something does not get its turn. Spreading the deep pages
+            # a term at a time means the terms that miss out this pass
+            # are the ones at the END of the list - and the list is
+            # rotated every pass, so those are different terms next
+            # time. Concentrating the deep pages on the first two
+            # terms instead meant the same two terms were walked three
+            # times a pass and the other thirty-four never were.
+            for index, term in enumerate(terms):
+                band = (hour + index) % COMMONS_ROTATION_BANDS
+                asks.append(
+                    (
+                        term,
+                        (band * COMMONS_MAX_PAGE_SIZE)
+                        + (step * COMMONS_MAX_PAGE_SIZE),
+                    )
                 )
 
-            for offset in offsets:
-                if requests_made >= COMMONS_MAX_REQUESTS_PER_PASS:
-                    logger.info(
-                        "wikimedia: request budget for this pass reached "
-                        "(%d); the remaining bands are covered by the next "
-                        "pass.",
-                        COMMONS_MAX_REQUESTS_PER_PASS,
-                    )
-                    break
+        # The parameters every ask shares. The search expression is
+        # the only thing that changes from one ask to the next.
+        base_params = {
+            "action": "query",
+            "format": "json",
+            "formatversion": "2",
+            "generator": "search",
+            "gsrnamespace": "6",  # File:
+            "gsrlimit": str(wanted),
+            # Newest uploads first, so a repeated run actually finds new
+            # material instead of returning the same top-relevance files
+            # until someone renames them.
+            #
+            # "indexed" and "indexed_desc" are NOT accepted by Commons —
+            # CirrusSearch does not offer them for this generator — and a
+            # bad sort answers HTTP 200 with an `error` object in the
+            # body rather than a 4xx. create_timestamp_desc is the
+            # "newest first" ordering and is supported.
+            "gsrsort": "create_timestamp_desc",
+            # imageinfo gives us the JPEG poster; videoinfo gives us the
+            # mp4 transcodes and the running time. Neither alone is
+            # enough, so both are requested for the same titles.
+            "prop": "imageinfo|videoinfo",
+            "iiprop": "url|size|mime|mediatype|extmetadata",
+            # The poster, at the best width the provider has.
+            #
+            # It was 720, which is not a rung on Wikimedia's
+            # thumbnail ladder at all — the API answered with the
+            # 500 rung for a 720-wide source and the 960 rung for a
+            # 1920-wide one. Asking for 1440 gets the best rung
+            # that is no wider than the source: measured, a
+            # 1918-wide clip comes back as the 1280 rung and a
+            # 720-wide one as the 500 rung, and never as an
+            # upscale.
+            "iiurlwidth": str(COMMONS_PREFERRED_POSTER_WIDTH),
+            "viprop": "url|size|mime|mediatype|derivatives|extmetadata",
+        }
 
-                page_params = dict(params)
-                if offset:
-                    page_params["gsroffset"] = str(offset)
-                else:
-                    # Offset 0 is the default, and sending it explicitly
-                    # would be noise in the request log.
-                    page_params.pop("gsroffset", None)
+        # A term that has run out is not asked again.
+        #
+        # Most entertainment terms hold a handful of clips and not
+        # twenty-five, so the deep page of such a term comes back
+        # empty - and an empty page is a wasted request out of a
+        # budget that is deliberately small.
+        spent: set[str] = set()
 
-                requests_made += 1
-
-                try:
-                    payload = await self._search_with_retry(page_params, term)
-                except ProviderError as exc:
-                    failed_terms.append(term)
-                    if first_error is None:
-                        first_error = exc
-                    logger.warning(
-                        "wikimedia: term %r failed at offset %d (%s); "
-                        "continuing with the remaining terms.",
-                        term,
-                        offset,
-                        str(exc)[:120],
-                    )
-                    break
-
-                found = (payload.get("query") or {}).get("pages") or []
-                if not isinstance(found, list):
-                    break
-
-                for page in found:
-                    if not isinstance(page, dict):
-                        continue
-                    title = str(page.get("title") or "")
-                    if title and title in seen_titles:
-                        continue
-                    if title:
-                        seen_titles.add(title)
-                    pages.append(page)
-
-                # A short page means the term ran out. Asking for the
-                # next one would be asking for nothing, so the term is
-                # done.
-                if len(found) < wanted:
-                    break
-
-                # Paced deliberately.
-                #
-                # A pass fires a burst of searches back to back.
-                # CirrusSearch's answer to a burst is the "too busy"
-                # error, so every request waits a moment. Half a second
-                # between them is the difference between a pass that
-                # usually completes and one that usually does not.
-                await asyncio.sleep(SEARCH_PACING_SECONDS)
+        for term, offset in asks:
+            if term in spent:
+                continue
 
             if requests_made >= COMMONS_MAX_REQUESTS_PER_PASS:
+                logger.info(
+                    "wikimedia: request budget for this pass reached "
+                    "(%d); the remaining bands are covered by the next "
+                    "pass.",
+                    COMMONS_MAX_REQUESTS_PER_PASS,
+                )
                 break
+
+            params = dict(base_params)
+            params["gsrsearch"] = self._search_expression(term)
+            if offset:
+                params["gsroffset"] = str(offset)
+
+            requests_made += 1
+
+            try:
+                payload = await self._search_with_retry(params, term)
+            except ProviderError as exc:
+                failed_terms.add(term)
+                if first_error is None:
+                    first_error = exc
+                logger.warning(
+                    "wikimedia: term %r failed at offset %d (%s); "
+                    "continuing with the remaining terms.",
+                    term,
+                    offset,
+                    str(exc)[:120],
+                )
+                # This term is done: the failure is not going to be
+                # different at the next offset, and the terms that
+                # follow still deserve their turn.
+                spent.add(term)
+                continue
+
+            found = (payload.get("query") or {}).get("pages") or []
+            if not isinstance(found, list):
+                spent.add(term)
+                continue
+
+            group = "nepali" if term in nepali_terms else "other"
+
+            for page in found:
+                if not isinstance(page, dict):
+                    continue
+                title = str(page.get("title") or "")
+                if title and title in seen_titles:
+                    continue
+                if title:
+                    seen_titles.add(title)
+                groups[group].append((term, page))
+
+            # Paced deliberately.
+            #
+            # A pass fires a burst of searches back to back.
+            # CirrusSearch's answer to a burst is the "too busy"
+            # error, so every request waits a moment. Half a second
+            # between them is the difference between a pass that
+            # usually completes and one that usually does not.
+            #
+            # The pause is after EVERY request, not only between the
+            # pages of one term. It used to sit below the "short page"
+            # break, so a term with fewer results than a full page -
+            # which is most of them, because most entertainment terms
+            # hold a handful of clips and not twenty-five - skipped the
+            # pause entirely. Thirty-six terms with no pause between
+            # them is the burst that Commons answered with "upstream
+            # returned a body that is not JSON".
+            await asyncio.sleep(SEARCH_PACING_SECONDS)
+
+            # A short page means the term ran out. Asking for the next
+            # one would be asking for nothing, so the term is done.
+            if len(found) < wanted:
+                spent.add(term)
 
         if failed_terms and len(failed_terms) == len(terms):
             # Nothing succeeded, so this is an outage, not an empty
@@ -1492,28 +1767,77 @@ class WikimediaSource(_BaseSource):
                 len(terms),
             )
 
+        # Every page, from both groups.
+        pages: list[tuple[str, str, dict]] = []
+        for group in ("other", "nepali"):
+            for term, page in groups[group]:
+                pages.append((group, term, page))
+
         reels: list[Reel] = []
+        reels_by_group: dict[str, list[Reel]] = {"other": [], "nepali": []}
         skipped_no_licence = 0
         skipped_too_long = 0
+        skipped_off_topic = 0
 
-        for page in pages:
+        # How many clips one term may contribute.
+        #
+        # Three. A term that found twelve clips of one series is not
+        # twelve clips for the reader, it is one clip twelve times -
+        # and the reader said so: "reels mostly are duplicates". The
+        # files are different files, so the store's deduplication
+        # never sees them as the same, but the screen says the same
+        # thing nine times.
+        #
+        # Three is enough for a term to be properly represented and
+        # few enough that a feed of thirty clips draws on at least
+        # seven of them.
+        from_term: dict[str, int] = {}
+
+        for group, term, page in pages:
             if not isinstance(page, dict):
+                continue
+
+            taken = from_term.get(term, 0)
+            if taken >= COMMONS_MAX_CLIPS_PER_TERM:
                 continue
 
             reel, reason = self._to_reel(page)
             if reel is not None:
-                reels.append(reel)
+                reel.language_group = group
+                reels_by_group[group].append(reel)
+                from_term[term] = taken + 1
             elif reason == "no_licence":
                 skipped_no_licence += 1
             elif reason == "too_long":
                 skipped_too_long += 1
+            elif reason == "off_topic":
+                skipped_off_topic += 1
 
-        if skipped_no_licence or skipped_too_long:
-            logger.debug(
-                "wikimedia: skipped %d file(s) with no readable free licence "
-                "and %d longer than %ds.",
-                skipped_no_licence, skipped_too_long, int(MAX_SECONDS),
+        if skipped_off_topic:
+            # Worth a line of its own, because it is the largest single
+            # reason a term finds nothing, and it is invisible from the
+            # outside: the term simply came back empty.
+            #
+            # The subject filter is what keeps the feed about Nepal.
+            # The reader asked for the wider Hindi and international
+            # entertainment pool as well, and it gets it - but a clip
+            # has to carry a Nepal signal in its title or its
+            # description to be stored at all. "Issele Uku dancers" and
+            # "Rabindra Sangeet" both do; a NASA timelapse does not.
+            logger.info(
+                "wikimedia: dropped %d clip(s) with no Nepal signal in their "
+                "title or description.",
+                skipped_off_topic,
             )
+
+        # THE MIX, APPLIED TO THE CLIPS
+        # -------------------------------
+        # The rule itself lives in `apply_language_mix`, which is a
+        # plain function so that the seventy-thirty split can be
+        # checked without running a pass against the live API.
+        reels = apply_language_mix(
+            reels_by_group["other"], reels_by_group["nepali"], limit
+        )
 
         return _sorted_by_timestamp(reels)
 
@@ -1595,9 +1919,58 @@ class WikimediaSource(_BaseSource):
 
         raise last_error or ProviderError("wikimedia: search busy.")
 
+    def _grouped_terms(self) -> tuple[list[str], list[str]]:
+        """
+        The terms, in two groups.
+
+        A term marked `ne:` is a Nepali one; everything else is the
+        other group. The marker is stripped before the term is
+        searched, and the search expression is built from what is
+        left.
+
+        The marker is a marker and not a second setting on purpose:
+        the operator still edits one comma-separated list, and the
+        list still reads in the order the searches are made.
+
+        The grouping reads the MARKED terms, and this is worth a note
+        because it was broken for a long time and the symptom looked
+        like something else entirely. `_search_terms` used to strip
+        the `ne:` prefix as it cleaned each term, and this method used
+        to call `_search_terms` - so by the time the marker was
+        looked for, it was already gone. Every term landed in the
+        "other" group and the Nepali group was empty, always, and the
+        feed was a hundred per cent "other" no matter what the
+        operator put in the list.
+        """
+        other: list[str] = []
+        nepali: list[str] = []
+
+        for term, is_nepali in self._marked_terms():
+            if is_nepali:
+                nepali.append(term)
+            else:
+                other.append(term)
+
+        return other, nepali
+
     def _search_terms(self) -> list[str]:
         """
         The configured terms, cleaned and bounded.
+
+        The terms themselves, without the Nepali flag: this is what
+        the search expression is built from, and the flag is not part
+        of the term.
+        """
+        return [term for term, _ in self._marked_terms()]
+
+    def _marked_terms(self) -> list[tuple[str, bool]]:
+        """
+        The configured terms, cleaned and bounded, each with the flag
+        that says whether it belongs to the Nepali group.
+
+        This is the one parser. `_search_terms` and `_grouped_terms`
+        both read it, so the two can never disagree about which terms
+        exist or which of them are Nepali.
 
         A term has to be a plain word for `intitle:` to mean anything,
         and a term that is not plain is a search expression in its own
@@ -1618,13 +1991,32 @@ class WikimediaSource(_BaseSource):
         Silently widening the search is worse than not searching at all.
         """
         raw = (self.hint or "").replace("\n", ",")
-        terms: list[str] = []
-        seen: set[str] = set()
+        terms: list[tuple[str, bool]] = []
+        seen: set[tuple[str, bool]] = set()
 
         for candidate in raw.split(","):
             term = candidate.strip()
             if not term:
                 continue
+
+            # THE NEPALI MARKER
+            #
+            # `ne:` marks a term as one of the Nepali group. It is
+            # stripped here, before the term is checked for being a
+            # plain word or a phrase, because the marker is not part
+            # of the term and the search expression must not carry
+            # it.
+            #
+            # What is left of it is a FLAG rather than a prefix on the
+            # term: the flag is what the grouping reads, and it has to
+            # survive the cleaning, because a marker that is thrown
+            # away here is a marker that no group is ever built from.
+            is_nepali = False
+            if term.lower().startswith("ne:"):
+                term = term[3:].strip()
+                if not term:
+                    continue
+                is_nepali = True
 
             # A CATEGORY term, written `cat:Videos of Rain`.
             #
@@ -1675,11 +2067,13 @@ class WikimediaSource(_BaseSource):
                 # Punctuation, or a single non-alphanumeric word.
                 continue
 
-            key = term.lower()
+            # The flag is part of the key, so the same word may be
+            # searched once for each group if the operator asks for it.
+            key = (term.lower(), is_nepali)
             if key in seen:
                 continue
             seen.add(key)
-            terms.append(term)
+            terms.append((term, is_nepali))
 
             if len(terms) >= MAX_SEARCH_TERMS:
                 break
@@ -2301,6 +2695,7 @@ class PexelsSource(_BaseSource):
         # date-ordered, and pretending otherwise would be a lie in a
         # field the UI reads as a date.
         return reels
+
 
     def _pick_rendition(self, files: Any) -> dict | None:
         """

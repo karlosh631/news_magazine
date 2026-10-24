@@ -1150,9 +1150,99 @@ class GenericRssAdapter(SourceAdapter):
 
                 documents.append(response.text)
 
+            # A FEED THAT WAS FETCHED AND CANNOT BE READ
+            # ------------------------------------------
+            # The publisher answered 200 and the body is not a feed:
+            # an HTML error page, a challenge, a truncated document.
+            #
+            # The repair in `_parse_feed_document` fixes a MALFORMED
+            # feed - a stray control character, a bare ampersand. It
+            # cannot fix a body that is not a feed at all, and a body
+            # that is not a feed is what this publisher serves the
+            # runner: the same URL answers a browser with the feed
+            # and the runner with a page that is not one.
+            #
+            # The reader proxy fetches from an address the publisher
+            # does not refuse, and it is the only tier that can see a
+            # clean copy of a feed whose body is a block page. So the
+            # feed is asked for once more, from there, and the copy
+            # that parses is the one that is used.
+            #
+            # It is one request, and only for a feed that has already
+            # failed to parse — which is a feed that is worth one.
+            if documents and not self._any_readable(documents):
+                recovered = await self._read_unreadable_feed(
+                    urls, client, headers
+                )
+                if recovered:
+                    documents = [recovered]
+
         self._documents = documents
 
         return documents[0]
+
+    def _any_readable(self, documents: list[str]) -> bool:
+        """Whether any of these documents holds at least one entry."""
+        for document in documents:
+            try:
+                parsed, _repaired, _error = _parse_feed_document(document)
+            except Exception:  # noqa: BLE001
+                continue
+            if getattr(parsed, "entries", None):
+                return True
+        return False
+
+    async def _read_unreadable_feed(
+        self,
+        urls: list[str],
+        client: httpx.AsyncClient,
+        headers: dict,
+    ) -> str | None:
+        """
+        Read a feed that was fetched and could not be read.
+
+        The body the publisher served this address is not a feed. The
+        reader proxy fetches the same URL from an address the publisher
+        does not refuse, and its copy usually is one.
+
+        Returns the body that parses, or None. It never raises: a
+        fallback that raises is not a fallback.
+        """
+        if not getattr(self.settings, "reader_proxy_enabled", True):
+            return None
+
+        for url in urls:
+            try:
+                text = await fetch_via_reader(
+                    url,
+                    client,
+                    proxy=self.settings.reader_proxy_url,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.info(
+                    "Could not read %s through the reader: %s",
+                    url[:120],
+                    str(exc)[:160],
+                )
+                continue
+
+            if not text or not text.strip():
+                continue
+
+            try:
+                parsed, _repaired, _error = _parse_feed_document(text)
+            except Exception:  # noqa: BLE001
+                continue
+
+            if getattr(parsed, "entries", None):
+                logger.info(
+                    "%s served a body that is not a feed; the feed was "
+                    "read through the reader instead.",
+                    self.source.get("name"),
+                )
+                return text
+
+        return None
 
     def _bare_feed_url(self, url: str) -> str:
         """

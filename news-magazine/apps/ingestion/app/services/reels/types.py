@@ -67,6 +67,21 @@ class Reel:
     duration_seconds: float | None = None
     published_at: str | None = None
 
+    # Which MIX BUCKET this clip came from.
+    #
+    # "nepali" and "other" are the two buckets the reels page is
+    # mixed from: the reader asked for about seventy per cent of the
+    # feed from the wider Hindi and international entertainment pool
+    # and about thirty from the Nepali one.
+    #
+    # This is metadata about the pass, not about the video: it says
+    # which search term found it, not what language it is spoken in.
+    # The store does NOT persist it - the reels table has no column
+    # for it and must not grow one for a transient mix bucket - but
+    # it is on the type because a mix nobody can measure is a mix
+    # nobody can check, and the check is a test.
+    language_group: str | None = None
+
     def __post_init__(self) -> None:
         if not self.source_key:
             raise ValueError("Reel.source_key is required")

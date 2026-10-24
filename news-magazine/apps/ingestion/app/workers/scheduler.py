@@ -730,12 +730,21 @@ async def _sync_reels_body() -> None:
             # this name local to the function for the whole of it, so the
             # read above would raise UnboundLocalError without it.
             global _reels_pass
-            rotated = terms[_reels_pass % len(terms)]
+            start = _reels_pass % len(terms)
             _reels_pass += 1
-            # The rotated term first, so a provider that reads only the
-            # first one still rotates; the rest follow for the providers
-            # that can use them all.
-            hint = ",".join([rotated] + [t for t in terms if t != rotated])
+            # The WHOLE list is rotated, not just its head.
+            #
+            # It used to put one term first and leave the rest in their
+            # original order, which meant the tail of the list never
+            # moved: the same terms were searched first on every pass
+            # for ever. With the terms interleaved, the tail is where
+            # the Nepali ones are, so rotating the head alone changed
+            # which term led the pass and nothing else.
+            #
+            # Rotating the list moves every term: the pass that led
+            # with `folk song` leads with `sangeet` next time, and the
+            # deep bands a provider walks land on different results.
+            hint = ",".join(terms[start:] + terms[:start])
 
         # Pools are built — and cleared — once per pass, before any
         # provider runs. Resetting here is what lets a quota that

@@ -560,10 +560,108 @@ class Settings(BaseSettings):
     # couple of hundred files, which is what Commons has and not one
     # more. A hundred thousand reels is not reachable from a keyless
     # source; it needs Pexels, Pixabay or YouTube.
+    # WHAT THE REELS PAGE SEARCHES FOR
+    # ---------------------------------
+    # The reader asked for ENTERTAINMENT: songs, music, clips, the
+    # kind of thing a reels feed is for. It was getting the Himalaya,
+    # the Everest, the Kathmandu Valley, and a handful of public
+    # service announcements about cancer, and the same handful for
+    # ever.
+    #
+    # So the terms are entertainment terms now, and they are in two
+    # groups:
+    #
+    #   - a term marked `ne:` is a NEPALI one;
+    #   - everything else is the wider Hindi and international pool.
+    #
+    # The reader asked for roughly seventy per cent of the reels from
+    # the second group and thirty from the first, and the provider
+    # enforces that ratio on the CLIPS rather than leaving it to
+    # chance - Commons holds twenty-five results for `dance` and one
+    # for `bollywood song`.
+    #
+    # EVERY TERM HERE WAS MEASURED against the live Commons API on
+    # 2026-10-24, with the provider's own search expression
+    # (`filetype:video -incategory:"Non-free files" intitle:<term>`), and
+    # every one of them was read TITLE BY TITLE, because a term can
+    # return twelve results that are all exactly what was wanted, or
+    # twelve that are not:
+    #
+    #   folk song  -> "EIOC Puadhi Punjabi folk song sung by women",
+    #                 "Bhili Folk Song"
+    #   song       -> "Dogri Folk song", "Kodava Prayer Song"
+    #   music video-> "One Step Closer Music Video"
+    #   official video -> "C'est ton Jour (Official Video)"
+    #   dance performance -> "Odissi Dance Performance by Odia little girl"
+    #   stage performance -> "Kalarab's Stage Performance"
+    #   live performance -> "Wiyaala live performance"
+    #   kirtan     -> "Ratha Jatra Kirtan at Koksara"
+    #   bhajan     -> "Kakada Bhajan", "A Bhajan at ISKCON Ujjain"
+    #   qawwali    -> two recordings
+    #   bihu       -> "Bihu dancers from Dhakuakhana Assam"
+    #   kalam      -> "Qissa Sassi Punnu (Part-1)"
+    #   tribal dance -> "Santali tribal Dance, Mayurbhanja, Odisha"
+    #   violin     -> instrumental recordings
+    #   tabla      -> tabla players
+    #
+    # and the NEPALI ones, which are few because Commons holds few:
+    #
+    #   tharu folk song -> twelve, all of them music:
+    #                 "Lali pagariya", "Bhami yelai Mahadev",
+    #                 "Eastern Tharu folk song sung while offering
+    #                 evening prayers"
+    #   sangeet    -> "Rabindra Sangeet - 38th International"
+    #   newari     -> "Bhairab Dance - Newari Cultural Dance",
+    #                 "Music Newari Culture"
+    #   bhairab    -> "Bhairab Dance - Newari Cultural Dance"
+    #   dhol       -> "Shiv Garjana Dhol Tasha Pathak Group"
+    #   jatra      -> "Ratha Jatra 2024 at Bypass, Bhadrak"
+    #   mantra     -> "Shanti Mantra", "Deva Premal & Miten - Gayatri"
+    #   lumbini    -> "2010 Sakya Monlam Prayer Festival, Lumbini, Nepal"
+    #   monlam     -> the same festival, found another way
+    #
+    # and the terms that were MEASURED AND REJECTED, because their
+    # results were not what they sounded like:
+    #
+    #   pop     -> NASA's "Pop-Up" videos
+    #   music   -> military "Range Reel (Music Only)" videos
+    #   madal   -> "Trump Is Mad About Mueller Report"
+    #   band    -> the air force band
+    #   concert -> the navy band
+    #   singing -> cicadas
+    #   guitar  -> Blinken playing guitar
+    #   hindi   -> a prime minister's address and a tutorial
+    #   ghat    -> "Forest Fires in Ghat, Chamoli, Uttarakhand"
+    #   tharu   -> the "Eastern Tharu riddle" series: nine clips of
+    #              somebody explaining which vegetable is which
+    #   nepali  -> "How to write in Nepali wiki", a login tutorial
+    #   nepalese-> "Nepal Railway, Janakpur 20200918", a note about a
+    #              diplomatic presence
+    #   mandala -> a sand mandala, and a Wikimedia talk
+    #   bhasa   -> a Blender tutorial, and a song
+    #   pooja   -> a chess tournament and a talk
+    #   durbar  -> the Delhi Durbar of 1911
+    #   nepal dance, nepali dance, kathmandu dance,
+    #   himalayan dance, sherpa dance, newar, kutumba,
+    #   charya   -> nothing at all
+    #
+    # The list is one comma-separated string so the operator can still
+    # change it from one place, and the terms are INTERLEAVED so that
+    # the request budget is spent evenly across both groups rather
+    # than on the first terms in the list. The budget is small - the
+    # provider asks for every term's newest page and then spends what
+    # is left on the deeper bands - so the order of the list matters
+    # less than it used to, and the list is rotated whole on every
+    # pass so that the deeper bands move.
     reels_search_terms: str | None = (
-        "nepal,tharu,himalayan,kathmandu,langtang,janakpur,"
-        "bhaktapur,bagmati,pashupatinath,bhairahawa,"
-        "cat:Videos of the Himalayas,cat:Videos of Mount Everest"
+        "folk song,music video,official video,song,stage performance,live performance,"
+        "dance performance,ne:tharu folk song,ne:sangeet,"
+        "dance,kirtan,bhajan,qawwali,bihu,kalam,tribal dance,"
+        "ne:newari,ne:bhairab,ne:dhol,"
+        "punjabi folk,marathi folk,rajasthani folk,violin,classical dance,garba,"
+        "wedding song,ne:jatra,ne:mantra,"
+        "bollywood,noh,instrument,ne:lumbini,"
+        "tabla,ne:monlam"
     )
     reels_http_timeout: float = 20.0
     # Hard ceiling on one whole reels pass.

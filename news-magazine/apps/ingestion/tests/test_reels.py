@@ -3168,7 +3168,13 @@ def test_a_long_term_list_is_not_amputated_mid_word():
 
     assert source.hint == raw, "the hint was truncated before parsing"
     for term in (t for t in raw.split(",") if t.strip()):
-        assert term.strip() in terms, f"{term.strip()!r} never reached the search"
+        # `ne:` marks a term as one of the Nepali group. It is a
+        # marker and not part of the term, so the term that reaches
+        # the search is the one behind it.
+        cleaned = term.strip()
+        if cleaned.lower().startswith("ne:"):
+            cleaned = cleaned[3:].strip()
+        assert cleaned in terms, f"{cleaned!r} never reached the search"
 
 
 def test_the_hint_is_still_bounded():
@@ -3189,48 +3195,89 @@ def test_the_hint_is_still_bounded():
 
 def test_the_default_term_list_is_a_mix_and_still_on_topic():
     """
-    The twelve-term default is the whole reason the Reels tab moved at
-    all, so its shape is pinned here.
+    The default list is the whole reason the Reels tab moved at all, so
+    its shape is pinned here.
 
     It was twelve place names, five of which were the same mountain,
-    which resolved to one small pool of climbing footage. It is now the
-    measured on-topic maximum: the Nepali and regional place names that
-    actually return Nepali video, plus the two Commons categories that
-    do.
+    which resolved to one small pool of climbing footage. The reader
+    then asked for ENTERTAINMENT - songs, music, clips - and the list
+    became the measured entertainment catalogue: thirty-four terms in
+    two groups, about seventy per cent of the wider Hindi and
+    international pool and about thirty from the Nepali one.
 
-    The generic subject categories were measured and rejected — they
-    return Sonoma County, the Adige in Italy and the Czech Republic —
-    so this list stays place-based on purpose.
+    The shape that matters is pinned here rather than the exact terms:
+    the exact terms change with every measurement, and what must not
+    change is that there are two groups, that the Nepali one is
+    marked, that neither group is empty, and that no term is one that
+    was MEASURED AND REJECTED.
     """
     from app.config import get_settings
 
-    terms = _commons(get_settings().reels_search_terms)._search_terms()
-    categories = [t for t in terms if t.startswith("cat:")]
-    titles = [t for t in terms if not t.startswith("cat:")]
+    raw = get_settings().reels_search_terms or ""
+    source = _commons(raw)
+    other, nepali = source._grouped_terms()
 
-    assert len(terms) == 12, terms
-    assert len(categories) == 2, terms
-    assert len(titles) == 10, terms
-    assert any(t.lower() == "nepal" for t in titles), terms
+    # Two groups, neither of them empty.
+    assert other, "the wider entertainment group is empty"
+    assert nepali, "the Nepali group is empty"
 
-    # Every term must be one that was actually measured to return
-    # Nepali or regional video. A term that measures zero is dead
-    # weight: it costs a request every pass and finds nothing.
-    measured = {
-        "nepal",
+    # The Nepali terms are marked in the list itself, so the operator
+    # edits one comma-separated string and the groups still come out.
+    marked = [t for t in raw.split(",") if t.strip().lower().startswith("ne:")]
+    assert len(marked) == len(nepali), (marked, nepali)
+
+    # Roughly seventy-thirty, the reader's own numbers.
+    share = len(nepali) / (len(other) + len(nepali))
+    assert 0.15 < share < 0.40, share
+
+    # Every term is a plain word or a phrase of words. A category term
+    # is allowed - but the shipped list has none, and a category that
+    # returns Sonoma County is what the list used to have.
+    assert not [t for t in other + nepali if t.startswith("cat:")]
+
+    # And nothing that was measured and found wanting.
+    #
+    # Each of these was searched against the live Commons API and its
+    # results read one by one. They are pinned here so that nobody
+    # puts them back: every one of them costs a request every pass and
+    # brings the wrong thing.
+    rejected = {
+        # NASA's "Pop-Up" videos
+        "pop",
+        # military "Range Reel (Music Only)" videos
+        "music",
+        # "Trump Is Mad About Mueller Report"
+        "madal",
+        # the air force band
+        "band",
+        # the navy band
+        "concert",
+        # cicadas
+        "singing",
+        # Blinken playing guitar
+        "guitar",
+        # a prime minister's address and a tutorial
+        "hindi",
+        # "Forest Fires in Ghat, Chamoli, Uttarakhand"
+        "ghat",
+        # the "Eastern Tharu riddle" series
         "tharu",
-        "himalayan",
-        "kathmandu",
-        "langtang",
-        "janakpur",
-        "bhaktapur",
-        "bagmati",
-        "pashupatinath",
-        "bhairahawa",
-        "cat:Videos of the Himalayas",
-        "cat:Videos of Mount Everest",
+        # "How to write in Nepali wiki", a login tutorial
+        "nepali",
+        # "Nepal Railway, Janakpur", a note about a diplomatic presence
+        "nepalese",
+        # a sand mandala, and a Wikimedia talk
+        "mandala",
+        # a Blender tutorial, and a song
+        "bhasa",
+        # a chess tournament and a talk
+        "pooja",
+        # the Delhi Durbar of 1911
+        "durbar",
     }
-    assert set(terms) == measured, sorted(set(terms) ^ measured)
+    assert not (set(other + nepali) & rejected), sorted(
+        set(other + nepali) & rejected
+    )
 
 
 def test_no_default_term_is_a_word_with_a_second_meaning():

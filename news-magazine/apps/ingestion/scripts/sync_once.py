@@ -26,6 +26,14 @@ news, so the category keeps moving even when the worker is down. The
 worker still runs its own pass, and the two are safe to overlap: the
 store upserts on (source_key, external_id).
 
+The pass also runs the BUILT-IN reels provider — this site's own news,
+turned into reels. The other providers are searches over other people's
+catalogues, and a search over a finished catalogue returns the same
+results for ever: the pass reported success, stored nothing, and the
+Reels page said "245 clips in the catalogue, 0 clips fetched today".
+A new article is a new reel by construction, so the category moves in
+step with the news, with no API key configured at all.
+
 THE ALMANAC RUNS HERE TOO
 -------------------------
 For the same reason and one more time. The panchang and the twelve
@@ -159,7 +167,7 @@ async def main() -> int:
     # non-fatal: a reels failure must not turn a green news run red,
     # and a green news run must not be reported as if reels had also
     # succeeded.
-    reels_ok = await sync_reels_once()
+    reels_ok = await sync_reels_once(db)
 
     # ---- The almanac ----
     #
@@ -369,7 +377,7 @@ async def sync_panchang_once() -> bool:
         return False
 
 
-async def sync_reels_once() -> bool:
+async def sync_reels_once(db=None) -> bool:
     """
     One reels pass, using the same code the worker's scheduler runs.
 
@@ -378,21 +386,79 @@ async def sync_reels_once() -> bool:
     holding the slot, the per-provider poll intervals, the key pools
     and the health reporting are all the same.
 
+    THE BUILT-IN PROVIDER RUNS HERE TOO
+    -----------------------------------
+    Every provider `_sync_reels` knows about is a search over somebody
+    else's catalogue, and a search over a finished catalogue returns
+    the same results for ever: the pass reported success and stored
+    nothing, which is how the Reels page came to say "245 clips in the
+    catalogue, 0 clips fetched today".
+
+    So the pass also runs the one provider that cannot run dry — this
+    site's own news, turned into reels. A new article is a new reel by
+    construction, so the category moves in step with the news page, on
+    a deploy with no API key configured at all.
+
     Returns True when the pass ran, False when it did not. It never
     raises: the reels category is optional, and a broken reels pass
     must not take the news sync down with it.
     """
     try:
         from app.workers.scheduler import _sync_reels
+        from app.services.reels.builtin import ingest_article_reels
+
+        db = db or get_db()
+        before = await _reels_catalogue_size(db)
 
         print("\nSyncing reels...\n")
+
+        # The built-in provider first: it is the one that cannot fail
+        # to be fresh, and it costs two queries and no requests.
+        article_health = await ingest_article_reels(db)
+
         await _sync_reels()
+
+        after = await _reels_catalogue_size(db)
+        added = max(after - before, 0)
+
+        for item in article_health:
+            if item.error:
+                print(f"::warning::The article reels pass failed: {item.error}")
+
+        print(
+            f"  {added} new clip(s) stored; {after} in the catalogue. "
+            f"Article reels: {sum(int(h.stored or 0) for h in article_health)}."
+        )
+        # The count, not just a green tick. "REELS_OK=1" on its own
+        # said nothing about whether anything was found, which is
+        # exactly how a pass that found nothing for a week looked
+        # healthy.
+        print(f"REELS_STORED={added}")
         print("REELS_OK=1")
         return True
     except Exception as exc:  # noqa: BLE001
         print(f"::warning::Reels pass failed: {exc}")
         print("REELS_OK=0")
         return False
+
+
+async def _reels_catalogue_size(db) -> int:
+    """
+    How many clips the catalogue holds right now. Never raises.
+
+    Read either side of the reels pass, so the log can say how many
+    clips the pass actually ADDED rather than only that it ran. A pass
+    that finds nothing new and a pass that finds a hundred clips are
+    the same log line otherwise, which is how a frozen category looked
+    like a healthy one.
+    """
+    try:
+        response = await db_call(
+            lambda: db.table("reels").select("id", count="exact").limit(1).execute()
+        )
+        return int(getattr(response, "count", 0) or 0)
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 if __name__ == "__main__":

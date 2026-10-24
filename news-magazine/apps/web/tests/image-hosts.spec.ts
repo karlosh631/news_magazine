@@ -163,19 +163,23 @@ test.describe("merging a batch into a running feed", () => {
     expect(merged[0]!.source_count).toBe(1);
   });
 
-  test("the newest FETCHED comes first, whatever order it was published in", () => {
-    // The page is the newest FETCHED. The reader asked for it in the
-    // same words several times: "the new articles must be shown on the
-    // top based on the time immediatley fetch".
+  test("the newest PUBLISHED comes first, whatever order it was fetched in", () => {
+    // The page is the newest NEWS. The reader said it in the same
+    // words several times: "too much gap between the new news and real
+    // time" - and the measurement said why it mattered. Ordered by
+    // arrival, the top card of the live feed carried a publication
+    // time of nine minutes and forty seconds old while the cards
+    // directly beneath it carried four minutes. A page whose first
+    // headline is older than its second headline reads as broken.
     //
-    // The helper is (id, ingested, published): "early" was published an
-    // hour before "late", but it was fetched after it - so it is the
-    // one the reader sees, because it arrived last.
+    // The helper is (id, ingested, published): "early" was FETCHED after
+    // "late" but PUBLISHED an hour before it - so it is not the one the
+    // reader sees, because it is not the newest news.
     const publishedEarlier = story("early", "2026-10-20T11:00:00Z", "2026-10-20T10:00:00Z");
     const publishedLater = story("late", "2026-10-20T08:00:00Z", "2026-10-20T11:00:00Z");
     expect(
       [publishedEarlier, publishedLater].sort(byNewest).map((a) => a.id)
-    ).toEqual(["early", "late"]);
+    ).toEqual(["late", "early"]);
   });
 
   test("within one arrival, the id breaks the tie", () => {

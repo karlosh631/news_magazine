@@ -86,11 +86,19 @@ test.describe("a story that arrives", () => {
     expect(mergeArticles(current, [])).toBe(current);
   });
 
-  test("a story published an hour ago and fetched just now IS an arrival", () => {
-    // The archive and the news arrive together. The feed is ordered by
-    // ARRIVAL, so the story the publisher sat on for an hour is new to
-    // this site and lands at the top - which is what the reader asked
-    // for, and what the old publication-time rule refused to do.
+  test("a story published an hour ago and fetched just now SITS WHERE IT WAS PUBLISHED", () => {
+    // The archive and the news arrive together. The page is ordered by
+    // PUBLICATION, so the story the publisher sat on for an hour does
+    // not land at the top - it takes the place its publication time
+    // gives it.
+    //
+    // This is the other side of the same coin. The feed used to be
+    // ordered by arrival, and then the top of the live page carried a
+    // publication time of nine minutes and forty seconds while the
+    // cards beneath it carried four. A reader sees a page whose first
+    // headline is older than its second headline and concludes the
+    // site is ten minutes behind - which is what "too much gap
+    // between the new news and real time" was.
     const current = [row("a", "2026-10-23T10:00:00Z", "2026-10-23T10:00:00Z")];
     const fresh = [
       row("old-but-new", "2026-10-23T09:00:00Z", "2026-10-23T10:30:00Z"),
@@ -98,8 +106,8 @@ test.describe("a story that arrives", () => {
     ];
 
     expect(mergeArticles(current, fresh).map((r) => r.id)).toEqual([
-      "old-but-new",
       "a",
+      "old-but-new",
     ]);
   });
 
@@ -187,28 +195,44 @@ test.describe("a whole batch that arrives at once", () => {
 });
 
 test.describe("the order of a fresh page", () => {
-  test("is the newest FETCHED first", () => {
+  test("is the newest PUBLISHED first", () => {
     const rows = [
       row("older", "2026-10-23T10:00:00Z", "2026-10-23T08:00:00Z"),
       row("newer", "2026-10-23T08:00:00Z", "2026-10-23T10:00:00Z"),
     ];
 
     expect([...rows].sort(byNewest).map((r) => r.id)).toEqual([
-      "newer",
       "older",
+      "newer",
     ]);
   });
 
-  test("a story fetched just now but published an hour ago IS the newest", () => {
-    // The rule the reader asked for, in one assertion.
+  test("a story fetched just now but published an hour ago is NOT the newest", () => {
+    // The rule the reader asked for, in one assertion - and it is the
+    // one that makes the top of the page look like the news instead of
+    // like the fetch.
     const rows = [
       row("old-but-new", "2026-10-23T09:00:00Z", "2026-10-23T10:30:00Z"),
       row("newest", "2026-10-23T10:00:00Z", "2026-10-23T10:10:00Z"),
     ];
 
     expect([...rows].sort(byNewest).map((r) => r.id)).toEqual([
-      "old-but-new",
       "newest",
+      "old-but-new",
+    ]);
+  });
+
+  test("within one publication moment, the most recently FETCHED comes first", () => {
+    // Two copies of the same story, published in the same second. The
+    // copy we fetched last is the one with the better picture.
+    const rows = [
+      row("first", "2026-10-23T10:00:00Z", "2026-10-23T09:00:00Z"),
+      row("second", "2026-10-23T10:00:00Z", "2026-10-23T10:10:00Z"),
+    ];
+
+    expect([...rows].sort(byNewest).map((r) => r.id)).toEqual([
+      "second",
+      "first",
     ]);
   });
 });

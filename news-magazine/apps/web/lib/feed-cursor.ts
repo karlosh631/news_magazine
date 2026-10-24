@@ -1,39 +1,42 @@
 /**
- * The feed's ordering, and the keyset cursor that pages through it.
+ * The feed's keyset cursor, and the order it pages in.
  *
  * WHY THIS IS A SEPARATE FILE
  * ---------------------------
- * The order the feed is shown in and the cursor that pages through it
+ * The order the cursor pages in and the cursor that pages through it
  * are ONE decision, not two. If they disagree, the page boundary falls
  * in the wrong place and the reader silently loses stories — no error,
  * no empty page, just rows that were never shown. Keeping them
  * together, and testable without a database, is the only way to know
  * they still agree.
  *
- * ORDER OF ARRIVAL, NOT PUBLICATION TIME
- * ---------------------------------------
- * The feed is ordered by `ingested_at` — when WE fetched the story —
- * with `id` as the tiebreaker.
+ * THE CURSOR PAGES BY ARRIVAL; THE PAGE IS DISPLAYED BY PUBLICATION
+ * ----------------------------------------------------------------
+ * These are two different orders and both of them are right, for two
+ * different jobs.
  *
- * The reader asked for this, repeatedly and in the same words:
+ *   - The CURSOR pages by `ingested_at` — when WE fetched the story.
+ *     The keyset filter below is the boolean identity of "strictly
+ *     below the cursor", and it has to address the very order the
+ *     query returns its rows in, or a page boundary skips rows.
  *
- *     "the new articles must be shown on the top based on the time
- *      immediatley fetch show them on ui and unitll new come new show
- *      and move old abit down and same new always on top"
+ *   - The PAGE is DISPLAYED by `published_at` — when the story was
+ *     published — with arrival as the tiebreaker. That is the order
+ *     the reader reads, and it is the order the news happened in.
  *
- * and the measurement says why it matters. Of the newest 500 stories
- * the site holds, only 15 had been fetched in the last hour — the
- * pipeline fetches about 250 rows a pass, and most of them are the
- * archive catching up. So a feed ordered by publication time barely
- * moves: the reader reloaded and found one or two new cards at the
- * top, and everything the system had just fetched was somewhere
- * further down, ordered by when the outlets published it rather than
- * by when it arrived here.
+ * The feed was displayed by arrival for a while, and the measurement
+ * said it was wrong: the top card of the live feed carried a
+ * publication time of nine minutes and forty seconds old while the
+ * cards directly beneath it carried four minutes. A page whose first
+ * headline is older than its second headline reads as ten minutes
+ * behind, and the reader said exactly that — "too much gap between
+ * the new news and real time".
  *
- * Ordered by arrival, the top of the page IS the last fetch. The whole
- * batch lands there, in the order it was fetched, and the previous
- * batch moves down. That is what "the maximum number of articles on
- * top until new ones arrive" means.
+ * So the query CUTS the page in arrival order, the cursor is taken
+ * from the cut, and the rows are then DISPLAYED in publication order.
+ * The two have to be applied in that order: cut first, then display.
+ * A page cut in publication order and paged by arrival loses every
+ * row between the cut and the display.
  *
  * THE NEW BADGE IS A DIFFERENT RULE
  * ----------------------------------
@@ -41,8 +44,8 @@
  * the reader stops believing it. The badge stays on PUBLICATION
  * recency — about twenty minutes — and the reader said so explicitly:
  * "the new must be of near by 20min +- other all old doonot highliht
- * them". So the list is ordered by arrival and the badge is about
- * publication, and the two never disagree about what "new" means.
+ * them". So the list is ordered by publication and the badge is about
+ * publication too, and the two never disagree about what "new" means.
  */
 
 /** Where the next page of the feed starts. */
@@ -117,12 +120,16 @@ export function cursorAfter(article: {
 }
 
 /**
- * The order the feed is shown in, for the client.
+ * The order the CURSOR pages in, as a comparator.
  *
  * The same rule as the query, expressed as a comparator: arrival
  * first, the id as the tiebreaker. It has to agree with the query's
  * ordering, because the two are the same decision seen from two
  * sides.
+ *
+ * It is NOT the order the reader sees. That one is by publication
+ * time, and it lives in lib/feed-merge.ts (`byNewest`) — see the note
+ * at the top of this file about which order is which.
  */
 export function byArrival<
   T extends {

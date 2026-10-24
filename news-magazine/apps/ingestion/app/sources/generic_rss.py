@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import logging
 import re
 from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse
@@ -30,6 +31,13 @@ import feedparser
 import httpx
 
 from app.sources.base import NormalizedArticle, SourceAdapter
+from app.sources import local_reader
+from app.sources.reader_proxy import (
+    BLOCKED_STATUS_CODES,
+    fetch_via_reader,
+)
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +185,203 @@ def build_feed_urls(feed_url: str, settings) -> list[str]:
             urls.append(extend(base, f"paged={page}"))
 
     return urls
+
+
+# ---------------------------------------------------------------------------
+# XML REPAIR
+#
+# A FEED IS NOT ALWAYS WELL-FORMED
+# -------------------------------
+# One Nepali publisher serves a feed that is not valid XML, and the
+# error it produced was this, every two minutes, all day:
+#
+#     Unable to parse RSS/Atom feed: <unknown>:9:14: not well-formed
+#     (invalid token)
+#
+# That is expat's way of saying "there is a byte in this document that
+# XML does not allow". The usual culprits are a raw control character
+# (a vertical tab or a form feed pasted out of a Word document into
+# the editor), a byte-order mark in the middle of the document, and a
+# bare `&` where an entity was meant.
+#
+# The document is not garbage. It carries the outlet's headlines, and
+# the headlines are the whole point of the pass. So the body is
+# REPAIRED before it is parsed, and the error is reported only if the
+# repaired body still fails - which is the difference between one
+# broken feed and one silent publisher.
+# ---------------------------------------------------------------------------
+
+#: The characters XML 1.0 does not allow in a document.
+#:
+#: Everything below 0x20 except tab (0x09), newline (0x0A) and
+#: carriage return (0x0D), plus 0x7F (DEL). A vertical tab (0x0B) or
+#: a form feed (0x0C) pasted out of a word processor into a headline
+#: is the classic one, and it is invisible in every editor.
+_XML_ILLEGAL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+#: The byte-order mark, as a character.
+_BOM = "﻿"
+
+#: A `&` that does not begin a valid XML entity reference.
+#:
+#: XML knows five named entities (amp, lt, gt, quot, apos) and numeric
+#: character references. Everything else - `&nbsp;` included - is not
+#: a valid reference, and expat rejects it.
+_BARE_AMPERSAND_RE = re.compile(
+    r"&(?!(?:amp|lt|gt|quot|apos|#[0-9]+|#[xX][0-9a-fA-F]+);)"
+)
+
+
+def sanitize_xml_text(text: str) -> str:
+    """
+    Remove the bytes XML does not allow from a document.
+
+    Three things are removed, and only these three:
+
+        - a byte-order mark, wherever it is (one at the start is
+          legal, one in the middle is not, and one at the start of a
+          document that was decoded as UTF-8 is a byte the parser
+          may not expect);
+        - every control character below 0x20 except tab, newline and
+          carriage return;
+        - 0x7F, DEL, which is legal in XML 1.1 and not in XML 1.0.
+
+    Nothing else is touched. The text, the entities and the markup
+    are left exactly as the publisher wrote them.
+    """
+    if not text:
+        return text
+
+    cleaned = text.replace(_BOM, "")
+    return _XML_ILLEGAL_RE.sub("", cleaned)
+
+
+def _escape_bare_ampersands(text: str) -> str:
+    """
+    Escape the `&` that do not begin a valid XML entity reference.
+
+    The last resort, and only used when everything else has failed:
+    it changes the document's meaning slightly (`&nbsp;` becomes the
+    four characters `&amp;nbsp;`), which is why it is tried last.
+    """
+    return _BARE_AMPERSAND_RE.sub("&amp;", text)
+
+
+def _recover_with_lxml(text: str) -> str | None:
+    """
+    Rebuild a malformed document with lxml's recovering parser.
+
+    lxml is in requirements.txt, but the import is guarded anyway:
+    a feed must never be the reason the worker stops, and a missing
+    optional parser must not become one.
+
+    Returns the rebuilt document, or None when lxml could not help.
+    """
+    try:
+        from lxml import etree
+    except Exception:  # pragma: no cover - lxml is in requirements.txt
+        return None
+
+    try:
+        parser = etree.XMLParser(
+            recover=True,
+            resolve_entities=False,
+            no_network=True,
+            huge_tree=False,
+        )
+        root = etree.fromstring(text.encode("utf-8"), parser)
+    except Exception:
+        return None
+
+    if root is None:
+        return None
+
+    try:
+        return etree.tostring(root, encoding="unicode")
+    except Exception:
+        return None
+
+
+def _repair_candidates(document: str) -> list[str]:
+    """
+    The repaired forms of a malformed document, cheapest first.
+
+    Each one is a document that MIGHT parse. They are tried in order
+    and the first that yields entries wins.
+    """
+    candidates: list[str] = []
+
+    sanitised = sanitize_xml_text(document)
+    if sanitised != document:
+        candidates.append(sanitised)
+
+    # The sanitised document may still be malformed, and the commonest
+    # remaining fault is a bare `&`.
+    escaped = _escape_bare_ampersands(sanitised)
+    if escaped != sanitised:
+        candidates.append(escaped)
+
+    recovered = _recover_with_lxml(sanitised)
+    if recovered and recovered != sanitised:
+        candidates.append(recovered)
+
+    return candidates
+
+
+def _parse_feed_document(document: str) -> tuple[object, bool, object | None]:
+    """
+    Parse one feed document, repairing it first if it is malformed.
+
+    Returns three things:
+
+        the parsed feed;
+        whether the document had to be repaired;
+        the fault the ORIGINAL document had, if any.
+
+    The third one is why the second exists. A document that is not
+    well-formed XML is repaired, and a repaired document that is not a
+    feed is still not a feed - the error the operator sees must be the
+    error the PUBLISHER's document had, not the error a document we
+    rewrote happens to have.
+
+    A document that parses as it stands is parsed as it stands: the
+    repair is never paid for unless it is needed.
+    """
+    parsed = feedparser.parse(document)
+
+    if not getattr(parsed, "bozo", False):
+        return parsed, False, None
+
+    original_error = getattr(parsed, "bozo_exception", None)
+
+    best = parsed
+    repaired = False
+
+    for candidate in _repair_candidates(document):
+        attempt = feedparser.parse(candidate)
+        clean = not getattr(attempt, "bozo", False)
+
+        # A repair is only taken when it is at least as good as what
+        # we already had: a document that parses cleanly, or one that
+        # holds MORE entries. feedparser's forgiving parser can
+        # recover entries the strict one would not, so a "clean" but
+        # emptier document is not an improvement.
+        if clean and len(attempt.entries) >= len(best.entries):
+            best = attempt
+            repaired = True
+            break
+        if len(attempt.entries) > len(best.entries):
+            best = attempt
+            repaired = True
+
+    if repaired:
+        logger.info(
+            "Repaired a malformed feed: %s bytes -> %s entries.",
+            len(document),
+            len(best.entries),
+        )
+
+    return best, repaired, original_error
 
 
 # ---------------------------------------------------------------------------
@@ -896,7 +1101,45 @@ class GenericRssAdapter(SourceAdapter):
                     headers=headers,
                 )
 
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    # THE PUBLISHER REFUSED THIS ADDRESS
+                    #
+                    # Nine Nepali publishers answer the CI runner with
+                    # a 403 and answer an ordinary client with a 200:
+                    # the refusal is aimed at the ADDRESS, not at the
+                    # request. One of them publishes its feed at
+                    #
+                    #     https://www.khabarzone.com/feed?posts_per_page=100
+                    #
+                    # and the refusal lost the outlet entirely, every
+                    # pass, with the log saying so:
+                    #
+                    #     Client error '403 Forbidden' for url
+                    #     'https://www.khabarzone.com/feed?posts_per_page=100'
+                    #
+                    # A refusal is not an answer about the feed. So the
+                    # feed is read from an address that has not been
+                    # refused - see app/sources/reader_proxy.py - and
+                    # the query string is dropped first, because a
+                    # publisher that refuses one URL of a path is not
+                    # refusing the path.
+                    text = await self._read_refused_feed(
+                        url, response.status_code, client, headers
+                    )
+
+                    if text is None:
+                        # Nothing worked. The publisher's own answer is
+                        # the one that is reported, because it is the
+                        # one that is true.
+                        response.raise_for_status()
+                        raise ValueError(
+                            f"RSS feed could not be read from "
+                            f"{url} (status {response.status_code}) "
+                            f"and could not be read through the reader."
+                        )
+
+                    documents.append(text)
+                    continue
 
                 # Make sure we actually received content.
                 if not response.text.strip():
@@ -911,6 +1154,97 @@ class GenericRssAdapter(SourceAdapter):
 
         return documents[0]
 
+    def _bare_feed_url(self, url: str) -> str:
+        """
+        The same feed without its query string.
+
+        `?posts_per_page=100` is the parameter this codebase asks a
+        WordPress feed for, and it is a parameter the publisher never
+        asked for. A publisher that refuses the parameterised URL and
+        serves the plain one is not unusual, and the plain one is the
+        URL the publisher itself advertises.
+        """
+        return url.split("?", 1)[0]
+
+    async def _read_refused_feed(
+        self,
+        url: str,
+        status: int,
+        client: httpx.AsyncClient,
+        headers: dict,
+    ) -> str | None:
+        """
+        Read a feed the publisher refused, and return its body.
+
+        Three ways, in this order, and the cheapest first:
+
+            1. the feed without its query string, asked of the
+               publisher directly. One request, no reader budget, and
+               it is the URL the publisher itself advertises;
+            2. the refused URL, read through the reader proxy. The
+               reader is an address these publishers do not refuse;
+            3. the bare URL, read through the reader proxy.
+
+        Returns the feed's body, or None when none of the three
+        answered. It never raises: a fallback that raises is not a
+        fallback.
+        """
+        bare = self._bare_feed_url(url)
+
+        if bare != url:
+            try:
+                if await self.check_allowed(bare):
+                    await self.rate_limiter.wait()
+                    response = await client.get(bare, headers=headers)
+                    if response.status_code < 400 and response.text.strip():
+                        logger.info(
+                            "%s refused %s (status %s); the feed without "
+                            "its query string was served normally.",
+                            self.source.get("name"), url, status,
+                        )
+                        return response.text
+            except Exception as exc:  # noqa: BLE001
+                logger.info(
+                    "Could not fetch %s without its query string: %s",
+                    bare[:120], exc,
+                )
+
+        if not getattr(self.settings, "reader_proxy_enabled", True):
+            return None
+
+        candidates = [url] if bare == url else [url, bare]
+
+        for candidate in candidates:
+            text = await fetch_via_reader(
+                candidate,
+                client,
+                proxy=self.settings.reader_proxy_url,
+            )
+
+            if text and text.strip():
+                logger.info(
+                    "%s refused %s (status %s); the feed was read "
+                    "through the reader instead.",
+                    self.source.get("name"), url, status,
+                )
+                return text
+
+        # The reader could not fetch it either. Read it OURSELVES: one
+        # request, no key, no quota. It cannot reach a publisher that
+        # refuses this address, but it can reach a feed the reader was
+        # too busy to fetch, and it is the tier that cannot expire.
+        for candidate in candidates:
+            text = await local_reader.fetch_html(candidate, client)
+            if text and text.strip():
+                logger.info(
+                    "%s refused %s (status %s); the feed was read "
+                    "ourselves, with no reader in the middle.",
+                    self.source.get("name"), url, status,
+                )
+                return text
+
+        return None
+
     def parse(
         self,
         raw: str,
@@ -922,6 +1256,11 @@ class GenericRssAdapter(SourceAdapter):
         more pages of a WordPress feed there is one per page, and
         their entries are merged here, with a story that appears on
         two pages kept only once.
+
+        A document that is not well-formed XML is REPAIRED first - see
+        _parse_feed_document - because a publisher's stray control
+        character is not a reason to lose its headlines. The error is
+        reported only when the repaired document still cannot be read.
         """
 
         documents = getattr(self, "_documents", None) or [raw]
@@ -931,9 +1270,7 @@ class GenericRssAdapter(SourceAdapter):
         bozo_error = None
 
         for document in documents:
-            parsed = feedparser.parse(
-                document
-            )
+            parsed, _repaired, original_error = _parse_feed_document(document)
 
             # feedparser can report malformed XML.
             if getattr(
@@ -955,6 +1292,14 @@ class GenericRssAdapter(SourceAdapter):
                             None,
                         )
                     continue
+
+            if not parsed.entries:
+                # The repaired document holds no entries either. The
+                # fault to report is the fault the PUBLISHER's
+                # document had, not the fault of the copy we made.
+                if bozo_error is None:
+                    bozo_error = original_error
+                continue
 
             for entry in parsed.entries:
                 item = dict(entry)

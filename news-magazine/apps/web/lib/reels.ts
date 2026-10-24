@@ -18,6 +18,7 @@ import "server-only";
 import type { PostgrestError, SupabaseClient } from "@supabase/supabase-js";
 
 import { isSupabaseConfigured } from "@/lib/news";
+import { ARTICLE_REELS_SOURCE_KEY, isArticleReel } from "@/lib/reel-codec";
 import { createPublicSupabaseClient } from "@/lib/supabase/server";
 
 /**
@@ -54,7 +55,7 @@ export interface Reel {
   id: string;
   /**
    * Which library this clip came from — `pixabay`, `pexels`, `wikimedia`,
-   * `youtube`.
+   * `youtube`, `articles`.
    *
    * This is NOT a display detail. Pixabay's API terms: "If you make use
    * of the API, show your users where the images and videos are from,
@@ -63,6 +64,9 @@ export interface Reel {
    * of a Pixabay clip is a Pixabay user and not the library itself. The
    * card therefore renders the provider on every reel, unconditionally,
    * not inside the disclosure.
+   *
+   * `articles` is the one key that is not a library: it is this site's
+   * own news, stored as a reel. See ARTICLE_REELS_SOURCE_KEY.
    */
   source_key: string | null;
   video_url: string;
@@ -138,6 +142,17 @@ export function createReelsClient(): SupabaseClient {
  * Supabase for the whole catalogue on every scroll.
  */
 export const REELS_READ_REVALIDATE_SECONDS = 15;
+
+/**
+ * The provider key for reels built from this site's own news, and the
+ * test for one.
+ *
+ * They live in lib/reel-codec.ts, which is safe for the browser, and
+ * are re-exported here so the server side can use one name for them.
+ * lib/reels.ts is `server-only` — it holds the database client — and a
+ * client component importing it does not build.
+ */
+export { ARTICLE_REELS_SOURCE_KEY, isArticleReel };
 
 /**
  * The origin every Wikimedia Commons file is served from.
@@ -378,6 +393,11 @@ export function dropRepeatedClips<T extends { id: string; video_url?: string | n
  * be pointed at an mp4 for this source.
  */
 function isPlayableReel(reel: Reel): boolean {
+  // A story reel is a photograph, not a file to decode. It has no
+  // container for a browser to refuse, so it is never dropped here —
+  // the card renders it as a picture.
+  if (isArticleReel(reel)) return true;
+
   const url = ((reel.video_url ?? "").toLowerCase().split("?")[0] ?? "");
   // Ogg Video (Theora) plays in no current browser; .ogg is audio.
   if (url.endsWith(".ogv") || url.endsWith(".ogg") || url.endsWith(".theora")) {

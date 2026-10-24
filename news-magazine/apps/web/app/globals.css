@@ -253,3 +253,38 @@ a {
 .text-\[11px\] {
   font-size: 0.75rem;
 }
+
+/* =============================================================
+   The attribution line
+
+   The Nepali calendar on the Rashifal page is read from a publisher,
+   and a reader who wants to check a date against the source can. The
+   attribution is deliberately the quietest thing on that page.
+
+   It is the ONE piece of text on the site below the twelve-pixel
+   floor above, and it is a deliberate exception. The floor exists so
+   that the things a reader is asked to READ are legible; this is a
+   credit line, and it reads as one at ten pixels and as clutter at
+   twelve. A reader who wants it can find it, and a reader who does
+   not will never notice it.
+
+   The class is a named one rather than an arbitrary Tailwind size on
+   purpose: the floor above is written as a list of Tailwind's
+   arbitrary sizes, so a class of its own is not caught by it, and the
+   exception is visible here rather than scattered across components.
+   ============================================================= */
+
+.source-attribution {
+  font-size: 10px;
+  line-height: 1.5;
+  color: rgb(var(--text-subtle) / 0.4);
+}
+
+.source-attribution a {
+  color: inherit;
+  text-decoration-color: rgb(var(--text-subtle) / 0.5);
+}
+
+.source-attribution a:hover {
+  color: rgb(var(--text-subtle) / 0.7);
+}

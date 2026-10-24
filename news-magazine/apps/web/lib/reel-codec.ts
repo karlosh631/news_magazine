@@ -116,3 +116,36 @@ export function playsHere(videoUrl: string | null | undefined, embedded: boolean
   if (!isWebmUrl(videoUrl)) return true;
   return canDecodeWebm();
 }
+
+/**
+ * The provider key for reels built from this site's own news.
+ *
+ * A row with this source_key is NOT a video: it is a story's own
+ * verified photograph and its headline, stored as a reel so the Reels
+ * page moves in step with the news page. There is no file for a
+ * browser to decode, so the card must not ask it to.
+ *
+ * The key is half of the store's dedup pair and is written by the
+ * ingestion worker; it is named here so the read path and the card
+ * agree on what an image reel is.
+ *
+ * It lives in this file rather than in lib/reels.ts because that one is
+ * `server-only` — it holds the database client — and the card is a
+ * client component. A client component that imports a server-only
+ * module does not build.
+ */
+export const ARTICLE_REELS_SOURCE_KEY = "articles";
+
+/**
+ * True when this reel is a story rather than a clip.
+ *
+ * Branches on the provider key rather than on the shape of the URL,
+ * because "does this URL end in .jpg" is a guess about a CDN and the
+ * provider key is a fact.
+ */
+export function isArticleReel(reel: {
+  source_key: string | null | undefined;
+}): boolean {
+  return reel.source_key === ARTICLE_REELS_SOURCE_KEY;
+}
+

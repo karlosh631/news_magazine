@@ -13,6 +13,7 @@ import { useRouter } from "next/navigation";
 import { useImagelessFilter } from "@/components/ImagelessGrid";
 import { NewsCard, type NewsCardArticle } from "@/components/NewsCard";
 import { ReelCard } from "@/components/ReelCard";
+import { SafeImage } from "@/components/SafeImage";
 import { StoryDialog } from "@/components/StoryDialog";
 import {
   DRIFT_PX_PER_SEC,
@@ -21,6 +22,7 @@ import {
   isDriftHeld,
   shouldDriftRun,
 } from "@/lib/drift";
+import { isArticleReel } from "@/lib/reel-codec";
 import type { Reel } from "@/lib/reels";
 import { SITE_NAME, SITE_URL, jsonLd } from "@/lib/site";
 import type { LatestArticle } from "@/types/database";
@@ -440,6 +442,71 @@ function AutoScrollColumn({
  * one interaction the reader is actually making.
  */
 const DriftingColumn = memo(AutoScrollColumn);
+
+/**
+ * A STORY reel: this site's own news, as a picture and a headline.
+ *
+ * NOT A VIDEO
+ * -----------
+ * A row whose provider is `articles` carries a story's own verified
+ * photograph in `video_url`, because the reels table has exactly one
+ * media column and it may not be null. There is no file for a browser
+ * to decode: handing the row to ReelCard would put a `<video>` in
+ * front of a JPEG, the element would fail to load, and the card would
+ * cover its own picture with a "Replay unavailable" panel.
+ *
+ * So the story gets its own card. It is the same shape as a clip card
+ * — a 9:16 frame, the picture filling it, the headline and the credit
+ * over the bottom — so the feed reads as one thing rather than two,
+ * and the reader who swipes through it sees the news moving.
+ *
+ * The link out is the OUTLET's page for the story, because that is
+ * who published it, and the outlet's name is on the card next to it.
+ */
+function ArticleReelCard({ reel }: { reel: Reel }) {
+  return (
+    <div className="group relative aspect-[9/16] w-full overflow-hidden rounded-lg border border-gray-200 bg-gray-900 shadow-sm dark:border-gray-700">
+      <SafeImage
+        src={reel.poster_url ?? ""}
+        alt={reel.title ?? "News story"}
+        className="absolute inset-0 h-full w-full object-cover"
+      />
+
+      {/* The label, so the reader knows what this card is before they
+          read it: it is a story, not a clip, and pretending otherwise
+          would have them wait for a video that is never going to
+          play. */}
+      <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-start justify-between gap-2 p-2">
+        <span className="pointer-events-none rounded bg-black/60 px-2 py-1 text-xs font-medium text-white/90 backdrop-blur">
+          News
+        </span>
+      </div>
+
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-30 flex flex-col gap-2 bg-gradient-to-t from-black/90 via-black/60 to-transparent p-3">
+        {reel.title && (
+          <p className="line-clamp-3 text-sm font-semibold leading-snug text-white">
+            {reel.title}
+          </p>
+        )}
+
+        {reel.creator_name && (
+          <p className="text-xs font-medium text-white/85">{reel.creator_name}</p>
+        )}
+
+        {reel.creator_url && (
+          <a
+            href={reel.creator_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="pointer-events-auto inline-flex min-h-[48px] items-center text-xs font-medium uppercase tracking-wider text-white underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+          >
+            Read the story
+          </a>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export function ReelsFeed({
   reels,
@@ -879,13 +946,18 @@ export function ReelsFeed({
           ref={attach.get(reel.id)}
           className={FEED_ITEM}
         >
-          <ReelCard
-            reel={reel}
-            active={activeId === reel.id && layoutVisible === key}
-            mountEmbed={activeId === reel.id && layoutVisible === key}
-            muted={muted}
-            onMutedChange={setMuted}
-          />
+          {isArticleReel(reel) ? (
+            /* A story, not a clip. See ArticleReelCard. */
+            <ArticleReelCard reel={reel} />
+          ) : (
+            <ReelCard
+              reel={reel}
+              active={activeId === reel.id && layoutVisible === key}
+              mountEmbed={activeId === reel.id && layoutVisible === key}
+              muted={muted}
+              onMutedChange={setMuted}
+            />
+          )}
         </div>
       ))}
     </div>
@@ -974,14 +1046,27 @@ export function ReelsFeed({
               itemListElement: mountedReels.map((reel, index) => ({
                 "@type": "ListItem",
                 position: index + 1,
-                item: {
-                  "@type": "VideoObject",
-                  name: reel.title ?? "Reel",
-                  description: reel.description ?? undefined,
-                  thumbnailUrl: reel.poster_url ?? undefined,
-                  uploadDate: reel.published_at ?? undefined,
-                  contentUrl: reel.video_url,
-                },
+                item: isArticleReel(reel)
+                  ? /*
+                      A story, not a clip. Calling it a VideoObject
+                      would put an image in `contentUrl`, which is a
+                      claim about a file that does not exist.
+                    */
+                    {
+                      "@type": "ImageObject",
+                      name: reel.title ?? "News story",
+                      description: reel.description ?? undefined,
+                      contentUrl: reel.poster_url ?? reel.video_url,
+                      uploadDate: reel.published_at ?? undefined,
+                    }
+                  : {
+                      "@type": "VideoObject",
+                      name: reel.title ?? "Reel",
+                      description: reel.description ?? undefined,
+                      thumbnailUrl: reel.poster_url ?? undefined,
+                      uploadDate: reel.published_at ?? undefined,
+                      contentUrl: reel.video_url,
+                    },
               })),
             },
           }),

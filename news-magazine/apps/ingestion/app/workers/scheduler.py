@@ -463,6 +463,12 @@ _reels_last_run: dict[str, float] = {}
 # a deployment with zero keys configured still serves a real page
 # rather than an empty one.
 REEL_PROVIDERS: tuple[tuple[str, str | None], ...] = (
+    # This site's OWN news, turned into reels. It needs no key, no
+    # third-party quota and no new upload: every new story that has a
+    # verified photograph is one new reel, so the Reels page moves in
+    # step with the news page instead of waiting for a corpus to
+    # produce something new.
+    ("articles", None),
     ("wikimedia", None),
     ("pexels", "pexels_api_keys"),
     ("pixabay", "pixabay_api_keys"),

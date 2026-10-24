@@ -215,6 +215,21 @@ class Settings(BaseSettings):
     # Hard ceiling applied after the TTL pass.
     max_article_rows: int = 10_000
 
+    # How long a source error is kept before the pass deletes it.
+    #
+    # The errors table is a DIAGNOSTIC, not an archive. One row is
+    # written per failure, and a publisher that fails every two
+    # minutes writes thirty rows an hour, every hour, for ever - so
+    # the table grew without bound and the operator's admin panel,
+    # which lists the recent errors, spent its time showing failures
+    # from three days ago that nobody is going to act on.
+    #
+    # So the rows are pruned by age, by the ingestion itself, on every
+    # pass. Forty-eight hours is two days: long enough to see what
+    # happened over a weekend, short enough that the panel is about
+    # now rather than about ever.
+    source_error_retention_hours: int = 48
+
     # ---------------------------------------------------------
     # The reader proxy
     # ---------------------------------------------------------

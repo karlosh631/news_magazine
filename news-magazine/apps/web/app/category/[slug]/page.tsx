@@ -4,8 +4,10 @@ import { notFound } from "next/navigation";
 
 import { EmptyState } from "@/components/EmptyState";
 import { LiveArticleFeed } from "@/components/LiveArticleFeed";
+import { NepaliCalendar } from "@/components/NepaliCalendar";
 import { PanchangPanel } from "@/components/PanchangPanel";
 import { ReelsFeed } from "@/components/ReelsFeed";
+import { fetchCalendarMonth, fetchCurrentCalendar } from "@/lib/calendar";
 import {
   getPanchangDays,
   getPanchangFor,
@@ -161,6 +163,30 @@ export default async function CategoryPage({ params, searchParams }: Props) {
       fetchRashifalPeriod(period),
     ]);
 
+    /*
+      THE NEPALI CALENDAR
+      -------------------
+      The almanac above is one day: today's tithi, today's sunrise.
+      A reader whose question is "when is Dashain" or "what is the
+      date next Tuesday" is asking for a different thing, and the
+      page had no answer to it.
+
+      So the month is read from the publisher that publishes it — see
+      lib/calendar.ts — and shown as a grid the reader can move
+      through: the day, the week, the month, and a panel for any date
+      they click.
+
+      The month to read is the one the stored almanac is in, because
+      the stored almanac knows the Bikram Sambat year and month and
+      nothing else does. When the worker has not stored it yet — the
+      row is not there on the first morning after a deployment, or
+      after the table is empty — the source's own home page carries
+      the same calendar, and that is read instead.
+    */
+    const calendarView = panchang?.bsYear && panchang?.bsMonth
+      ? await fetchCalendarMonth(panchang.bsYear, panchang.bsMonth)
+      : await fetchCurrentCalendar();
+
     // The daily tab shows the stored horoscopes; the other three show
     // the period's own.
     const signs = period === "daily" ? dailySigns : periodSigns;
@@ -273,14 +299,30 @@ export default async function CategoryPage({ params, searchParams }: Props) {
             )}
             weekdayNe=""
           />
+
+          {/*
+            THE CALENDAR
+
+            It sits under the almanac and above the attribution, and
+            it is here and nowhere else: the reader asked for the
+            calendar to be added to the Rashifal page, and a calendar
+            on the front page would be a thing nobody came for.
+          */}
+          <NepaliCalendar
+            months={calendarView?.months ?? []}
+            today={calendarView?.today ?? null}
+            initialDay={calendarView?.today ?? null}
+            period={period}
+          />
+
           {panchang?.sourceUrl ? (
-            <p className="mt-4 text-xs text-gray-400 dark:text-gray-500">
+            <p className="source-attribution mt-4">
               Source:{" "}
               <a
                 href={panchang.sourceUrl}
                 rel="noopener noreferrer nofollow"
                 target="_blank"
-                className="underline underline-offset-2 hover:text-gray-600 dark:hover:text-gray-300"
+                className="underline underline-offset-2"
               >
                 {panchang.sourceUrl}
               </a>
@@ -361,7 +403,7 @@ export default async function CategoryPage({ params, searchParams }: Props) {
   // A hundred and twenty, like the homepage: the reader asked for the
   // maximum number of stories, and a category that shows thirty-six of
   // them is showing a taste rather than the news.
-  const feed = await getLatestArticles({ limit: 120, categorySlug: slug! });
+  const feed = await getLatestArticles({ limit: 200, categorySlug: slug! });
 
   return (
     <main className="min-h-screen">

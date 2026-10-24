@@ -112,7 +112,7 @@ export default async function HomePage() {
     top of the list as it arrives.
   */
   const [feed, breaking] = await Promise.all([
-    getLatestArticles({ limit: 120 }),
+    getLatestArticles({ limit: 200 }),
     getBreakingNews(10),
   ]);
 

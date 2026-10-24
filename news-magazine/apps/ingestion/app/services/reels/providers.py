@@ -1083,6 +1083,95 @@ class WikimediaSource(_BaseSource):
     #: the JPEG posters do too, so those hosts are safe to serve.
     _ALLOWED_HOSTS = ("upload.wikimedia.org",)
 
+    #: How long this source may produce nothing new before a pass stops
+    #: walking the deep pages of every term.
+    #:
+    #: The deep walk is what FILLED the catalogue — it is how the pool
+    #: grew past the newest slice of each term. But it is also the
+    #: expensive half: a pass asks for four pages per term, and once
+    #: the whole Nepali corpus is stored, three of those four pages
+    #: return files we already hold. Commons' Nepal footage is a
+    #: couple of hundred files and the catalogue had 245 of them, so
+    #: the walk had nothing left to find and was spending a hundred
+    #: requests a pass to say so.
+    #:
+    #: Six hours is long enough that a term which is merely quiet does
+    #: not lose its deep walk, and short enough that the walk resumes
+    #: the moment anything new is uploaded: the newest page of every
+    #: term is always asked for, so a new upload is found on the very
+    #: pass that sees it, and a new row is stored — which resets the
+    #: clock by itself.
+    EXHAUSTED_IDLE_SECONDS = 6 * 3600
+
+    #: The catalogue has to be worth walking before the walk is worth
+    #: skipping. Below this many rows the source is young, not spent.
+    EXHAUSTED_MIN_ROWS = 50
+
+    #: Whether the catalogue says this source has stopped producing.
+    #:
+    #: False until `prepare` says otherwise, and false is the safe
+    #: answer: a source that is wrongly told it is exhausted does the
+    #: full walk and wastes a few requests, while a source wrongly
+    #: told it is NOT exhausted would skip material it had never seen.
+    _exhausted: bool = False
+
+    async def prepare(self, db) -> None:
+        """
+        Ask the catalogue whether this source has stopped producing.
+
+        The store owns the database and hands the handle over; an
+        adapter that wants to know what is already stored asks for it
+        here rather than opening its own connection. A failure is not
+        an error: the walk simply continues at full depth, which is
+        what happened before this existed.
+        """
+        from app.services.ingestion import db_call
+
+        try:
+            response = await db_call(
+                lambda: db.table("reels")
+                .select("ingested_at", count="exact")
+                .eq("source_key", self.key)
+                .order("ingested_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+        except Exception as exc:  # noqa: BLE001 - the walk is the fallback
+            logger.info(
+                "wikimedia: the catalogue could not be read (%s); walking at full depth.",
+                exc,
+            )
+            return
+
+        rows = response.data or []
+        count = int(getattr(response, "count", 0) or 0)
+
+        if not rows or count < self.EXHAUSTED_MIN_ROWS:
+            self._exhausted = False
+            return
+
+        newest = _iso(rows[0].get("ingested_at"))
+        if not newest:
+            self._exhausted = False
+            return
+
+        try:
+            idle = (
+                datetime.now(timezone.utc) - datetime.fromisoformat(newest)
+            ).total_seconds()
+        except ValueError:
+            self._exhausted = False
+            return
+
+        self._exhausted = idle >= self.EXHAUSTED_IDLE_SECONDS
+        if self._exhausted:
+            logger.info(
+                "wikimedia: nothing new for %.1f hour(s) and %d clip(s) stored; "
+                "this pass asks each term for its newest page only.",
+                idle / 3600,
+                count,
+            )
+
     async def _fetch(self, limit: int) -> list[Reel]:
         # Over-fetch. Most candidates get dropped for being longer than
         # three minutes or for having an unreadable licence, and
@@ -1183,9 +1272,16 @@ class WikimediaSource(_BaseSource):
             # a pass that skipped it would never notice a new upload at
             # all. The rest is a rotating window further down the
             # results, which is what actually grows the pool.
+            #
+            # The deep window is dropped when the catalogue says this
+            # source has stopped producing (see `prepare`). The newest
+            # page is still asked for, so a new upload is still found
+            # on the pass that sees it — and storing it puts the source
+            # back to work, because a new row resets the idle clock.
             band = (hour + index) % COMMONS_ROTATION_BANDS
+            deep_pages = 1 if self._exhausted else COMMONS_PAGES_PER_TERM
             offsets = [0]
-            for step in range(COMMONS_PAGES_PER_TERM - 1):
+            for step in range(deep_pages - 1):
                 offsets.append(
                     (band * COMMONS_MAX_PAGE_SIZE) + (step * COMMONS_MAX_PAGE_SIZE)
                 )
@@ -2778,6 +2874,282 @@ class YouTubeShortsSource(_BaseSource):
 
 
 # ---------------------------------------------------------------------------
+# THE ARTICLES PROVIDER
+#
+# The one reels source that cannot run dry.
+# ---------------------------------------------------------------------------
+
+#: How many candidate articles one pass reads.
+#:
+#: It is a LOOK-AHEAD and not a limit on what a pass may produce: the
+#: pool is read newest-first and every article in it that has not been
+#: turned into a reel yet becomes one. It is bounded because the
+#: "which of these are already reels" filter travels in the query
+#: string, and a few hundred uuids is already past what a proxy in
+#: front of Supabase is entitled to answer.
+ARTICLE_CANDIDATE_POOL = 200
+
+#: The article columns one reel is built from.
+#:
+#: `image_highres_url` is preferred over `featured_image_url` for the
+#: same reason the site's own news cards prefer it (see pickImages in
+#: apps/web/components/NewsCard.tsx): the high-resolution rendition is
+#: the one the outlet renders at full size, and the featured one is
+#: often a smaller crop of the same photograph.
+ARTICLE_COLUMNS = (
+    "id, headline, excerpt, featured_image_url, image_highres_url, "
+    "source_name_snapshot, source_article_url, published_at, ingested_at"
+)
+
+#: How much of the excerpt a reel carries.
+#:
+#: The excerpt is the card's caption and the structured data's
+#: description, and a card shows two or three lines of it. Keeping the
+#: rest in the database would make every row a few hundred bytes larger
+#: for text nobody reads — and there is one of these rows per story
+#: the site publishes, so the saving is not nothing.
+ARTICLE_DESCRIPTION_CHARS = 280
+
+
+class ArticlesSource(_BaseSource):
+    """
+    The site's own news, turned into reels.
+
+    Why this provider exists
+    ------------------------
+    Every other provider here is a SEARCH over somebody else's fixed
+    catalogue, and a search over a fixed catalogue runs out. Commons is
+    asked for the newest Nepal videos, gets the same hundred files
+    back for ever, finds them all already stored, and adds nothing —
+    so the Reels page said "245 clips in the catalogue, 0 clips fetched
+    today" while the ingestion log said the pass was fine. The search
+    was not broken and neither was the store; the corpus was finished.
+
+    This provider searches nothing at all. It reads the articles this
+    site has already published and turns the newest ones that carry a
+    VERIFIED photograph into reels. A new article is a new reel by
+    construction, so the category moves in step with the news page,
+    and it cannot be exhausted: the pool grows with the news.
+
+    It needs no API key, no third-party quota and no rate limit, and
+    the material is exactly as relevant as the news feed it comes from.
+
+    WHAT A REEL IS HERE
+    -------------------
+    There is no video. A reel is the story's own photograph and its
+    headline. `video_url` carries the photograph because the reels
+    table has exactly one media column and it may not be null; the web
+    reads `poster_url` for the picture and knows that an `articles` row
+    is an image card rather than a video (see apps/web/lib/reels.ts).
+
+    THE ID IS THE ARTICLE'S
+    -----------------------
+    `external_id` is the article's uuid. It is stable for ever, it is
+    half of the store's unique constraint, and it is what makes this
+    provider idempotent: the same article can be seen by twenty passes
+    and becomes exactly one reel.
+    """
+
+    key = "articles"
+    requires_key = False
+    provider_name = "News outlets"
+
+    async def _fetch(self, limit: int) -> list[Reel]:
+        """
+        The newest articles that have a verified picture and have not
+        been turned into a reel yet. One reel per article.
+        """
+        limit = self._effective_limit(limit)
+        if limit <= 0:
+            return []
+
+        from app.database import get_db
+
+        # One client for the whole pass. `get_db()` builds a client and
+        # a connection pool, and there is no reason to build two of
+        # them for two queries that are a few milliseconds apart.
+        db = get_db()
+
+        rows = await self._candidate_articles(db)
+        if not rows:
+            logger.info("articles: no candidate article has a verified picture yet.")
+            return []
+
+        known = await self._known_external_ids(
+            db, [str(row.get("id") or "") for row in rows]
+        )
+
+        reels: list[Reel] = []
+        for row in rows:
+            if len(reels) >= limit:
+                break
+            article_id = str(row.get("id") or "")
+            if not article_id or article_id in known:
+                # Already a reel. The store would refresh the row rather
+                # than duplicate it, but not asking for it at all is
+                # what keeps a busy news hour from re-writing the same
+                # reel fifty times a pass.
+                continue
+            reel = self._to_reel(row)
+            if reel is not None:
+                reels.append(reel)
+
+        logger.info(
+            "articles: %d of %d candidate article(s) became reel(s).",
+            len(reels),
+            len(rows),
+        )
+        return reels
+
+    # -------------------------------------------------
+    # Reading
+    # -------------------------------------------------
+
+    async def _candidate_articles(self, db) -> list[dict]:
+        """
+        The newest published articles that carry a confirmed picture.
+
+        The filters are the site's own: published, not a duplicate, and
+        with `image_verified_at` set — which is the marker that the
+        picture was checked against the story's OWN page rather than
+        picked out of a feed's thumbnail. An unverified picture is
+        regularly a photograph of something else entirely, and this
+        provider puts pictures in front of readers, so it takes only
+        the confirmed ones.
+        """
+        from app.services.ingestion import db_call
+
+        response = await db_call(
+            lambda: db.table("articles")
+            .select(ARTICLE_COLUMNS)
+            .eq("status", "published")
+            .is_("duplicate_of", None)
+            .not_.is_("image_verified_at", None)
+            .or_("featured_image_url.not.is.null,image_highres_url.not.is.null")
+            .order("ingested_at", desc=True)
+            .limit(ARTICLE_CANDIDATE_POOL)
+            .execute()
+        )
+
+        rows = response.data or []
+        return [row for row in rows if isinstance(row, dict)]
+
+    async def _known_external_ids(self, db, ids: list[str]) -> set[str]:
+        """
+        Which of these articles have already become a reel.
+
+        This is the dedup test, asked of the database rather than
+        remembered in the process: the store's unique constraint is on
+        (source_key, external_id), and the article's uuid is the
+        external_id, so a row that is already here is never written
+        twice.
+        """
+        from app.services.ingestion import db_call
+
+        wanted = [value for value in ids if value]
+        if not wanted:
+            return set()
+
+        response = await db_call(
+            lambda: db.table("reels")
+            .select("external_id")
+            .eq("source_key", self.key)
+            .in_("external_id", wanted)
+            .execute()
+        )
+
+        rows = response.data or []
+        return {
+            str(row.get("external_id"))
+            for row in rows
+            if isinstance(row, dict) and row.get("external_id")
+        }
+
+    # -------------------------------------------------
+    # Building
+    # -------------------------------------------------
+
+    def _to_reel(self, row: dict) -> Reel | None:
+        """One article -> one reel, or None when it cannot be one."""
+        image = _absolute(row.get("image_highres_url")) or _absolute(
+            row.get("featured_image_url")
+        )
+        if not image:
+            return None
+
+        headline = _plain_text(row.get("headline"))
+        if not headline:
+            return None
+
+        excerpt = _plain_text(row.get("excerpt")) or ""
+        if len(excerpt) > ARTICLE_DESCRIPTION_CHARS:
+            excerpt = excerpt[: ARTICLE_DESCRIPTION_CHARS - 1].rstrip() + "…"
+
+        return Reel(
+            source_key=self.key,
+            external_id=str(row.get("id") or ""),
+            # There is no video file to point at, and the reels table
+            # has one media column that may not be null. The photograph
+            # is the reel's media; the web renders it as a picture and
+            # never asks a browser to decode it.
+            video_url=image,
+            poster_url=image,
+            title=headline,
+            description=excerpt or None,
+            # The outlet is the creator of the story and the source of
+            # the photograph, and the credit block links to its page for
+            # the story.
+            creator_name=_plain_text(row.get("source_name_snapshot"))
+            or self.provider_name,
+            creator_url=_absolute(row.get("source_article_url")),
+            # The content is somebody else's, republished with a link
+            # back to them. That is credit, so it is recorded as credit.
+            attribution_required=True,
+            published_at=_iso(row.get("published_at")) or _iso(row.get("ingested_at")),
+        )
+
+    # -------------------------------------------------
+    # Budget
+    # -------------------------------------------------
+
+    def _effective_limit(self, limit: int) -> int:
+        """
+        The limit, after the two caps that bound a reels pass.
+
+        `MAX_REELS_PER_PROVIDER` bounds what one provider may
+        contribute to a pass and `MAX_REELS_PER_CYCLE` bounds what the
+        whole pass may fetch. Both are read here as well as by the
+        scheduler, because this provider is also run on its own — and a
+        cap that is only enforced in one of the two places it is
+        reached is not a cap.
+
+        A limit of zero means zero. It is not "no limit": a pass that
+        has spent its budget asks for nothing, and a provider that
+        answered that with a hundred clips would spend budget the pass
+        had already given away.
+        """
+        limit = int(limit or 0)
+        if limit <= 0:
+            return 0
+
+        caps = [limit]
+
+        try:
+            from app.config import get_settings
+
+            settings = get_settings()
+            caps.append(int(settings.max_reels_per_provider or 0))
+            caps.append(int(settings.max_reels_per_cycle or 0))
+        except Exception:  # noqa: BLE001 - a missing config is not a failure
+            logger.debug(
+                "articles: the settings could not be read; using the caller's limit."
+            )
+
+        usable = [cap for cap in caps if cap > 0]
+        return min(usable) if usable else limit
+
+
+# ---------------------------------------------------------------------------
 # REGISTRY
 # ---------------------------------------------------------------------------
 
@@ -2786,6 +3158,9 @@ PROVIDERS: dict[str, type] = {
     "pexels": PexelsSource,
     "pixabay": PixabaySource,
     "youtube": YouTubeShortsSource,
+    # The site's own news. Needs no key, cannot run dry, and is what
+    # keeps the category moving on a deploy with nothing configured.
+    "articles": ArticlesSource,
 }
 
 

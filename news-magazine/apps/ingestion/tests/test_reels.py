@@ -1092,17 +1092,33 @@ class FakeQuery:
 
     def execute(self):
         self.db.calls.append(("execute", self.db.table_name))
-        return SimpleNamespace(data=self.db.rows)
+        return SimpleNamespace(data=self.db.rows_for(self.db.table_name))
 
 
 class FakeDB:
-    def __init__(self, rows=None, fail_ids=()):
+    """
+    A database that answers every select with the same rows.
+
+    `table_rows` gives a table its own rows, for the tables whose
+    contents matter to what the pass does: the pass now also builds
+    reels from this site's own articles, and a fake that answered the
+    articles query with the reels' rows would have the pass inventing
+    reels out of nothing.
+    """
+
+    def __init__(self, rows=None, fail_ids=(), table_rows=None):
         self.rows = rows or []
+        self.table_rows = table_rows or {}
         self.fail_ids = set(fail_ids)
         self.calls: list = []
         self.table_name = "reels"
         self.upserted = None
         self.upsert_rows: list = []
+
+    def rows_for(self, table):
+        if table in self.table_rows:
+            return self.table_rows[table]
+        return self.rows
 
     def table(self, name):
         self.table_name = name

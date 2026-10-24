@@ -20,6 +20,7 @@ import {
   type FeedCursor,
 } from "@/lib/feed-cursor";
 import { dropImageless, dropRepeatedImages } from "@/lib/feed-images";
+import { byNewest } from "@/lib/feed-merge";
 import { createPublicSupabaseClient } from "@/lib/supabase/server";
 import type { LatestArticle, SearchResult } from "@/types/database";
 
@@ -373,43 +374,30 @@ function applyCursor<T extends { or: (filter: string) => T }>(
  * been applied yet — this sorts whatever comes back, so the page is
  * correct either way.
  *
- * ORDER OF ARRIVAL, NOT PUBLICATION TIME
- * ---------------------------------------
- * The primary key is `ingested_at` — when WE first saw the story — and
- * the id breaks ties.
+ * THE ORDER IS PUBLICATION TIME, WITH ARRIVAL AS THE TIEBREAKER
+ * --------------------------------------------------------------
+ * `byNewest` in lib/feed-merge.ts owns that rule, and the browser's
+ * sort in components/LiveArticleFeed.tsx uses the same one, so the
+ * server's answer and the client's order cannot disagree and reshuffle
+ * the page.
  *
- * The reader asked for the most recently FETCHED story on top, and the
- * distinction is not cosmetic. A publisher can sit on a story for an
- * hour before putting it in their feed; when it appears, it is new to
- * this site and belongs at the top, even though its publication
- * timestamp is older than stories already on the page. Sorting by
- * publication time alone buried it.
+ * WHY IT IS NOT ARRIVAL
+ * ----------------------
+ * The feed was ordered by `ingested_at` — when WE fetched the story —
+ * and the top of it looked slow. Measured against the live site, the
+ * top card carried a publication time of nine minutes and forty
+ * seconds old while the cards directly beneath it carried four
+ * minutes: a page whose first headline was older than its second
+ * headline reads as ten minutes behind, and the reader was right.
  *
- * The reverse also matters. A story published two minutes ago that we
- * fetched ten minutes ago has been on the homepage the whole time; it
- * should not leap back to the top every time the feed polls, which is
- * exactly what a publication-time sort does to it. Sorting by arrival
- * means a story moves up ONCE, when it arrives, and then stays put.
+ * The pagination is still by arrival, and that is not a contradiction:
+ * the page is CUT in arrival order (so the keyset cursor addresses the
+ * rows it fetched) and then DISPLAYED in publication order. The two
+ * have to be applied in that order, or the rows between the cut and
+ * the display are lost.
  */
 function newestFirst(rows: LatestArticle[]): LatestArticle[] {
-  return [...rows].sort((a, b) => {
-    // THE NEWEST FETCHED FIRST.
-    //
-    // The same order the query runs, so the server's answer and the
-    // browser's sort cannot disagree and reshuffle the page.
-    const arrivedA = a.ingested_at ? Date.parse(a.ingested_at) : 0;
-    const arrivedB = b.ingested_at ? Date.parse(b.ingested_at) : 0;
-    if (arrivedB !== arrivedA) return arrivedB - arrivedA;
-
-    // The tiebreaker, and the same one the query uses.
-    const idA = a.id ?? "";
-    const idB = b.id ?? "";
-    if (idA !== idB) return idB < idA ? -1 : 1;
-
-    // The last tiebreaker: the outlet that carried the story most
-    // often ends up on the card the reader sees.
-    return (b.source_count ?? 0) - (a.source_count ?? 0);
-  });
+  return [...rows].sort(byNewest);
 }
 
 async function languageSelect({
@@ -448,8 +436,9 @@ async function languageSelect({
       .eq("status", "published")
       .is("duplicate_of", null)
       .eq("language", lang)
-      // Newest FETCHED first, for the same reason as the unfiltered
-      // select: the window is the top of the feed. See directSelect.
+      // The page is CUT by arrival, for the same reason as the
+      // unfiltered select: the cursor pages by arrival. See
+      // directSelect.
       .order("ingested_at", { ascending: false, nullsFirst: false })
       // The tiebreaker for the keyset cursor. Deterministic, so a page
       // boundary inside a run of identical timestamps cannot skip or
@@ -513,21 +502,37 @@ async function languageSelect({
   // three that can remove a card the reader would otherwise see as
   // broken. It is a filter, not a reordering, so putting it here changes
   // which rows survive and nothing about their order.
-  const articles = preferIllustrated(
+  const page = preferIllustrated(
     dropRepeatedImages(
       dropUnconfirmed(
-        dropImageless(dropDuplicateStories(newestFirst(rows))),
+        dropImageless(dropDuplicateStories(rows)),
         showsNothing
       )
     ),
     limit
   );
 
+  /*
+    THE CURSOR IS TAKEN FROM THE PAGE AS IT WAS CUT
+    -----------------------------------------------
+    The page is cut in ARRIVAL order and displayed in PUBLICATION
+    order, and the cursor has to be taken from the cut - the last row
+    of the arrival-ordered page - because the cursor pages by arrival.
+
+    Taken after the display sort it would address a row that is not the
+    end of the arrival order, and the next page would skip every story
+    between the two.
+  */
+  const nextCursor = nextCursorFor(page, fetched < limit * DEDUP_HEADROOM);
+
+  // The display order: the newest news first.
+  const articles = newestFirst(page);
+
   return {
     articles,
     error: null,
     configured: true,
-    nextCursor: nextCursorFor(articles, fetched < limit * DEDUP_HEADROOM),
+    nextCursor,
     total: null,
   };
 }
@@ -655,28 +660,28 @@ async function directSelect({
     )
     .eq("status", "published")
     .is("duplicate_of", null)
-    // ORDER OF ARRIVAL: THE NEWEST FETCHED FIRST
-    // ------------------------------------------
-    // The window this query fills is the top of the feed, and the feed
-    // is ordered by when WE fetched the story.
+    // THE PAGE IS CUT BY ARRIVAL
+    // --------------------------
+    // The window this query fills is the top of the feed, and it is cut
+    // in the order the CURSOR pages in: by when WE fetched the story.
     //
-    // The reader asked for this in the same words several times:
-    // "the new articles must be shown on the top based on the time
-    // immediatley fetch ... and unitll new come new show and move old
-    // abit down". And the measurement says why it matters: of the
-    // newest 500 stories the site holds, only 15 had been fetched in
-    // the last hour, because a pass fetches about 250 rows and most
-    // of them are the archive catching up. Ordered by publication
-    // time, the top of the page barely moved — the reader reloaded and
-    // found one or two new cards and nothing else, while everything
-    // the system had just fetched sat further down.
+    // The cut and the DISPLAY are two different orders, and they have
+    // to be two. The keyset cursor addresses the rows this query
+    // returned, so the query has to return them in the order the cursor
+    // walks; the reader has to see them in the order the news happened
+    // in. So the query cuts by arrival, and the rows are then displayed
+    // by publication time (see `newestFirst`).
     //
-    // Ordered by arrival, the top of the page IS the last fetch: the
-    // whole batch lands there, in the order it arrived, and the
-    // previous batch moves down.
+    // Measured against the live site, displaying by arrival made the
+    // top of the page LOOK ten minutes old: the first card carried a
+    // publication time of nine minutes and forty seconds while the
+    // cards beneath it carried four minutes. A page whose first
+    // headline is older than its second headline reads as broken, and
+    // the reader was right to say so.
     //
-    // The NEW badge is a different rule and still uses publication
-    // time — see isFreshlyPublished in components/LiveArticleFeed.tsx.
+    // The NEW badge is a different rule again and still uses
+    // publication time — see isFreshlyPublished in
+    // components/LiveArticleFeed.tsx.
     //
     // nullsFirst: false is required, not cosmetic. PostgreSQL defaults
     // `ORDER BY ... DESC` to NULLS FIRST, so any article with no
@@ -753,12 +758,23 @@ async function directSelect({
   // components/LiveArticleFeed.tsx could not have saved this — it is
   // populated by an onError that only fires after the browser has tried
   // the image, and only on surfaces that pass the callback at all.
-  const articles = dropRepeatedImages(
+  const page = dropRepeatedImages(
     dropUnconfirmed(
       dropImageless(dropDuplicateStories(mapped)),
       showsNothing
     )
   ).slice(0, limit);
+
+  // The cursor is taken from the page as it was cut — the last row of
+  // the arrival-ordered page — because the cursor pages by arrival. See
+  // the same note in languageSelect.
+  const nextCursor = nextCursorFor(
+    page,
+    mapped.length < limit * DEDUP_HEADROOM
+  );
+
+  // The display order: the newest news first.
+  const articles = newestFirst(page);
 
   return {
     articles,
@@ -767,7 +783,7 @@ async function directSelect({
     // Fewer rows than were asked for means the database ran out, not
     // that deduplication ate them: `mapped` is counted before a single
     // card was dropped.
-    nextCursor: nextCursorFor(articles, mapped.length < limit * DEDUP_HEADROOM),
+    nextCursor,
     total: null,
   };
 }

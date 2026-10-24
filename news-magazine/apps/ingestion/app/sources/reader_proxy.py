@@ -69,6 +69,8 @@ import time
 
 import httpx
 
+from app.sources import local_reader
+
 logger = logging.getLogger(__name__)
 
 #: The default reader. It is a service that fetches a public URL and
@@ -130,8 +132,36 @@ READER_MIN_INTERVAL_SECONDS = 3.1
 #: this address.
 READER_MIN_INTERVAL_SECONDS_WITH_KEY = 1.0
 
-_reader_lock = asyncio.Lock()
+_reader_lock: asyncio.Lock | None = None
+_reader_lock_loop: object = None
 _reader_last_call: float = 0.0
+
+
+def _reader_lock_for_this_loop() -> asyncio.Lock:
+    """
+    The lock that holds the reader to its own pace, for THIS loop.
+
+    An asyncio.Lock binds itself to the loop that contends for it, and
+    raises "bound to a different event loop" when it is used from
+    another one. The worker serves its HTTP API from a second loop in
+    a second thread, and the tests each run on their own loop, so a
+    lock bound once and kept for ever is a crash waiting for the first
+    time two of them are alive at once.
+
+    So the lock is rebuilt when the loop changes. There is still only
+    ONE lock at a time, and the pace is still held globally by
+    `_reader_last_call`, which is a plain number and belongs to no
+    loop.
+    """
+    global _reader_lock, _reader_lock_loop
+
+    loop = asyncio.get_running_loop()
+
+    if _reader_lock is None or _reader_lock_loop is not loop:
+        _reader_lock = asyncio.Lock()
+        _reader_lock_loop = loop
+
+    return _reader_lock
 
 
 def _api_key() -> str:
@@ -166,7 +196,7 @@ async def _wait_for_the_reader() -> None:
         if _api_key()
         else READER_MIN_INTERVAL_SECONDS
     )
-    async with _reader_lock:
+    async with _reader_lock_for_this_loop():
         elapsed = time.monotonic() - _reader_last_call
         if elapsed < interval:
             await asyncio.sleep(interval - elapsed)
@@ -292,3 +322,88 @@ async def fetch_with_reader_fallback(
     )
     text = await fetch_via_reader(url, client, proxy=proxy, timeout=timeout)
     return text, 0
+
+
+#: Where a page came from. The three tiers, in the order they are tried.
+SOURCE_PUBLISHER = "publisher"
+SOURCE_READER = "reader"
+SOURCE_LOCAL = "local"
+SOURCE_REFUSED = "refused"
+SOURCE_UNREADABLE = "unreadable"
+
+
+async def fetch_with_local_fallback(
+    url: str,
+    client: httpx.AsyncClient,
+    headers: dict[str, str] | None = None,
+    proxy: str = DEFAULT_READER_PROXY,
+    timeout: float = PROXY_TIMEOUT_SECONDS,
+) -> tuple[str | None, str]:
+    """
+    Read a page through every tier there is, and say which one read it.
+
+    THE THREE TIERS
+    ---------------
+        1. the publisher itself, from this address;
+        2. the reader proxy, from an address the publisher has not
+           refused;
+        3. us, here, on this machine - httpx and trafilatura, no key,
+           no quota and no service in the middle.
+
+    The third tier is a FALLBACK and never a replacement. The proxy is
+    still asked first for every page, because the proxy is the only
+    tier that can reach a publisher that refuses this address.
+
+    What the local tier adds is everything the proxy was being used
+    for that is not really about a refusal:
+
+      - PROVING that a page is an article, for one request and no
+        quota at all. The listing verifier used to spend a
+        quota-bound read to answer that question;
+      - reading a page the proxy was rate-limited on, which is the
+        whole reason a reader with a free tier is a liability.
+
+    Returns the page's text and where it came from: "publisher",
+    "reader" or "local". When no tier could read it, the text is None
+    and the source is "refused" (the publisher answered that the page
+    is not there) or "unreadable" (nothing answered at all).
+
+    It never raises: a fallback that raises is not a fallback.
+    """
+    if not url or not url.startswith(("http://", "https://")):
+        return None, SOURCE_UNREADABLE
+
+    request_headers = (
+        dict(headers) if headers else dict(local_reader.BROWSER_HEADERS)
+    )
+
+    response = None
+    try:
+        response = await client.get(
+            url, headers=request_headers, follow_redirects=True
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Could not fetch %s: %s", url[:120], exc)
+
+    if response is not None:
+        if response.status_code < 400:
+            return response.text, SOURCE_PUBLISHER
+        if response.status_code not in BLOCKED_STATUS_CODES:
+            # A real answer about the page: it is gone. Reading it
+            # somewhere else would only find the same 404.
+            return None, SOURCE_REFUSED
+
+    # The publisher refused this address, or could not be reached.
+    text = await fetch_via_reader(url, client, proxy=proxy, timeout=timeout)
+    if text:
+        return text, SOURCE_READER
+
+    # The reader could not fetch it either. Read it ourselves. This
+    # tier cannot reach a publisher that refuses us, but it CAN reach
+    # a page the proxy was too busy to fetch, and it costs no quota.
+    text = await local_reader.fetch_html(url, client)
+    if text:
+        logger.info("Read %s ourselves, with no reader in the middle.", url[:120])
+        return text, SOURCE_LOCAL
+
+    return None, SOURCE_UNREADABLE

@@ -50,10 +50,11 @@ import feedparser
 import httpx
 
 from app.config import DEFAULT_MAX_ARTICLES_PER_SOURCE
+from app.sources import local_reader
 from app.sources.reader_proxy import (
     BLOCKED_STATUS_CODES,
     fetch_via_reader,
-    fetch_with_reader_fallback,
+    fetch_with_local_fallback,
 )
 from app.services.dedup import normalize_title, token_fingerprint
 from app.services.sanitizer import sanitize_excerpt, sanitize_headline
@@ -222,6 +223,35 @@ _HAS_HEADLINE_RE = re.compile(
 _HEADLINE_MIN_CHARS = 18
 _HEADLINE_MAX_CHARS = 300
 
+#: What a probe of one candidate link concluded.
+#:
+#: THREE ANSWERS, NOT TWO
+#: -----------------------
+#: The probe used to have two answers - "this is an article" and
+#: "this is not" - and a page it could not READ was counted as "not".
+#: That is the wrong answer, and it is what killed two publishers:
+#:
+#: The reader is the only way to read an article page on a host that
+#: refuses this address, and the reader is rate-limited: twenty pages
+#: a minute to an address with no key, sixty to one with a key. A
+#: pass that probes forty candidates on such a host asks the reader
+#: for forty pages, and the reader answers "slow down" to the ones
+#: that come after the limit. Every one of those was counted as a
+#: broken link, and the outlet was thrown away with
+#:
+#:     34/34 candidate links for 'Hamro Patro National' did not
+#:     resolve to an article page.
+#:
+#: while every one of the thirty-four was a real story, on a page the
+#: reader had simply been too busy to fetch.
+#:
+#: So a probe now has three answers, and only one of them - a page
+#: that WAS read and named no story - is evidence that a link is
+#: broken.
+_VERIFY_ARTICLE = "article"
+_VERIFY_BROKEN = "broken"
+_VERIFY_UNKNOWN = "unknown"
+
 #: How many cards one listing page may contribute.
 #:
 #: The listing page is read whole, so this is the page size this
@@ -308,13 +338,22 @@ class HtmlListingAdapter(SourceAdapter):
             # the address, not at the request. When that happens the
             # page is read through the reader instead, so the outlet
             # is not silent. See app/sources/reader_proxy.py.
+            #
+            # And when the reader cannot read it either - it is a free
+            # service with a free-tier ceiling, and "slow down" is one
+            # of its answers - the page is read OURSELVES, here, with
+            # no key and no quota. That third tier cannot reach a
+            # publisher that refuses this address, but it can reach a
+            # listing the reader was too busy to fetch, and it costs
+            # the pass nothing but the request.
             if self.settings.reader_proxy_enabled:
-                text, status = await fetch_with_reader_fallback(
+                text, source = await fetch_with_local_fallback(
                     url,
                     client,
                     headers,
                     proxy=self.settings.reader_proxy_url,
                 )
+                status = source
             else:
                 response = await client.get(url, headers=headers, follow_redirects=True)
                 text = response.text if response.status_code < 400 else None
@@ -592,6 +631,20 @@ class HtmlListingAdapter(SourceAdapter):
         unverified - so the outlet still contributes its stories; the
         probe is there to catch an outlet whose links are chrome, not
         to hold the outlet hostage.
+
+        A CANDIDATE WE COULD NOT READ IS NOT A BROKEN LINK
+        ----------------------------------------------------
+        The probe now answers three ways, not two. A page that was
+        read and named no story is BROKEN. A page that named a story
+        is an ARTICLE. A page we could not read at all - the publisher
+        refused us and the reader was too busy to fetch it - is
+        UNKNOWN, and an unknown candidate is KEPT.
+
+        The distinction is the whole difference between "this outlet's
+        links are chrome" and "the reader was rate-limited while we
+        were checking this outlet's links". The first throws the
+        outlet away; the second must not, and before this change it
+        did.
         """
         if not entries:
             return []
@@ -617,16 +670,20 @@ class HtmlListingAdapter(SourceAdapter):
             timeout=12.0, follow_redirects=True
         ) as probe_client:
 
-            async def is_article(entry: dict) -> bool:
+            async def probe(entry: dict) -> str:
                 link = entry.get("link")
                 if not link:
-                    return False
+                    return _VERIFY_BROKEN
 
                 async with semaphore:
                     try:
                         response = await probe_client.get(link, headers=headers)
                     except Exception:
-                        return False
+                        # We could not even ask the publisher. That is
+                        # a fact about this address, not about the link.
+                        return _VERIFY_UNKNOWN
+
+                    from_reader = False
 
                     if response.status_code < 400:
                         # A redirect to the homepage means the link was
@@ -634,7 +691,7 @@ class HtmlListingAdapter(SourceAdapter):
                         final_path = urlparse(str(response.url)).path.rstrip("/")
                         original_path = urlparse(link).path.rstrip("/")
                         if final_path != original_path and final_path == "":
-                            return False
+                            return _VERIFY_BROKEN
                         text = response.text
                     elif response.status_code in BLOCKED_STATUS_CODES:
                         # REFUSED, NOT MISSING.
@@ -654,17 +711,46 @@ class HtmlListingAdapter(SourceAdapter):
                         # refused - which is exactly how the article
                         # pages are read elsewhere in this pipeline.
                         if not self.settings.reader_proxy_enabled:
-                            return False
+                            return _VERIFY_UNKNOWN
                         text = await fetch_via_reader(
                             link,
                             probe_client,
                             proxy=self.settings.reader_proxy_url,
                         )
-                        if text is None:
-                            return False
+                        if not text:
+                            # The reader could not fetch it either -
+                            # most often because it answered "slow
+                            # down". We know nothing about the link.
+                            #
+                            # The third tier reads it OURSELVES: one
+                            # request, no key, no quota. It cannot
+                            # reach a publisher that refuses this
+                            # address, so it usually cannot help here
+                            # - but it costs us a request and it is
+                            # the same question, and the answer it
+                            # gives is the only one that is not the
+                            # reader's.
+                            logger.info(
+                                "%s: the reader could not fetch %s",
+                                self.source.get("name"), link[:120],
+                            )
+                            local = await local_reader.fetch_html(
+                                link, probe_client
+                            )
+                            if local is None:
+                                # Nothing could read it. That is not
+                                # evidence that the link is broken.
+                                return _VERIFY_UNKNOWN
+                            if local_reader.extract_locally(local) is not None:
+                                return _VERIFY_ARTICLE
+                            # We read it and it holds no article, but
+                            # we were refused the first time, so the
+                            # page we hold is not a clean view of it.
+                            return _VERIFY_UNKNOWN
+                        from_reader = True
                     else:
                         # A 404 is a real answer: the page is not there.
-                        return False
+                        return _VERIFY_BROKEN
 
                     if len(text) < 500 or not _HAS_HEADLINE_RE.search(text):
                         # The page ANSWERED, and it did not name a
@@ -684,19 +770,41 @@ class HtmlListingAdapter(SourceAdapter):
                         # The reader renders it. So the shell is read
                         # through the reader before the candidate is
                         # rejected, and the outlet is kept.
+                        #
+                        # And when the text ALREADY came from the
+                        # reader - which is the case for every
+                        # candidate on a publisher that refuses this
+                        # address - the reader is NOT asked a second
+                        # time for the same URL. It used to be, and
+                        # that doubled the cost of exactly the probes
+                        # that are the most expensive: one read per
+                        # candidate, not two.
+                        if from_reader:
+                            return _VERIFY_BROKEN
                         if not self.settings.reader_proxy_enabled:
-                            return False
+                            return _VERIFY_UNKNOWN
                         rendered = await fetch_via_reader(
                             link,
                             probe_client,
                             proxy=self.settings.reader_proxy_url,
                         )
                         if not rendered:
-                            return False
+                            # The reader is out of quota. Read it
+                            # ourselves - one request, no quota.
+                            local = await local_reader.fetch_html(
+                                link, probe_client
+                            )
+                            if local is None:
+                                return _VERIFY_UNKNOWN
+                            if local_reader.extract_locally(local) is not None:
+                                return _VERIFY_ARTICLE
+                            return _VERIFY_BROKEN
                         text = rendered
 
                 if len(text) < 500:
-                    return False
+                    # A body this small names nothing, but we cannot
+                    # say the page is broken either.
+                    return _VERIFY_UNKNOWN
                 # A page with no headline is not an article.
                 #
                 # `<h1>` is the usual place for one, but it is not the
@@ -707,35 +815,79 @@ class HtmlListingAdapter(SourceAdapter):
                 # name the story", and there are three ways to
                 # answer that.
                 if not _HAS_HEADLINE_RE.search(text):
-                    return False
-                return True
+                    # The LAST word on it, and it costs nothing: we
+                    # are holding the page, and an extractor that
+                    # reads the BODY out of it answers the question
+                    # the verifier is asking - "is this a story?" -
+                    # better than a regex over tags does. This is
+                    # what rescues an outlet whose article pages
+                    # carry their headline somewhere no tag named.
+                    if local_reader.extract_locally(text) is not None:
+                        return _VERIFY_ARTICLE
+                    return _VERIFY_BROKEN
+                return _VERIFY_ARTICLE
 
             results = await asyncio.gather(
-                *(is_article(entry) for entry in candidates)
+                *(probe(entry) for entry in candidates)
             )
+
         verified = [
-            entry for entry, ok in zip(candidates, results) if ok
+            entry for entry, verdict in zip(candidates, results)
+            if verdict == _VERIFY_ARTICLE
+        ]
+        unread = [
+            entry for entry, verdict in zip(candidates, results)
+            if verdict == _VERIFY_UNKNOWN
+        ]
+        broken = [
+            entry for entry, verdict in zip(candidates, results)
+            if verdict == _VERIFY_BROKEN
         ]
 
-        rejected = len(candidates) - len(verified)
+        rejected = len(broken)
+        read = len(verified) + rejected
+
+        # The threshold is unchanged - more than half of the probe
+        # window was links that were READ and named no story - but the
+        # denominator is the whole window, so a window the reader
+        # could not read at all can never raise. Before this change a
+        # refused publisher whose reader was rate-limited raised on
+        # every candidate and the outlet was thrown away.
         if candidates and rejected / len(candidates) > 0.5:
             raise ValueError(
                 f"{rejected}/{len(candidates)} candidate links for "
                 f"'{self.source.get('name')}' did not resolve to an article "
-                f"page. The listing is probably client-rendered, or "
+                f"page"
+                + (
+                    f" ({len(unread)} of them could not be read at all)"
+                    if unread
+                    else ""
+                )
+                + f". The listing is probably client-rendered, or "
                 f"selector_config in the sources table needs updating. "
                 f"Refusing to store {rejected} broken rows."
             )
 
         if rejected:
             logger.info(
-                "%s: dropped %d listing link(s) that were not articles",
-                self.source.get("name"), rejected,
+                "%s: dropped %d of the %d candidate link(s) that were read "
+                "and named no story",
+                self.source.get("name"), rejected, read,
             )
 
-        # Anything past the probe window is kept but flagged: we did not
-        # check it, so we cannot claim it is valid.
-        return verified + entries[max_checks:]
+        if unread:
+            logger.info(
+                "%s: %d candidate link(s) could not be read at all and "
+                "are kept unverified - the reader was not able to fetch "
+                "them.",
+                self.source.get("name"), len(unread),
+            )
+
+        # The candidates we could not read are KEPT: the listing's own
+        # card vouches for them, and we have no evidence against them.
+        # Anything past the probe window is kept for the same reason:
+        # we did not check it, so we cannot claim it is invalid.
+        return verified + unread + entries[max_checks:]
 
     # -- normalisation -----------------------------------------------------
 

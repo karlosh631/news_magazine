@@ -52,6 +52,25 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+#: The most rows one prune may delete.
+#:
+#: A prune that empties a table in one go is a prune that has stopped
+#: being a prune, so every delete here is bounded. Five thousand rows
+#: is far more than a pass of failures or a pass of reels produces, and
+#: it is small enough that the delete is quick.
+PRUNE_DELETE_LIMIT = 5_000
+
+#: The most rows the cap-prune may delete in one pass.
+REELS_CAP_DELETE_LIMIT = 1_000
+
+#: How many ids go into one delete.
+#:
+#: A delete carries its ids in the query string. Two hundred uuids is
+#: about eight kilobytes, which every proxy in front of PostgREST will
+#: pass; five thousand is two hundred kilobytes, which none of them
+#: will.
+REELS_DELETE_CHUNK = 200
+
 logger = logging.getLogger(__name__)
 
 #: What one row of each table is assumed to weigh, in bytes, when the
@@ -110,6 +129,71 @@ async def _delete_older_than(db, table: str, column: str, cutoff: datetime) -> i
             table,
             cutoff.date().isoformat(),
         )
+    return deleted
+
+
+async def _delete_beyond_cap(db, table: str, column: str, keep: int) -> int:
+    """
+    Delete the oldest rows of a table until only `keep` are left.
+
+    The reels table is the one that needs this: it used to be fed by a
+    provider whose corpus is finished, so it barely grew. It is now
+    also fed by this site's own news - every new story with a verified
+    photograph is one new reel - so it grows with the news, at a
+    hundred rows a pass, and the pass runs every three minutes.
+
+    The cap is a backstop under the age-based prune: a reel that is
+    three days old is a reel nobody will scroll to, and a table that
+    grows for ever is a database that fills up.
+
+    IT IS DONE IN TWO STEPS, AND WHY
+    -------------------------------
+    A `DELETE ... WHERE <column> < ?` with a LIMIT is a promise about
+    the statement's cost that PostgREST does not keep, so the rows to
+    go are READ first - oldest first, at most `keep` of them - and
+    exactly those are then deleted by primary key.
+
+    The delete is in chunks, because a list of five thousand uuids is a
+    two-hundred-kilobyte query string and a proxy in front of
+    PostgREST will refuse it long before PostgREST does.
+    """
+    from app.services.ingestion import db_call
+
+    try:
+        total = await _count(db, table)
+        if total <= keep:
+            return 0
+
+        surplus = min(total - keep, REELS_CAP_DELETE_LIMIT)
+
+        listed = await db_call(
+            lambda: db.table(table)
+            .select("id")
+            .order(column, ascending=True)
+            .limit(surplus)
+            .execute()
+        )
+        ids = [
+            str(row.get("id"))
+            for row in (listed.data or [])
+            if isinstance(row, dict) and row.get("id")
+        ]
+        if not ids:
+            return 0
+
+        deleted = 0
+        for start in range(0, len(ids), REELS_DELETE_CHUNK):
+            chunk = ids[start : start + REELS_DELETE_CHUNK]
+            response = await db_call(
+                lambda chunk=chunk: db.table(table).delete().in_("id", chunk).execute()
+            )
+            deleted += len(response.data or []) if response.data is not None else 0
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not cap %s: %s", table, exc)
+        return 0
+
+    if deleted:
+        logger.info("Capped %s: deleted %d row(s) past the cap.", table, deleted)
     return deleted
 
 
@@ -247,6 +331,8 @@ async def run_storage_guard(db, settings: Any) -> dict:
         "logs_pruned": 0,
         "errors_pruned": 0,
         "analytics_pruned": 0,
+        "reels_pruned": 0,
+        "reels_capped": 0,
         "emergency_pruned": 0,
         "used_bytes": None,
         "limit_bytes": int(settings.database_size_limit_bytes),
@@ -271,6 +357,35 @@ async def run_storage_guard(db, settings: Any) -> dict:
         "analytics_events",
         "occurred_at",
         now - timedelta(days=settings.analytics_retention_days),
+    )
+
+    # ---- 1b. The reels go by age and by count ----
+    #
+    # The reels table used to be fed by a provider whose corpus is
+    # finished — Wikimedia Commons, asked for the newest pages of twelve
+    # fixed terms — so it grew by a few dozen rows a week and nothing
+    # ever pruned it because nothing needed to.
+    #
+    # It is now ALSO fed by this site's own news: every new story with
+    # a verified photograph becomes a reel, so the Reels page moves in
+    # step with the news page. That is the point of it, and it is also
+    # a table that now grows with the news — a hundred rows a pass,
+    # every three minutes, for ever.
+    #
+    # So it is pruned twice: by age, because a reel from three days ago
+    # is a reel nobody scrolls to; and by count, because the age window
+    # alone still leaves tens of thousands of rows.
+    report["reels_pruned"] = await _delete_older_than(
+        db,
+        "reels",
+        "ingested_at",
+        now - timedelta(days=int(getattr(settings, "reels_retention_days", 3))),
+    )
+    report["reels_capped"] = await _delete_beyond_cap(
+        db,
+        "reels",
+        "ingested_at",
+        int(getattr(settings, "max_reel_rows", 20_000)),
     )
 
     # ---- 2. How full is it? ----

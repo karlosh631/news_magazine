@@ -430,6 +430,32 @@ async def _ingest_one(
         )
         return health
 
+    # The catalogue is handed to the source before it is asked for
+    # anything, for the sources that want to know what is already
+    # stored.
+    #
+    # It is duck-typed rather than part of the protocol because the
+    # protocol is deliberately three members wide: every extra method
+    # is another thing a new provider has to get wrong, and this one is
+    # optional. A provider that does not implement `prepare` is simply
+    # not told anything, which is what every provider written before
+    # this existed does.
+    #
+    # The store owns the database, so the handle is passed in rather
+    # than opened by the adapter. A failure here is not a failure of
+    # the pass: the source falls back to whatever it would have done
+    # without the answer.
+    prepare = getattr(source, "prepare", None)
+    if callable(prepare):
+        try:
+            await prepare(db)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the fallback is the point
+            logger.warning(
+                "reels: %s could not read the catalogue: %s", key, _describe(exc)
+            )
+
     try:
         fetched = await source.fetch(limit=per_source)
     except asyncio.CancelledError:

@@ -333,6 +333,9 @@ class IngestionResult:
     enriched: int = 0
     errors: int = 0
     pruned: int = 0
+    # The source_errors rows this poll deleted because they were past
+    # the retention window.
+    errors_pruned: int = 0
     links_skipped: int = 0
     # Articles whose proposed image could not be proven loadable and
     # were therefore stored without artwork. Not errors — a deliberate
@@ -380,6 +383,7 @@ class IngestionResult:
             "enriched": self.enriched,
             "errors": self.errors,
             "pruned": self.pruned,
+            "errors_pruned": self.errors_pruned,
             "links_skipped": self.links_skipped,
             "images_dropped": self.images_dropped,
             "images_repaired": self.images_repaired,
@@ -1972,6 +1976,91 @@ async def prune_old_articles(db, retention_hours: int, max_rows: int) -> int:
         return 0
 
 
+#: How many error rows one prune may remove.
+#:
+#: The prune is bounded so that it can never turn into a long-running
+#: statement on a busy table, and so that it always finishes inside the
+#: pass's window. Whatever is left over is removed by the next pass.
+SOURCE_ERROR_PRUNE_LIMIT = 500
+
+
+async def prune_old_source_errors(
+    db,
+    retention_hours: int,
+    limit: int = SOURCE_ERROR_PRUNE_LIMIT,
+) -> int:
+    """
+    Delete the source_errors rows that are past the retention window.
+
+    WHY THE ERRORS TABLE NEEDED THIS
+    --------------------------------
+    One row is written per failure - see _log_error - and a publisher
+    that fails every two minutes writes thirty rows an hour. The table
+    grew for ever, and the operator's admin panel, which lists the
+    recent errors, spent its time showing failures from three days ago
+    that nobody is going to act on. Nothing pruned it by age: the
+    storage guard prunes the log tables every THIRTY days, which is a
+    month of the same noise.
+
+    HOW IT IS BOUNDED
+    -----------------
+    Two steps, both of them small:
+
+        1. the ids of the expired rows are READ, oldest first, and at
+           most `limit` of them (500). The filter is on
+           `occurred_at`, which carries the index
+           `source_errors_occurred_at_idx` (migration 0034), so this
+           is an index range scan and not a table scan;
+        2. exactly those ids are deleted, by primary key.
+
+    The delete is by id rather than a bare `DELETE ... WHERE
+    occurred_at < ?` on purpose: a delete with a LIMIT is a promise
+    about the statement's cost that PostgREST does not keep, and a
+    delete with no limit on a table that has been growing for a year
+    is the thing this function exists to avoid.
+
+    It never raises. A prune that fails must not fail the pass.
+    """
+    try:
+        hours = max(int(retention_hours), 0)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+        rows = await db_call(
+            lambda: db.table("source_errors")
+            .select("id")
+            .lt("occurred_at", cutoff.isoformat())
+            .order("occurred_at")
+            .limit(max(int(limit), 1))
+            .execute()
+        )
+
+        ids = [
+            row.get("id")
+            for row in (rows.data or [])
+            if isinstance(row, dict) and row.get("id")
+        ]
+
+        if not ids:
+            return 0
+
+        await db_call(
+            lambda: db.table("source_errors")
+            .delete()
+            .in_("id", ids)
+            .execute()
+        )
+
+        logger.info(
+            "Pruned %s source error(s) older than %sh.", len(ids), hours,
+        )
+        return len(ids)
+    except Exception:
+        logger.exception(
+            "Could not prune old source errors; they will age out next pass"
+        )
+        return 0
+
+
 
 #: How old a story may be and still have its picture read from its own
 #: page during a pass. The archive is stored from the feed's picture
@@ -2429,6 +2518,32 @@ async def run_source_sync(
     if prune:
         result.pruned = await prune_old_articles(
             db, settings.retention_hours, settings.max_article_rows
+        )
+
+        # THE ERRORS GO TOO
+        #
+        # The errors table is written by _log_error, one row per
+        # failure, and a publisher that fails every two minutes writes
+        # thirty rows an hour. Nothing removed them by age, so the
+        # table - and the operator's panel, which lists the recent
+        # errors - grew for ever.
+        #
+        # It is pruned HERE, in the same place and the same pass as
+        # the articles, so the two retention windows cannot drift
+        # apart and the pass always ends with the tables the size it
+        # expects them to be.
+        #
+        # It is bounded (at most SOURCE_ERROR_PRUNE_LIMIT rows) and it
+        # is indexed (the filter is on occurred_at, which carries an
+        # index), and it never raises: a prune that fails must not
+        # fail the pass.
+        result.errors_pruned = await prune_old_source_errors(
+            db,
+            getattr(
+                settings,
+                "source_error_retention_hours",
+                settings.retention_hours,
+            ),
         )
 
     # ---- 6. Per-article pipeline ----

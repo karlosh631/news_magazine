@@ -484,16 +484,31 @@ export function ReelsFeed({
       reels.length > 0 ? Math.floor(Math.random() * reels.length) : 0;
   }
 
-  const rotatedReels = useMemo(() => {
-    if (reels.length === 0) return reels;
-    const offset = rotation.current ?? 0;
-    return [...reels.slice(offset), ...reels.slice(0, offset)];
-  }, [reels]);
+  /*
+    THE NEWEST CLIPS ARE ALWAYS AT THE HEAD
+    -----------------------------------------
+    The rotation used to decide the whole order, and it starts at a
+    random point in the catalogue - so the clips the reader had come
+    for, the ones the pipeline had just fetched, were usually not on
+    the screen at all. The reader's complaint was "the latest reels
+    are missing on the UI", and it was true: with 245 clips and a
+    random offset, the chance of the newest one being on the first
+    screen was eight in two hundred and forty-five.
 
-  const mountedReels = useMemo(
-    () => rotatedReels.slice(0, Math.max(REELS_WINDOW, windowSize)),
-    [rotatedReels, windowSize]
-  );
+    So the head of the feed is the newest clips, always, and the
+    rotation moves through the REST of the catalogue. Two readers
+    still see different clips, and the newest is still on the screen.
+  */
+  const mountedReels = useMemo(() => {
+    const count = Math.max(REELS_WINDOW, windowSize);
+    const head = reels.slice(0, count);
+    const rest = reels.slice(count);
+    if (rest.length === 0) return head;
+    const offset = rotation.current ?? 0;
+    const rotatedRest =
+      [...rest.slice(offset), ...rest.slice(0, offset)];
+    return [...head, ...rotatedRest];
+  }, [reels, windowSize]);
 
   /*
     The story the reader has open, if any.

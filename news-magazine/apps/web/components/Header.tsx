@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
+import { NepalClock } from "@/components/NepalClock";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { SearchModal } from "@/components/SearchModal";
 
@@ -414,6 +415,9 @@ export function Header({ categories }: { categories: NavCategory[] }) {
           every page that a reader taps to move.
         */}
         <div className="flex items-center gap-2">
+          {/* The time in Nepal, in the reader's own clock. */}
+          <NepalClock />
+
           {/* The dropdown hangs off the input, not off the header. It is
               `relative` so the panel inside it has something to be
               absolute against. */}

@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { EmptyState } from "@/components/EmptyState";
@@ -13,14 +14,19 @@ import {
 } from "@/lib/daily-info";
 import { getCategories, getLatestArticles } from "@/lib/news";
 import { getReels } from "@/lib/reels";
+import {
+  fetchRashifalPeriod,
+  RASHIFAL_PERIODS,
+  readPeriod,
+} from "@/lib/rashifal-periods";
 import { SITE_NAME, SITE_URL, jsonLd } from "@/lib/site";
 
 export const dynamic = "force-dynamic";
 
 interface Props {
   params: Promise<{ slug: string }>;
-  /** The day being asked for, on the Rashifal page. */
-  searchParams?: Promise<{ date?: string }>;
+  /** The day and the period being asked for, on the Rashifal page. */
+  searchParams?: Promise<{ date?: string; period?: string }>;
 }
 
 export async function generateStaticParams() {
@@ -135,10 +141,29 @@ export default async function CategoryPage({ params, searchParams }: Props) {
     const known = days.some((day) => day.date === requested);
     const date = known ? (requested as string) : today;
 
-    const [panchang, signs] = await Promise.all([
+    /*
+      THE FOUR PERIODS
+      ----------------
+      The source's own Rashifal page carries four tabs - daily,
+      weekly, monthly and yearly - and the reader asked for all four:
+      the site could answer one of their four questions.
+
+      The daily tab is the site's OWN copy, read from `daily_rashifal`
+      (the ingestion stores twelve rows a day), so it never depends on
+      the publisher answering. The other three are read from the
+      source when the page is built and cached for an hour.
+    */
+    const period = readPeriod((await searchParams)?.period);
+
+    const [panchang, dailySigns, periodSigns] = await Promise.all([
       getPanchangFor(date),
       getRashifalFor(date),
+      fetchRashifalPeriod(period),
     ]);
+
+    // The daily tab shows the stored horoscopes; the other three show
+    // the period's own.
+    const signs = period === "daily" ? dailySigns : periodSigns;
 
     /*
       WHAT THIS PAGE IS, FOR A MACHINE
@@ -201,6 +226,41 @@ export default async function CategoryPage({ params, searchParams }: Props) {
             heading.
           */}
           <h1 className="sr-only">{pageTitle}</h1>
+
+          {/*
+            THE FOUR TABS
+
+            The source's own page has them, and so does this one: a
+            reader asking for "this week's Scorpio" is asking a
+            different question from one asking for "today's Scorpio",
+            and the site could only answer one of them.
+
+            The period is in the URL (`?period=weekly`), so the link can
+            be sent to somebody and they will see the same week.
+          */}
+          <nav
+            aria-label="राशिफलको अवधि"
+            className="mb-6 flex flex-wrap gap-2"
+          >
+            {RASHIFAL_PERIODS.map((entry) => {
+              const active = entry.key === period;
+              return (
+                <Link
+                  key={entry.key}
+                  href={`/category/rashifal?period=${entry.key}`}
+                  aria-current={active ? "page" : undefined}
+                  className={
+                    active
+                      ? "inline-flex min-h-[40px] items-center rounded-full border border-blue-600 bg-blue-600 px-4 text-sm font-semibold text-white"
+                      : "inline-flex min-h-[40px] items-center rounded-full border border-gray-300 px-4 text-sm font-semibold text-gray-700 transition hover:border-blue-600 hover:text-blue-700 dark:border-gray-600 dark:text-gray-200 dark:hover:border-blue-400"
+                  }
+                >
+                  {entry.label}
+                </Link>
+              );
+            })}
+          </nav>
+
           <PanchangPanel
             panchang={panchang}
             signs={signs}

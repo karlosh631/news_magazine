@@ -163,27 +163,29 @@ test.describe("merging a batch into a running feed", () => {
     expect(merged[0]!.source_count).toBe(1);
   });
 
-  test("the newest NEWS comes first, whatever order we fetched it in", () => {
-    // The page is the newest NEWS. The pipeline reads five pages of
-    // every feed, so it fetches a lot of the ARCHIVE, and ordering by
-    // arrival put hours-old stories at the top of the page because
-    // they had been fetched last.
+  test("the newest FETCHED comes first, whatever order it was published in", () => {
+    // The page is the newest FETCHED. The reader asked for it in the
+    // same words several times: "the new articles must be shown on the
+    // top based on the time immediatley fetch".
+    //
     // The helper is (id, ingested, published): "early" was published an
-    // hour before "late", but it was fetched after it.
+    // hour before "late", but it was fetched after it - so it is the
+    // one the reader sees, because it arrived last.
     const publishedEarlier = story("early", "2026-10-20T11:00:00Z", "2026-10-20T10:00:00Z");
     const publishedLater = story("late", "2026-10-20T08:00:00Z", "2026-10-20T11:00:00Z");
     expect(
       [publishedEarlier, publishedLater].sort(byNewest).map((a) => a.id)
-    ).toEqual(["late", "early"]);
+    ).toEqual(["early", "late"]);
   });
 
-  test("within one arrival, the newer publication wins", () => {
-    // Two outlets file the same story in the same second; the copy
-    // published later is the one that gets there first.
-    const publishedFirst = story("first", "2026-10-20T09:00:00Z", "2026-10-20T08:00:00Z");
-    const publishedLast = story("last", "2026-10-20T09:00:00Z", "2026-10-20T08:30:00Z");
+  test("within one arrival, the id breaks the tie", () => {
+    // Two rows fetched in the same instant. The id decides, so the
+    // server's answer and the browser's sort cannot disagree and
+    // reshuffle the page under the reader.
+    const publishedFirst = story("00000000-0000-5000-8000-000000000001", "2026-10-20T09:00:00Z", "2026-10-20T08:00:00Z");
+    const publishedLast = story("00000000-0000-5000-8000-000000000002", "2026-10-20T09:00:00Z", "2026-10-20T08:30:00Z");
     expect(
       [publishedFirst, publishedLast].sort(byNewest).map((a) => a.id)
-    ).toEqual(["last", "first"]);
+    ).toEqual(["00000000-0000-5000-8000-000000000002", "00000000-0000-5000-8000-000000000001"]);
   });
 });

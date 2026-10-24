@@ -53,7 +53,7 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: `${SITE_NAME} — Live `,
+    title: `${SITE_NAME} — Live`,
     description:
       "Live Nepali and English news from more than 20 outlets across Nepal.",
     images: [SITE_LOGO],

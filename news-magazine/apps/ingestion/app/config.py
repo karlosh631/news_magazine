@@ -241,6 +241,24 @@ class Settings(BaseSettings):
     reader_proxy_url: str = "https://r.jina.ai"
 
     # ---------------------------------------------------------
+    # The reader's API key
+    # ---------------------------------------------------------
+    #
+    # The reader serves twenty pages a minute to an address with no
+    # key, and sixty to one with a key. The free ceiling was the
+    # pass's floor: every page of a publisher that refuses this
+    # address had to wait its turn, and the pass could not go faster
+    # than the reader would serve it.
+    #
+    # With a key the wait is a third of what it was, and a pass can
+    # read every publisher's article pages - which is what proves the
+    # pictures and takes the headlines off the story's own page.
+    #
+    # The key is a CREDENTIAL. It is read from the environment, it is
+    # never logged, and it is never sent anywhere except the reader.
+    jina_api_key: str = ""
+
+    # ---------------------------------------------------------
     # Storage pressure
     # ---------------------------------------------------------
     # The database must never be the reason the site stops. A free

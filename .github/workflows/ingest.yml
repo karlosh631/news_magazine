@@ -333,6 +333,17 @@ jobs:
 
       - name: Run one sync pass
         working-directory: news-magazine/apps/ingestion
+        env:
+          # The reader's key, passed straight to the process that reads
+          # it. Without it the reader serves twenty pages a minute and
+          # the pass is held to that pace; with it it serves sixty, and
+          # every publisher's article page can be read - which is what
+          # proves the pictures and takes the headlines off the story's
+          # own page.
+          #
+          # It is a credential, so it is never written to a file, never
+          # echoed and never logged.
+          JINA_API_KEY: ${{ secrets.JINA_API_KEY }}
         run: |
           python -m scripts.sync_once 2>&1 | tee sync.log
 

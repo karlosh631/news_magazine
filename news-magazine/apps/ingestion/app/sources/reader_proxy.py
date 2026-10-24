@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 
 import httpx
@@ -122,17 +123,53 @@ BLOCKED_STATUS_CODES = (401, 403, 405, 406, 407, 429, 451)
 #: ignoring it is that the pictures never arrive.
 READER_MIN_INTERVAL_SECONDS = 3.1
 
+#: With an API key the reader serves sixty pages a minute instead of
+#: twenty, and the wait between reads is a third of what it was. The
+#: key is the difference between a pass that reads every publisher's
+#: article pages and a pass that gives up on the ones that refuse
+#: this address.
+READER_MIN_INTERVAL_SECONDS_WITH_KEY = 1.0
+
 _reader_lock = asyncio.Lock()
 _reader_last_call: float = 0.0
+
+
+def _api_key() -> str:
+    """
+    The reader's API key, if one is configured.
+
+    Read from the settings, and from the environment directly, because
+    the two live in different places: the settings file is how the
+    deployment configures it, and the environment is what a CI run
+    and a developer machine both have.
+    """
+    for value in (
+        os.environ.get("JINA_API_KEY"),
+        os.environ.get("Jina_API_Key"),
+    ):
+        if value and value.strip():
+            return value.strip()
+
+    try:
+        from app.config import get_settings
+
+        return (get_settings().jina_api_key or "").strip()
+    except Exception:
+        return ""
 
 
 async def _wait_for_the_reader() -> None:
     """Hold the reader to its own pace."""
     global _reader_last_call
+    interval = (
+        READER_MIN_INTERVAL_SECONDS_WITH_KEY
+        if _api_key()
+        else READER_MIN_INTERVAL_SECONDS
+    )
     async with _reader_lock:
         elapsed = time.monotonic() - _reader_last_call
-        if elapsed < READER_MIN_INTERVAL_SECONDS:
-            await asyncio.sleep(READER_MIN_INTERVAL_SECONDS - elapsed)
+        if elapsed < interval:
+            await asyncio.sleep(interval - elapsed)
         _reader_last_call = time.monotonic()
 
 
@@ -168,6 +205,20 @@ async def fetch_via_reader(
         "x-respond-with": "html",
         "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
     }
+
+    # THE KEY, WHEN THERE IS ONE
+    # --------------------------
+    # The reader serves twenty pages a minute to an address with no
+    # key and sixty to one with a key, and the key is a CREDENTIAL: it
+    # is read from the environment, it is sent only to the reader, and
+    # it is never logged.
+    #
+    # The key also shortens the wait between reads, which is what
+    # lets a pass read every publisher's article pages instead of
+    # giving up on the ones that refuse this address.
+    api_key = _api_key()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
 
     await _wait_for_the_reader()
 

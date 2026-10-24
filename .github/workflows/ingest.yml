@@ -198,16 +198,26 @@ jobs:
           WORKFLOW: ingest.yml
         run: |
           set +e
-          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -X POST \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW}/dispatches" \
-            -d '{"ref":"main"}')
-          if [ "$code" = "204" ]; then
-            echo "::notice::The next run is queued. It starts as soon as this one ends."
-          else
-            echo "::warning::Could not queue the next run (${code}). The cron will start another one when it next fires."
-          fi
+          # Three tries, because this step is the only thing keeping
+          # the chain alive between the cron's own firings. A single
+          # failed POST - a moment of the API being busy, a proxy in
+          # front of it hiccuping - and the site would wait for the
+          # next cron, which has been measured at three to five HOURS
+          # apart. The cron is the backstop; this is the road.
+          for attempt in 1 2 3; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -X POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW}/dispatches" \
+              -d '{"ref":"main"}')
+            if [ "$code" = "204" ]; then
+              echo "::notice::The next run is queued. It starts as soon as this one ends."
+              exit 0
+            fi
+            echo "Attempt ${attempt} to queue the next run answered ${code}."
+            sleep 5
+          done
+          echo "::warning::Could not queue the next run (${code}). The cron will start another one when it next fires."
           exit 0
 
       - uses: actions/checkout@v4

@@ -72,9 +72,25 @@ async function loadWebPush(): Promise<WebPushLike | null> {
 
 export async function POST(request: Request) {
   // ---- 1. Who is calling? ----------------------------------------
-  const secret = request.headers.get("x-ingestion-secret") ?? "";
-  const expected = process.env.INGESTION_SECRET ?? "";
-  if (!expected || secret !== expected) {
+  //
+  // The worker and the site already share two secrets, and the site
+  // does not necessarily have both of them: the deployment may have
+  // one and the other only on the worker. So the caller presents both
+  // and either one is enough. This is the same rule the health route
+  // uses, for the same reason.
+  const presented = [
+    request.headers.get("x-ingestion-secret") ?? "",
+    request.headers.get("x-cron-secret") ?? "",
+  ].filter(Boolean);
+  const expected = [
+    process.env.INGESTION_SECRET ?? "",
+    process.env.CRON_SECRET ?? "",
+  ].filter(Boolean);
+
+  const authorised =
+    expected.length > 0 && presented.some((value) => expected.includes(value));
+
+  if (!authorised) {
     return NextResponse.json(
       { error: "Not authorised." },
       { status: 401, headers: { "Cache-Control": NO_STORE } }

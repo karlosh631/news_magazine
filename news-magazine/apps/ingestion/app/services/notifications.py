@@ -61,8 +61,16 @@ async def notify_new_news(
     if not base:
         return False
 
-    secret = (getattr(settings, "ingestion_secret", "") or "").strip()
-    if not secret:
+    # Both of the secrets the worker and the site share. The site may
+    # have either of them and not the other, so both are presented and
+    # either one is enough.
+    headers = {
+        "x-ingestion-secret": (
+            getattr(settings, "ingestion_secret", "") or ""
+        ).strip(),
+        "x-cron-secret": (getattr(settings, "cron_secret", "") or "").strip(),
+    }
+    if not any(headers.values()):
         return False
 
     url = f"{base}/api/notifications/push"
@@ -77,7 +85,7 @@ async def notify_new_news(
             response = await client.post(
                 url,
                 json=payload,
-                headers={"x-ingestion-secret": secret},
+                headers={**headers, "Content-Type": "application/json"},
             )
     except Exception as exc:  # noqa: BLE001 — a ping must never fail a pass
         logger.info("The news notification could not be sent: %s", str(exc)[:160])

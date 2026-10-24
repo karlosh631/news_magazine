@@ -376,7 +376,16 @@ export function Header({ categories }: { categories: NavCategory[] }) {
           className="flex min-h-[48px] shrink-0 items-center gap-2 font-bold text-gray-900 transition hover:text-blue-600 sm:text-xl"
         >
           <LogoIcon />
-          <span className="truncate">NEWS</span>
+          {/*
+            THE WORDMARK.
+
+            The header is one row, and on the narrowest phones every
+            pixel of it is a control. The wordmark is the one thing
+            there that is not a control, so it is the first to go:
+            the logo beside it is the same mark, and a reader who
+            cannot read the word does not need to.
+          */}
+          <span className="hidden truncate sm:inline">NEWS</span>
         </Link>
 
         <nav className="hidden min-w-0 items-center gap-1 overflow-x-auto md:flex horizontal-scroll">
@@ -415,7 +424,17 @@ export function Header({ categories }: { categories: NavCategory[] }) {
           treatment for the same reason: they are the one thing on
           every page that a reader taps to move.
         */}
-        <div className="flex items-center gap-2">
+        {/*
+          THE CONTROLS, AND WHY THEY ARE TIGHT ON A PHONE.
+
+          Five 48-pixel controls plus the logo do not fit across a
+          360-pixel phone, and a control that is clipped out of the
+          header is a control nobody can reach. So the gap is tighter
+          on the narrow screens, the wordmark is dropped, and the
+          language toggle moves into the menu below the header - which
+          is where a setting belongs on a phone anyway.
+        */}
+        <div className="flex items-center gap-1.5 sm:gap-2">
           {/* The time in Nepal, in the reader's own clock. */}
           <NepalClock />
 
@@ -463,7 +482,7 @@ export function Header({ categories }: { categories: NavCategory[] }) {
             type="button"
             onClick={toggleLanguage}
             aria-label="Toggle Nepali and English labels"
-            className="flex h-12 min-w-12 items-center justify-center rounded-md border border-gray-300 px-3 text-xs font-semibold text-gray-700 hover:bg-gray-100"
+            className="hidden h-12 min-w-12 items-center justify-center rounded-md border border-gray-300 px-3 text-xs font-semibold text-gray-700 hover:bg-gray-100 sm:flex"
           >
             {language === "en" ? "ने" : "EN"}
           </button>
@@ -556,6 +575,26 @@ export function Header({ categories }: { categories: NavCategory[] }) {
               </Link>
             );
           })}
+
+          {/*
+            THE LANGUAGE TOGGLE, ON A PHONE.
+
+            It is in the header row on the wider screens, where there
+            is room for it. On a phone there is not, and a control
+            that is clipped out of the header is a control nobody can
+            reach - so it lives here instead.
+          */}
+          <button
+            type="button"
+            onClick={() => {
+              toggleLanguage();
+              setMenuOpen(false);
+            }}
+            aria-label="Toggle Nepali and English labels"
+            className="inline-flex min-h-[48px] items-center justify-center rounded-md border border-gray-300 px-3 text-sm font-semibold text-gray-700 sm:hidden"
+          >
+            {language === "en" ? "नेपाली" : "English"}
+          </button>
         </nav>
       )}
 

@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { englishDate } from "@/lib/calendar-core";
 import type { Panchang, PanchangDay, RashifalSign } from "@/lib/daily-info";
 
 /**
@@ -84,9 +85,20 @@ export function PanchangPanel({
         <h2 className="mt-1 font-headline text-2xl font-bold text-gray-900 dark:text-gray-100">
           {panchang.bsLabel ?? panchang.date}
         </h2>
+        {/*
+          THE DATE, IN BOTH LANGUAGES.
+
+          A Nepali reader reads the Bikram Sambat date first, and it is
+          the one that is right for them. But the date they have to
+          write on a form, or look up in a Western diary, is the
+          Gregorian one — and the page is read by people whose English
+          is the only language they have. So the weekday is given in
+          both languages and the Gregorian date is given outright.
+        */}
         <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
           {panchang.weekdayNe ?? weekdayNe}
           {panchang.weekday ? ` · ${panchang.weekday}` : ""}
+          {panchang.date ? ` · ${englishDate(panchang.date)}` : ""}
         </p>
 
         {/* The days that can be picked. */}
@@ -96,12 +108,12 @@ export function PanchangPanel({
 
         {/* The five limbs. */}
         <dl className="mt-5 grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3">
-          <Limb label="तिथि" value={panchang.tithiFull ?? panchang.tithi} />
-          <Limb label="नक्षत्र" value={panchang.nakshatra} />
-          <Limb label="योग" value={panchang.yoga} />
-          <Limb label="करण" value={panchang.karana} />
-          <Limb label="पक्ष" value={panchang.paksha} />
-          <Limb label="चन्द्र कला" value={panchang.moonPhase} />
+          <Limb label="तिथि (Tithi)" value={panchang.tithiFull ?? panchang.tithi} />
+          <Limb label="नक्षत्र (Nakshatra)" value={panchang.nakshatra} />
+          <Limb label="योग (Yoga)" value={panchang.yoga} />
+          <Limb label="करण (Karana)" value={panchang.karana} />
+          <Limb label="पक्ष (Paksha)" value={panchang.paksha} />
+          <Limb label="चन्द्र कला (Moon phase)" value={panchang.moonPhase} />
         </dl>
       </section>
 
@@ -111,10 +123,10 @@ export function PanchangPanel({
           सूर्य
         </h3>
         <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3">
-          <Limb label="सूर्योदय" value={panchang.sunrise} />
-          <Limb label="सूर्यास्त" value={panchang.sunset} />
+          <Limb label="सूर्योदय (Sunrise)" value={panchang.sunrise} />
+          <Limb label="सूर्यास्त (Sunset)" value={panchang.sunset} />
           <Limb
-            label="दिनको लम्बाइ"
+            label="दिनको लम्बाइ (Day length)"
             value={
               panchang.dayLengthMinutes !== null
                 ? `${Math.floor(panchang.dayLengthMinutes / 60)} घण्टा ${

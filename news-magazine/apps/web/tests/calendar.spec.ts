@@ -79,7 +79,11 @@ test.describe("the source's own data", () => {
     expect(day!.dayBs).toBe(7);
     expect(day!.tithiShort).toBe("त्रयोदशी");
     expect(day!.events).toEqual([
-      { title: "रविसप्तमी व्रत", isHoliday: true },
+      {
+        title: "रविसप्तमी व्रत",
+        titleEn: "Ravi Vrata",
+        isHoliday: true,
+      },
     ]);
     expect(day!.dateAd).toBe("2026-10-24");
     expect(day!.isToday).toBe(true);

@@ -15,6 +15,9 @@ import {
   allDays,
   bsKey,
   CALENDAR_VIEWS,
+  englishDate,
+  englishDay,
+  WEEKDAYS_EN,
   kathmanduDay,
   monthOf,
   weekOf,
@@ -92,6 +95,17 @@ const WEEKDAY_HEADERS = [
   "बिहिबार",
   "शुक्रबार",
   "शनिबार",
+];
+
+/** The same weekdays, in English. */
+const WEEKDAY_HEADERS_EN = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
 ];
 
 export function NepaliCalendar({
@@ -414,7 +428,9 @@ export function NepaliCalendar({
             नेपाली पात्रो
           </h2>
           <p className="text-xs text-gray-500 dark:text-gray-400">
-            {month ? `${month.monthNameNe} ${month.yearBsNe}` : ""}
+            {month
+              ? `${month.monthNameNe} ${month.yearBsNe} · ${month.monthNameEn} ${month.yearBs}`
+              : ""}
           </p>
         </div>
 
@@ -490,35 +506,15 @@ export function NepaliCalendar({
       )}
 
       {/*
-        THE ATTRIBUTION.
+        THE ATTRIBUTION IS NOT HERE.
 
-        The calendar is read from a publisher, and a reader who wants
-        to check a date against the source can. It is deliberately the
-        quietest thing on the page: a line of text at nine pixels, in
-        a grey that barely separates it from the background. The
-        attribution is not the point of the calendar, and it must not
-        look like it is.
+        The page carries ONE attribution line, under the whole page,
+        and this widget used to carry a second one of its own — so the
+        reader saw "Source: hamropatro.com/date/2083-7-7" twice, once
+        inside the calendar and once under it. One line, at the foot
+        of the page, small enough not to be read, is an attribution.
+        Two is a banner.
       */}
-      <p className="source-attribution px-4 pb-3 sm:px-5">
-        Source:{" "}
-        <a
-          href={sourceDayUrl({
-            yearBs: selectedDay?.yearBs ?? today?.yearBs ?? 2083,
-            monthBs: selectedDay?.monthBs ?? today?.monthBs ?? 7,
-            dayBs: selectedDay?.dayBs ?? today?.dayBs ?? 7,
-          })}
-          rel="noopener noreferrer nofollow"
-          target="_blank"
-          className="underline underline-offset-2"
-        >
-          hamropatro.com/date/
-          {selectedDay
-            ? bsKey(selectedDay)
-            : today
-              ? bsKey(today)
-              : "2083-7-7"}
-        </a>
-      </p>
 
       {/* ================= THE PANEL ================= */}
       {open && detail ? (
@@ -542,6 +538,9 @@ export function NepaliCalendar({
               <div className="min-w-0">
                 <p className="text-xs font-semibold uppercase tracking-wide text-blue-700 dark:text-blue-300">
                   {detail.weekdayNe ?? ""}
+                  {detail.dayOfWeek !== undefined
+                    ? ` · ${WEEKDAYS_EN[detail.dayOfWeek % 7]}`
+                    : ""}
                 </p>
                 <h3
                   id={titleId}
@@ -550,9 +549,9 @@ export function NepaliCalendar({
                   {detail.monthNe ?? ""} {detail.dayBsNp},{" "}
                   {detail.yearBsNe ?? ""}
                 </h3>
-                {detail.dateAd ? (
+                {englishDate(detail.dateAd) ? (
                   <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                    {detail.dateAd}
+                    {englishDate(detail.dateAd)}
                   </p>
                 ) : null}
               </div>
@@ -626,6 +625,11 @@ export function NepaliCalendar({
                         />
                         <span>
                           {event.title}
+                          {event.titleEn ? (
+                            <span className="block text-[11px] text-gray-500 dark:text-gray-400">
+                              {event.titleEn}
+                            </span>
+                          ) : null}
                           {event.isHoliday ? (
                             <span className="ml-2 rounded bg-red-50 px-1.5 py-0.5 text-[11px] font-semibold text-red-700 dark:bg-red-950/50 dark:text-red-300">
                               बिदा
@@ -729,7 +733,7 @@ function MonthGrid({
           {month.monthNameNe} {month.yearBsNe}
           {month.monthNameEn ? (
             <span className="ml-2 text-xs font-normal text-gray-500 dark:text-gray-400">
-              {month.monthNameEn}
+              {month.monthNameEn} {month.yearBs}
             </span>
           ) : null}
         </p>
@@ -771,7 +775,7 @@ function MonthGrid({
               aria-label={`${day.dayBsNp} ${month.monthNameNe}, ${day.tithiShort ?? ""}`}
               aria-current={isToday ? "date" : undefined}
               className={[
-                "flex min-h-[56px] flex-col items-center justify-center rounded-lg border px-1 py-1.5 text-center transition",
+                "flex min-h-[64px] flex-col items-center justify-center rounded-lg border px-1 py-1.5 text-center transition",
                 "focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-1",
                 isSelected
                   ? "border-blue-600 bg-blue-600 text-white"
@@ -784,6 +788,25 @@ function MonthGrid({
               <span className="text-sm font-bold leading-none">
                 {day.dayBsNp}
               </span>
+              {/*
+                THE GREGORIAN DAY, IN ENGLISH NUMERALS.
+
+                The Bikram Sambat day is the one a Nepali reader reads
+                first, but the date they have to write on a form, or
+                look up in a Western diary, is the Gregorian one. So
+                every cell carries both: ७ above 24.
+              */}
+              {englishDay(day.dateAd) ? (
+                <span
+                  className={
+                    isSelected
+                      ? "mt-0.5 block text-[10px] font-medium leading-none text-blue-100"
+                      : "mt-0.5 block text-[10px] font-medium leading-none text-gray-500 dark:text-gray-400"
+                  }
+                >
+                  {englishDay(day.dateAd)}
+                </span>
+              ) : null}
               {day.tithiShort ? (
                 <span
                   className={
@@ -863,6 +886,11 @@ function WeekStrip({
             <span className="mt-1 font-headline text-2xl font-bold leading-none">
               {day.dayBsNp}
             </span>
+            {englishDay(day.dateAd) ? (
+              <span className="text-[11px] leading-none text-gray-500 dark:text-gray-400">
+                {englishDate(day.dateAd)}
+              </span>
+            ) : null}
             {day.tithiShort ? (
               <span
                 className={
@@ -912,6 +940,7 @@ function DayPanel({
         <div>
           <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
             {WEEKDAY_HEADERS[day.dayOfWeek % 7]}
+            {` · ${WEEKDAYS_EN[day.dayOfWeek % 7]}`}
           </p>
           <p className="font-headline text-3xl font-bold leading-tight text-gray-900 dark:text-gray-100">
             {day.dayBsNp}
@@ -919,9 +948,9 @@ function DayPanel({
               {day.tithiShort}
             </span>
           </p>
-          {day.dateAd ? (
+          {englishDate(day.dateAd) ? (
             <p className="text-xs text-gray-500 dark:text-gray-400">
-              {day.dateAd}
+              {englishDate(day.dateAd)}
             </p>
           ) : null}
         </div>

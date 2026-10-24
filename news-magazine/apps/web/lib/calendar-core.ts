@@ -28,6 +28,8 @@
 export interface CalendarEvent {
   /** The event's name, in Nepali. */
   title: string;
+  /** The same event's name, in English, when the source gives one. */
+  titleEn: string | null;
   /** Whether it is a public holiday (as opposed to an observance). */
   isHoliday: boolean;
 }
@@ -191,7 +193,11 @@ function readEvents(raw: unknown): CalendarEvent[] {
     const entry = item as Record<string, unknown>;
     const title = asString(entry.titleNp) ?? asString(entry.titleEn);
     if (!title) continue;
-    events.push({ title, isHoliday: asBoolean(entry.isHoliday) });
+    events.push({
+      title,
+      titleEn: asString(entry.titleEn),
+      isHoliday: asBoolean(entry.isHoliday),
+    });
   }
   return events;
 }
@@ -337,6 +343,59 @@ export function kathmanduDay(now: Date = new Date()): string {
   const kathmandu = new Date(now.getTime() + (5 * 60 + 45) * 60 * 1000);
   return kathmandu.toISOString().slice(0, 10);
 }
+
+/** The months, in English. */
+export const ENGLISH_MONTHS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
+/**
+ * A Gregorian date, written the way an English reader writes it:
+ * "24 October 2026".
+ *
+ * It is built from the ISO string rather than from `toLocaleDateString`,
+ * because the calendar is rendered on the server AND in the browser and
+ * the two must agree exactly — a date that differs between them is a
+ * hydration mismatch, and a calendar whose day changes under the
+ * reader's finger is worse than no calendar at all.
+ */
+export function englishDate(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso.trim());
+  if (!match) return null;
+  const month = ENGLISH_MONTHS[Number(match[2]) - 1];
+  if (!month) return null;
+  return `${Number(match[3])} ${month} ${match[1]}`;
+}
+
+/** The day of the month, in English numerals: "24". */
+export function englishDay(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso.trim());
+  return match ? String(Number(match[3])) : null;
+}
+
+/** The weekdays, in English, Sunday first. */
+export const WEEKDAYS_EN = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+];
 
 /**
  * "2083-7-7" as its three parts.

@@ -3486,6 +3486,18 @@ class YouTubeShortsSource(_BaseSource):
 #: front of Supabase is entitled to answer.
 ARTICLE_CANDIDATE_POOL = 200
 
+#: And the pool is filled with articles that CAN become reels.
+#:
+#: The video filter is part of the query, not a check afterwards. It
+#: was a check afterwards, and that is what stranded the video-bearing
+#: stories: the pool's population is about fifteen hundred articles,
+#: the pool reads the newest two hundred, and the four articles in
+#: the catalogue that carry a video of their own were at ranks of
+#: roughly three hundred, seven hundred and nine hundred — outside the
+#: pool, and outside it for ever, because the pool is ordered by
+#: arrival and a video story's rank only ever gets worse.
+ARTICLE_CANDIDATE_NEEDS_VIDEO = True
+
 #: The article columns one reel is built from.
 #:
 #: `image_highres_url` is preferred over `featured_image_url` for the
@@ -3661,7 +3673,7 @@ class ArticlesSource(_BaseSource):
 
     async def _candidate_articles(self, db) -> list[dict]:
         """
-        The newest published articles that carry a confirmed picture.
+        The newest published articles that can BECOME a reel.
 
         The filters are the site's own: published, not a duplicate, and
         with `image_verified_at` set — which is the marker that the
@@ -3670,6 +3682,29 @@ class ArticlesSource(_BaseSource):
         regularly a photograph of something else entirely, and this
         provider puts pictures in front of readers, so it takes only
         the confirmed ones.
+
+        AND IT CARRIES A VIDEO
+        ----------------------
+        The video filter used to be applied AFTER the pool was read,
+        in `_to_reel`, which threw away every article that had no
+        video of its own. That is the same as saying the pool is full
+        of articles that cannot be reels, and the pool is a
+        look-ahead with a fixed size, so the two together stranded the
+        video-bearing stories.
+
+        Measured on 2026-10-24: the pool's population is about fifteen
+        hundred articles, the pool reads the newest two hundred of
+        them, and four articles in the catalogue carry a video. ONE of
+        the four was inside the pool — and so became a reel. The other
+        three sat at ranks of roughly three hundred, seven hundred and
+        nine hundred, outside the pool, and never would be: the pool is
+        ordered by arrival, so as new articles arrive a video story's
+        rank only ever gets worse.
+
+        A story with its own video is exactly the thing this provider
+        exists for, and it was invisible. So the video is a WHERE
+        clause now, and every one of the pool's slots is a slot that
+        can produce a reel.
         """
         from app.services.ingestion import db_call
 
@@ -3680,6 +3715,11 @@ class ArticlesSource(_BaseSource):
             .is_("duplicate_of", None)
             .not_.is_("image_verified_at", None)
             .or_("featured_image_url.not.is.null,image_highres_url.not.is.null")
+            # A story with no video of its own is a picture, and a
+            # picture is not a reel. Asking the database for those
+            # articles and discarding them afterwards filled the pool
+            # with rows that could never become reels.
+            .or_("video_url.not.is.null,video_embed_url.not.is.null")
             .order("ingested_at", desc=True)
             .limit(ARTICLE_CANDIDATE_POOL)
             .execute()

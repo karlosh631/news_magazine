@@ -20,6 +20,7 @@ import type { PostgrestError, SupabaseClient } from "@supabase/supabase-js";
 import { isSupabaseConfigured } from "@/lib/news";
 import {
   ARTICLE_REELS_SOURCE_KEY,
+  dropRepeatedSeries,
   isArticleReel,
   posterWidthFor,
   sortByArrival,
@@ -499,7 +500,21 @@ export async function getReels(opts?: { limit?: number }): Promise<ReelFeedResul
     .filter(isPlayableReel);
 
   return {
-    reels: sortByArrival(dropRepeatedClips(shaped)).slice(0, limit),
+    // Two de-duplications, and they catch different things.
+    //
+    // `dropRepeatedClips` catches the same clip twice - the same
+    // address, twice.
+    //
+    // `dropRepeatedSeries` catches the same SERIES twice - different
+    // files, the same footage, which is what the reader complained
+    // about: "reels mostly are duplicates". The files are genuinely
+    // different files, so the store's unique constraint never saw
+    // them as the same, and the screen said the same thing nine
+    // times.
+    reels: sortByArrival(dropRepeatedSeries(dropRepeatedClips(shaped))).slice(
+      0,
+      limit
+    ),
     error: null,
     configured: true,
   };

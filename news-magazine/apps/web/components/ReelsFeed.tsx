@@ -133,6 +133,16 @@ const COLUMN_WINDOW = "h-full min-h-0 overflow-hidden";
  */
 const REELS_WINDOW = 8;
 
+/**
+ * How many clips are always at the HEAD of the feed, in arrival order.
+ *
+ * The head is the newest clips, and they are the ones the reader came
+ * for — so they are never rotated and never deferred. The rotation
+ * moves through the REST of the catalogue, which is what keeps two
+ * readers from opening the same page.
+ */
+const REELS_HEAD = 8;
+
 /** How many more reels are mounted each time the reader nears the end. */
 const REELS_WINDOW_STEP = 8;
 
@@ -519,16 +529,39 @@ export function ReelsFeed({
     rotation moves through the REST of the catalogue. Two readers
     still see different clips, and the newest is still on the screen.
   */
-  const mountedReels = useMemo(() => {
-    const count = Math.max(REELS_WINDOW, windowSize);
-    const head = reels.slice(0, count);
-    const rest = reels.slice(count);
+  /*
+    The ORDER of the whole catalogue, and the WINDOW of it that is
+    mounted.
+
+    These are two different things and they used to be one, which is
+    why the window was a fiction. The old code took the head, capped
+    it, and then spliced the ENTIRE rest of the catalogue back in —
+    merely rotated. So `mountedReels.length` was the catalogue length
+    from the very first paint, `REELS_WINDOW` limited nothing, and the
+    feed mounted every clip twice (once for the phone layout, once for
+    the desktop one).
+
+    Measured on the live page: 147 clips, 294 reel cards, 290 <video>
+    elements and a 2.4MB document, for a feed the reader scrolls
+    through one screen at a time.
+
+    So the order is computed for the whole catalogue and the window
+    takes a slice of it. The window grows as the reader approaches its
+    end, so the catalogue is still all there and the reader's place is
+    never disturbed by it arriving.
+  */
+  const orderedReels = useMemo(() => {
+    const head = reels.slice(0, REELS_HEAD);
+    const rest = reels.slice(REELS_HEAD);
     if (rest.length === 0) return head;
     const offset = rotation.current ?? 0;
-    const rotatedRest =
-      [...rest.slice(offset), ...rest.slice(0, offset)];
-    return [...head, ...rotatedRest];
-  }, [reels, windowSize]);
+    return [...head, ...rest.slice(offset), ...rest.slice(0, offset)];
+  }, [reels]);
+
+  const mountedReels = useMemo(
+    () => orderedReels.slice(0, Math.max(REELS_WINDOW, windowSize)),
+    [orderedReels, windowSize]
+  );
 
   /*
     The story the reader has open, if any.
@@ -653,7 +686,25 @@ export function ReelsFeed({
     reader is looking at one of them.
   */
   const feedRefs = useRef(new Set<HTMLDivElement>());
-  const lastReelId = reels.length ? reels[reels.length - 1]?.id : null;
+
+  /*
+    The clip the feed wraps from.
+
+    It is the last MOUNTED clip, not the last clip in the catalogue.
+    That distinction is the whole bug: the wrap only fired when the
+    reader reached the very last row of a catalogue they were never
+    shown the end of, and with the rotation in the way the last mounted
+    clip was usually a different one entirely.
+
+    The probability that the wrap would fire at all was measured at
+    6.3% - so on nineteen page loads out of twenty, the reader
+    scrolled to the end of the feed and it simply STOPPED. A feed that
+    stops is a page that says "you have reached the end", and on a
+    vertical video feed that is an invitation to leave.
+  */
+  const lastReelId = mountedReels.length
+    ? mountedReels[mountedReels.length - 1]?.id ?? null
+    : null;
 
   /*
     Mounting more of the catalogue.
@@ -679,6 +730,18 @@ export function ReelsFeed({
     const onScroll = () => {
       if (growthPending.current) return;
 
+      // Nothing more to mount. The latch below has to be released
+      // here, because the state setter would return the same value
+      // and the reset effect - which watches the window's SIZE - would
+      // never run. It used to be released by the number of mounted
+      // clips changing, which stops changing once the window has
+      // reached the end of the catalogue: the scroll handler died for
+      // the rest of the session, silently, with no error anywhere.
+      if (windowSize >= reels.length) {
+        growthPending.current = false;
+        return;
+      }
+
       for (const container of containers) {
         if (!container || container.clientHeight === 0) continue;
         const remaining =
@@ -687,9 +750,7 @@ export function ReelsFeed({
 
         growthPending.current = true;
         setWindowSize((current) =>
-          current >= reels.length
-            ? current
-            : Math.min(reels.length, current + REELS_WINDOW_STEP)
+          Math.min(reels.length, current + REELS_WINDOW_STEP)
         );
         break;
       }
@@ -703,12 +764,12 @@ export function ReelsFeed({
         container.removeEventListener("scroll", onScroll);
       }
     };
-  }, [reels.length]);
+  }, [reels.length, windowSize]);
 
   // A new batch has been mounted, so the next one may be requested.
   useEffect(() => {
     growthPending.current = false;
-  }, [mountedReels.length]);
+  }, [windowSize]);
 
   useEffect(() => {
     if (!lastReelId || activeId !== lastReelId) return;

@@ -1354,15 +1354,15 @@ does not need it.
 ## The tier that cannot expire
 
 A page the worker cannot reach directly is read through a **reader
-proxy** (`app/sources/reader_proxy.py`) — a service that fetches a
+proxy** (`app/sources/reader_proxy.py`) - a service that fetches a
 public URL from an address the publisher does not refuse. It is a free
 service with a free-tier ceiling: twenty pages a minute without a key,
 sixty with one, and when its quota runs out it answers "slow down" and
 the page is simply not read.
 
-Under it there is now a tier that cannot be exhausted:
+Under it there is a tier that cannot be exhausted:
 **`app/sources/local_reader.py`**, which is `httpx` plus `trafilatura`
-— a fetch and a text extraction, running on the worker, with no key,
+- a fetch and a text extraction, running on the worker, with no key,
 no quota and no third party. `trafilatura` was already a dependency of
 this service; it is what extracts the body of every article that is
 read.
@@ -1373,12 +1373,44 @@ The order is always:
 2. ask the reader proxy
 3. read it ourselves, here, on this machine
 
-The third tier cannot do what the second one does, and the difference
+**THE HANDOVER IS AUTOMATIC**
+-----------------------------
+The third tier is not a plan and not a fallback nobody wired up. When
+the reader answers 429 - or anything else - `fetch_via_reader` returns
+nothing and the local tier is asked instead, in the same call, with no
+operator in the loop and nothing to switch. The reader's answer to a
+free tier running out is exactly the answer to a publisher refusing us,
+and both mean the same thing: go round it.
+
+That matters more than it used to, because the reader's free tier
+really does run out. A pass that asks the reader for thirty article
+pages burns a minute and a half of its allowance on its own, and the
+allowance is per day.
+
+So the local tier now covers the paths that used to spend reader quota
+on work the reader was never needed for:
+
+| Path | Was | Now |
+| --- | --- | --- |
+| An article's body | the reader, then trafilatura | trafilatura, on a page we fetched ourselves |
+| Proving a link is an article page | a reader read | one local fetch, no quota |
+| A feed that was fetched but is not a feed | lost | read through the reader, and if the reader is rate-limited, read locally |
+| A feed the publisher refused | the reader | the reader, and then locally |
+
+The local tier cannot do what the reader does, and the difference
 matters: a publisher that refuses *this address* refuses us too. What
-it can do is everything the proxy was being used for that is not
-really about the refusal — proving that a candidate link is an article
-page (one request, no quota), and extracting the text of a page we can
-already reach.
+it can do is everything the reader was being used for that is not
+really about the refusal - proving that a candidate link is an article
+page, and extracting the text of a page we can already reach.
+
+**WHAT THE KEY BUYS**
+--------------------
+`JINA_API_KEY` raises the reader from twenty pages a minute to sixty,
+and it is read from the environment and never written to a file. It is
+an optimisation, not a dependency: with no key at all the pipeline
+still runs, it just reads fewer pages per minute and leans on the
+local tier more. The site does not stop if the key expires, and it
+does not stop if the free tier is exhausted.
 
 ---
 
@@ -1504,7 +1536,58 @@ news site's feed, and it is also why the wider entertainment pool is
 not quite as wide as it looks: "Issele Uku" and "Rabindra Sangeet"
 carry the signal, and a NASA launch does not.
 
-### A story without a video is not a reel
+### The feed is a window, and it is a real one
+
+`REELS_WINDOW` used to be a fiction. The old code took the newest few
+clips, capped them, and then spliced the **entire rest of the
+catalogue** back in - merely rotated. So the window limited nothing,
+and the feed mounted every clip twice: once for the phone layout and
+once for the desktop one, both in the DOM at once.
+
+Measured on the live page before the fix: 147 clips, 294 reel cards,
+290 `<video>` elements, and a 2.4MB document - for a feed the reader
+scrolls through one screen at a time.
+
+The order is now computed for the whole catalogue and the window takes
+a slice of it. The window grows as the reader approaches its end, so
+the catalogue is still all there and the reader's place is never
+disturbed by it arriving.
+
+### The feed never stops
+
+The feed is a playlist, not a list: when the reader reaches the last
+clip it goes back to the first one.
+
+The wrap was firing **6.3% of the time**, and the reason was a scope
+error that looked like a timing problem. It triggered on the last clip
+of the **whole catalogue** rather than the last clip of what was
+**mounted**, and with the rotation in the way those were usually
+different clips entirely. So on nineteen page loads out of twenty the
+reader scrolled to the end of the feed and it simply stopped - which on
+a vertical video feed is an invitation to leave.
+
+### One clip per series
+
+"I found reels mostly are dublicates."
+
+The files were genuinely different files, so the store's unique
+constraint on `(source_key, external_id)` never saw them as the same
+and nothing was ever collapsed. The live catalogue held a hundred and
+sixty-six distinct Commons files and a hundred and sixty distinct
+titles, and the differences were all of one kind:
+
+```
+3 x "Langtang Khola, Rasuwa District"
+2 x "Music Newari Culture"   /  "Music Newari Culture1"
+2 x "Karnataka Lamani Folk Song"  /  "... 1"
+2 x "Eastern Tharu Riddle - Oil Lamp"
+```
+
+A counter on the end of a title is what makes a series, so the read
+path now collapses them: the title with that counter taken off is the
+series key, and one clip per series reaches the reader.
+
+### A story with no video is not a reel
 
 `ArticlesSource` reads the articles this site has already published and
 turns the newest ones that carry a **video of their own** into reels.
@@ -1517,6 +1600,26 @@ it belongs.
 So a new article is a new reel by construction, the category moves in
 step with the news page, and it cannot be exhausted. The id of the reel
 is the id of the article, which is what makes it idempotent.
+
+**AND THE POOL IS FILLED WITH STORIES THAT CAN BECOME REELS**
+
+The candidate pool is a look-ahead with a fixed size - two hundred
+articles - and the video filter used to be applied *after* the pool was
+read, in the code that turns an article into a reel. Which is the same
+as saying the pool was full of articles that could never become a
+reel, and the two together stranded the video-bearing stories.
+
+Measured on 2026-10-24: about fifteen hundred articles qualify on the
+picture rules, the pool reads the newest two hundred, and four articles
+in the catalogue carry a video of their own. **One** of the four was
+inside the pool - and so became a reel. The other three sat at ranks of
+roughly three hundred, seven hundred and nine hundred, outside the
+pool, and outside it for ever: the pool is ordered by arrival, so as
+new articles arrive a video story's rank only ever gets worse.
+
+The video is a `WHERE` clause now. Every one of the pool's slots is a
+slot that can produce a reel, and a story with its own video cannot be
+stranded by the sheer number of stories that do not have one.
 
 The reels table grows with the news now, so the storage guard prunes it
 twice: by age (three days) and by count (twenty thousand rows).

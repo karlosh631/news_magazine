@@ -41,41 +41,104 @@ ARTICLE_UUID = "11111111-1111-4111-8111-111111111111"
 OTHER_UUID = "22222222-2222-4222-8222-222222222222"
 
 
+class _Not:
+    """`not_.is_(column, value)` - the negation has to be visible."""
+
+    def __init__(self, query: "Query") -> None:
+        self.query = query
+
+    def is_(self, column, value):
+        self.query.conditions.append(("not_is", column, value))
+        return self.query
+
+
 class Query:
-    """Just enough of a PostgREST query for this provider."""
+    """
+    Just enough of a PostgREST query for this provider.
+
+    The filters are HONOURED, which is the point: a fake that answers
+    every query with every row tests nothing about a WHERE clause. The
+    candidate pool's video filter is the thing under test, and it is
+    exactly the kind of clause that a permissive fake hides.
+    """
 
     def __init__(self, db: "FakeDB", table: str) -> None:
         self.db = db
         self.table = table
+        self.conditions: list[tuple] = []
 
     def select(self, *columns):
         return self
 
     def eq(self, column, value):
+        self.conditions.append(("eq", column, value))
         return self
 
     def is_(self, column, value):
+        self.conditions.append(("is", column, value))
         return self
 
     @property
     def not_(self):
-        return self
+        return _Not(self)
 
     def or_(self, condition):
+        # A disjunction of "this column is not null".
+        self.conditions.append(("or_not_null", condition))
         return self
 
     def order(self, column, desc=False):
         return self
 
     def limit(self, n):
+        self.conditions.append(("limit", n))
         return self
 
     def in_(self, column, values):
+        self.conditions.append(("in", column, values))
         return self
 
     def execute(self):
         self.db.calls.append(self.table)
-        return SimpleNamespace(data=self.db.rows_for(self.table))
+        self.db.conditions.append((self.table, list(self.conditions)))
+        return SimpleNamespace(data=self._rows())
+
+    def _rows(self):
+        rows = self.db.rows_for(self.table)
+        limit = None
+        for kind, *rest in self.conditions:
+            if kind == "limit":
+                limit = rest[0]
+                continue
+            if kind == "eq":
+                column, value = rest
+                rows = [r for r in rows if r.get(column) == value]
+            elif kind == "is":
+                column, value = rest
+                rows = [r for r in rows if r.get(column) is value]
+            elif kind == "not_is":
+                column, value = rest
+                rows = [r for r in rows if r.get(column) is not value]
+            elif kind == "in":
+                column, values = rest
+                rows = [r for r in rows if r.get(column) in values]
+            elif kind == "or_not_null":
+                parts = [p.strip() for p in str(rest[0]).split(",")]
+                columns = []
+                for part in parts:
+                    bits = part.split(".")
+                    # `column.not.is.null`
+                    if len(bits) >= 4 and bits[-3] == "not" and bits[-2] == "is":
+                        columns.append(bits[0])
+                if columns:
+                    rows = [
+                        r
+                        for r in rows
+                        if any(r.get(c) is not None for c in columns)
+                    ]
+        if limit is not None:
+            rows = rows[:limit]
+        return rows
 
 
 class FakeDB:
@@ -83,6 +146,7 @@ class FakeDB:
         self.articles = articles or []
         self.reels = reels or []
         self.calls: list[str] = []
+        self.conditions: list[tuple] = []
 
     def rows_for(self, table):
         if table == "articles":
@@ -105,6 +169,11 @@ def article(
 ) -> dict:
     row = {
         "id": uuid,
+        # The pool's filters are honoured by the fake now, so the row
+        # has to carry the fields they filter on. A published,
+        # non-duplicate story.
+        "status": "published",
+        "duplicate_of": None,
         "headline": headline,
         "excerpt": "काठमाडौंको सडकमा दुर्घटना हुनुको मुख्य कारण।",
         "image_highres_url": image,
@@ -132,6 +201,60 @@ def source(monkeypatch):
         return provider, db
 
     return build
+
+
+@pytest.mark.asyncio
+async def test_the_pool_asks_for_articles_that_have_a_video(source):
+    """
+    The fix, and the reason it was needed.
+
+    The pool is a LOOK-AHEAD with a fixed size, and the video filter
+    used to be applied after the pool was read - so the pool was full
+    of articles that could never become a reel, and the video-bearing
+    stories were outside it.
+
+    Measured on 2026-10-24: about fifteen hundred articles qualify on
+    the picture rules, the pool reads the newest two hundred, and four
+    articles in the catalogue carry a video. ONE of the four was inside
+    the pool. The other three sat at ranks of roughly three hundred,
+    seven hundred and nine hundred - and the pool is ordered by
+    arrival, so a video story's rank only ever gets worse.
+    """
+    provider, db = source(articles=[])
+
+    await provider.fetch(limit=10)
+
+    asked = db.conditions
+    assert any(table == "articles" for table, _ in asked), asked
+
+    or_clauses = [
+        entry[1]
+        for table, conditions in asked
+        if table == "articles"
+        for entry in conditions
+        if entry[0] == "or_not_null"
+    ]
+    assert or_clauses, "the articles query asked for nothing in particular"
+
+    # One clause for the picture, one for the video.
+    assert any("featured_image_url" in clause for clause in or_clauses), or_clauses
+    assert any("video_url" in clause for clause in or_clauses), or_clauses
+
+
+@pytest.mark.asyncio
+async def test_an_article_with_a_picture_and_no_video_is_not_a_candidate(source):
+    """
+    It cannot become a reel, so it must not take a slot in the pool.
+    """
+    provider, db = source(
+        articles=[article(video=None, embed=None)]
+    )
+
+    reels = await provider.fetch(limit=10)
+
+    assert reels == []
+    # The pool asked the database, and the database said no.
+    assert db.rows_for("articles"), "the fake had no article to filter"
 
 
 @pytest.mark.asyncio

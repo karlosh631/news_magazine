@@ -385,3 +385,88 @@ export function sortByArrival<
   });
 }
 
+
+/**
+ * The SERIES a clip belongs to.
+ *
+ * "Reels mostly are duplicates." The files were different files, so
+ * the store's deduplication - a unique constraint on
+ * (source_key, external_id) - never saw them as the same, and the
+ * screen said the same thing nine times.
+ *
+ * The live catalogue held a hundred and sixty-six distinct Commons
+ * files and only a hundred and sixty distinct titles, and the
+ * differences were all of one kind:
+ *
+ *   3 x "Langtang Khola, Rasuwa District"
+ *   2 x "Music Newari Culture"  /  "Music Newari Culture1"
+ *   2 x "Karnataka Lamani Folk Song"  /  "... 1"
+ *   2 x "2015 Nepal Earthquake"
+ *   2 x "Eastern Tharu Riddle - Oil Lamp"
+ *
+ * A counter on the end of a title is what makes a series. So the key
+ * is the title with that counter - and the separators before it -
+ * taken off, and the whitespace collapsed.
+ *
+ * The counter is only stripped from the END. "2015 Nepal Earthquake"
+ * begins with a year and keeps it: the rule is about the counter that
+ * makes a series, not about every number in a title.
+ *
+ * Returns null for a clip with no title, which cannot be collapsed
+ * with anything: two untitled clips are two clips.
+ */
+export function clipSeriesKey(
+  title: string | null | undefined,
+  sourceKey?: string | null
+): string | null {
+  if (!title) return null;
+
+  let text = title.toLowerCase().trim();
+
+  // The file extension. Commons titles carry it and a story's headline
+  // does not, and "clip.webm" and "clip" are the same series.
+  text = text.replace(/\.(webm|mp4|mov|ogv|ogg|m4v|mkv|avi|mpeg|mpg|jpg|jpeg|png)$/i, "");
+
+  // The counter, and the separators before it.
+  text = text.replace(/[\s._\-#()]*\d+\s*\)?$/, "");
+
+  // The whitespace.
+  text = text.replace(/\s+/g, " ").trim();
+
+  if (!text) return null;
+
+  // The provider is part of the key: the same title from two libraries
+  // is two different clips, because they are two different files.
+  return `${sourceKey ?? ""}\u0000${text}`;
+}
+
+/**
+ * One clip per series.
+ *
+ * The first clip of a series is kept and the rest are dropped, so a
+ * reader who swipes through the feed is not shown the same footage
+ * three times in a row.
+ *
+ * The clip that is kept is the FIRST one, and the list arrives in
+ * arrival order, so the one kept is the one the worker found first -
+ * not a random one.
+ */
+export function dropRepeatedSeries<T extends {
+  id: string;
+  title?: string | null;
+  source_key?: string | null;
+}>(reels: T[]): T[] {
+  const seen = new Set<string>();
+  const kept: T[] = [];
+
+  for (const reel of reels) {
+    const key = clipSeriesKey(reel.title, reel.source_key);
+    if (key) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+    }
+    kept.push(reel);
+  }
+
+  return kept;
+}

@@ -1242,6 +1242,47 @@ class GenericRssAdapter(SourceAdapter):
                 )
                 return text
 
+        # THE TIER THAT CANNOT EXPIRE
+        # ---------------------------
+        # The reader has a free tier, and a free tier runs out. When it
+        # does, `fetch_via_reader` answers 429 and returns nothing, and
+        # without this the feed is simply lost until the reader's
+        # allowance comes back.
+        #
+        # So the feed is asked for one more time, from here, with a
+        # BROWSER's headers rather than the bot's. That is not the same
+        # request as the one that failed: the publisher that served this
+        # address a block page for the bot may serve it the feed for a
+        # browser, and it costs no quota and no key.
+        #
+        # This is the httpx-and-trafilatura tier: no service in the
+        # middle, nothing to expire, nothing to be charged for.
+        for url in urls:
+            try:
+                body = await local_reader.fetch_html(url, client)
+            except Exception as exc:  # noqa: BLE001
+                logger.info(
+                    "Could not read %s ourselves: %s", url[:120], str(exc)[:160]
+                )
+                continue
+
+            if not body or not body.strip():
+                continue
+
+            try:
+                parsed, _repaired, _error = _parse_feed_document(body)
+            except Exception:  # noqa: BLE001
+                continue
+
+            if getattr(parsed, "entries", None):
+                logger.info(
+                    "%s served a body that is not a feed and the reader "
+                    "could not fetch it either; the feed was read "
+                    "ourselves.",
+                    self.source.get("name"),
+                )
+                return body
+
         return None
 
     def _bare_feed_url(self, url: str) -> str:

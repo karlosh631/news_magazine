@@ -649,6 +649,35 @@ class HtmlListingAdapter(SourceAdapter):
                         # A 404 is a real answer: the page is not there.
                         return False
 
+                    if len(text) < 500 or not _HAS_HEADLINE_RE.search(text):
+                        # The page ANSWERED, and it did not name a
+                        # story.
+                        #
+                        # Eight outlets - Ekantipur, Hamro Patro
+                        # National and Hamro Patro News, Kathmandu
+                        # Tribune, MyRepublica, Nepal Patra, The
+                        # Himalayan Times and one more - serve a
+                        # CLIENT-RENDERED page: what arrives is a
+                        # shell, and the headline only exists once the
+                        # page has been rendered. The probe read the
+                        # shell, found no headline in it, and threw the
+                        # outlet away - so eight publishers, a quarter
+                        # of the site, contributed nothing at all.
+                        #
+                        # The reader renders it. So the shell is read
+                        # through the reader before the candidate is
+                        # rejected, and the outlet is kept.
+                        if not self.settings.reader_proxy_enabled:
+                            return False
+                        rendered = await fetch_via_reader(
+                            link,
+                            probe_client,
+                            proxy=self.settings.reader_proxy_url,
+                        )
+                        if not rendered:
+                            return False
+                        text = rendered
+
                 if len(text) < 500:
                     return False
                 # A page with no headline is not an article.
@@ -667,11 +696,6 @@ class HtmlListingAdapter(SourceAdapter):
             results = await asyncio.gather(
                 *(is_article(entry) for entry in candidates)
             )
-        verified = [
-            entry for entry, ok in zip(candidates, results) if ok
-        ]
-
-        results = await asyncio.gather(*(is_article(entry) for entry in candidates))
         verified = [
             entry for entry, ok in zip(candidates, results) if ok
         ]

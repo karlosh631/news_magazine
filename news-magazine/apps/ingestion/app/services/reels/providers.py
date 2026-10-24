@@ -196,13 +196,18 @@ MIN_HEIGHT = 360
 #: device pixels — a 480p source is visibly soft on exactly the
 #: devices that can afford the bytes.
 #:
-#: 1080 is the ceiling because that is where Commons stops: the
-#: transcode ladder tops out there, so raising it further would change
-#: nothing except to make the code look like it had a higher limit
-#: than it does. It also keeps the master out of the picture, which is
-#: the whole point — a 4096x2160 original is tens of megabytes, and
-#: the transcode at the same visual quality is a fraction of that.
-PREFERRED_HEIGHT = 1080
+#: 1080 was the ceiling because that is where the transcode ladder was
+#: thought to stop. It does not: Wikimedia publishes a 1440p transcode
+#: for a 4K master, and the operator asked for the best the provider
+#: actually has ("the middle reels must only show the video 1440 hq
+#: best"). 1440 is the ceiling — a 4K master is 2160 tall, which is
+#: more than a phone resolves inside a 420px card, and the transcode at
+#: the same visual quality is a fraction of the size.
+#:
+#: The stored row always describes the file the browser will fetch, so
+#: a clip the provider only has at 480p is stored as 480p and is
+#: labelled 480p. Nothing is passed off as HD that is not.
+PREFERRED_HEIGHT = 1440
 
 #: The height at which the ORIGINAL file beats the transcode ladder.
 #:
@@ -210,6 +215,81 @@ PREFERRED_HEIGHT = 1080
 #: can actually resolve in a 420-900px card. Below it, the master is
 #: just more bytes rather than more definition.
 MASTER_MIN_HEIGHT = 1440
+
+#: The thumbnail widths Wikimedia serves a video poster at.
+#:
+#: MEASURED against the live CDN, one width at a time, on a real Nepal
+#: clip (File:Nepal flood 2026 before after.webm):
+#:
+#:   120, 250, 330, 500, 960, 1280, 1920, 3840 -> HTTP 200, and a JPEG
+#:                                            of exactly that width
+#:   640, 720, 768, 1024, 1080, 1200, 1440,
+#:   2560                                  -> HTTP 400 and an HTML
+#:                                            error page
+#:
+#: The ladder is fixed and short, and a width that is not on it is not
+#: a "slightly larger" poster: it is no poster at all. The operator
+#: asked for "1440 picture quality better", and 1440 is not a rung —
+#: the best rung at or below it is 1280, and the best at or below 1080
+#: is 960.
+COMMONS_THUMBNAIL_WIDTHS: tuple[int, ...] = (
+    120,
+    250,
+    330,
+    500,
+    960,
+    1280,
+    1920,
+    3840,
+)
+
+#: The poster width we would like.
+COMMONS_PREFERRED_POSTER_WIDTH = 1440
+
+#: The poster width we settle for when the preferred one is too wide.
+COMMONS_FALLBACK_POSTER_WIDTH = 1080
+
+
+def commons_poster_width(source_width: int | None) -> int:
+    """
+    The widest poster the provider has for a source this wide.
+
+    1440 is the width we want and 1080 is what we settle for. The
+    provider's ladder is {120, 250, 330, 500, 960, 1280, 1920, 3840},
+    so the best rung at or below 1440 is 1280 and the best rung at or
+    below 1080 is 960.
+
+    A rung WIDER than the source is never chosen. Wikimedia's thumb
+    handler will happily scale a 720-wide frame up to 1280 (measured:
+    a 720x1280 clip asked for at 1280 comes back as a 1280x2276
+    JPEG), and a poster that claims detail the footage does not have
+    is a picture of something that is not there.
+
+    An unknown source width settles for the fallback, because the
+    conservative answer is a smaller real picture rather than a larger
+    invented one.
+    """
+    ladder = COMMONS_THUMBNAIL_WIDTHS
+    limit = int(source_width or 0)
+    known = limit > 0
+
+    # An unknown width is answered with the fallback alone: we cannot
+    # tell whether the provider has a wider poster, and a smaller real
+    # picture beats a larger invented one.
+    ceilings = (
+        (COMMONS_PREFERRED_POSTER_WIDTH, COMMONS_FALLBACK_POSTER_WIDTH)
+        if known
+        else (COMMONS_FALLBACK_POSTER_WIDTH,)
+    )
+
+    for ceiling in ceilings:
+        allowed = min(ceiling, limit) if known else ceiling
+        rungs = [width for width in ladder if width <= allowed]
+        if rungs:
+            return max(rungs)
+
+    return ladder[0]
+
 
 #: The largest original file we are willing to serve.
 #:
@@ -314,6 +394,35 @@ class ProviderError(RuntimeError):
 #: `video/mp4` is a container that carries both H.264 (plays everywhere)
 #: and MPEG-4 Part 2 (plays nowhere).
 UNPLAYABLE_VIDEO_CODECS = frozenset({"theora", "mp4v", "mp4a"})
+
+#: The codecs that mean a rendition CARRIES SOUND.
+#:
+#: A derivative's `type` carries the whole codec list, and the audio
+#: codec is in it when there is one:
+#:
+#:     video/webm; codecs="vp9, opus"   -> has sound
+#:     video/webm; codecs="vp9"          -> is silent
+#:     video/mp4;  codecs="avc1.4d401f, mp4a.40.2" -> has sound
+#:
+#: So the question "does this file have an audio track" is answered by
+#: the provider's own metadata rather than by downloading the file and
+#: asking. That matters because the operator asked for the clips with
+#: sound ("the middle reels must only show the video ... best audio,
+#: and always make sure sound is clean") and a silent clip shown first
+#: reads as a broken player.
+AUDIO_CODECS = frozenset(
+    {
+        "aac",
+        "ac3",
+        "eac3",
+        "flac",
+        "mp3",
+        "mp4a",
+        "mpeg",
+        "opus",
+        "vorbis",
+    }
+)
 
 #: Rank 0 — mp4. H.264 in an mp4 is the one combination Safari, every
 #: iOS browser and every Chromium and Firefox build will play, and it is
@@ -1081,7 +1190,11 @@ class WikimediaSource(_BaseSource):
 
     #: Commons transcodes land on upload.wikimedia.org; the originals and
     #: the JPEG posters do too, so those hosts are safe to serve.
-    _ALLOWED_HOSTS = ("upload.wikimedia.org",)
+    #:
+    #: `thumb.wikimedia.org` is the newer name for the same bytes — the
+    #: API now answers `thumburl` with that host, and a poster that is
+    #: refused because of its host is a card with no picture at all.
+    _ALLOWED_HOSTS = ("upload.wikimedia.org", "thumb.wikimedia.org")
 
     #: How long this source may produce nothing new before a pass stops
     #: walking the deep pages of every term.
@@ -1261,7 +1374,17 @@ class WikimediaSource(_BaseSource):
                 # enough, so both are requested for the same titles.
                 "prop": "imageinfo|videoinfo",
                 "iiprop": "url|size|mime|mediatype|extmetadata",
-                "iiurlwidth": "720",
+                # The poster, at the best width the provider has.
+                #
+                # It was 720, which is not a rung on Wikimedia's
+                # thumbnail ladder at all — the API answered with the
+                # 500 rung for a 720-wide source and the 960 rung for a
+                # 1920-wide one. Asking for 1440 gets the best rung
+                # that is no wider than the source: measured, a
+                # 1918-wide clip comes back as the 1280 rung and a
+                # 720-wide one as the 500 rung, and never as an
+                # upscale.
+                "iiurlwidth": str(COMMONS_PREFERRED_POSTER_WIDTH),
                 "viprop": "url|size|mime|mediatype|derivatives|extmetadata",
             }
 
@@ -1799,8 +1922,23 @@ class WikimediaSource(_BaseSource):
         at full resolution, so ranking by size handed every reel a 4K
         master — a 4 MB download to fill a 420px card — and left the
         transcodes Commons had already paid to generate unused.
+
+        AND WHICH RENDITION HAS SOUND
+        ------------------------------
+        A derivative that carries no audio track is a silent card: the
+        reader taps the speaker and nothing happens, and the only
+        honest description of it is a broken player. So the audio codec
+        in the derivative's own `type` decides, and a rendition WITH
+        sound is preferred over one without at the same resolution.
+
+        The audio codec is in the codec list the API sends with every
+        derivative — `video/webm; codecs="vp9, opus"` has sound and
+        `video/webm; codecs="vp9"` does not — so the decision is made
+        from the provider's metadata and never by downloading the file
+        to find out.
         """
-        candidates: list[tuple[int, int, int, str]] = []
+        # (codec rank, has sound, height, width, url)
+        candidates: list[tuple[int, int, int, int, str]] = []
         master_urls = {
             self._url_path(_absolute((block or {}).get("url")))
             for block in (videoinfo, imageinfo)
@@ -1822,12 +1960,14 @@ class WikimediaSource(_BaseSource):
             if not derivative.get("transcodekey") or self._url_path(url) in master_urls:
                 continue
 
-            rank = _video_rank(*_parse_media_type(derivative.get("type")))
+            essence, codecs = _parse_media_type(derivative.get("type"))
+            rank = _video_rank(essence, codecs)
             if rank is None:
                 continue
 
             candidates.append((
                 rank,
+                1 if codecs & AUDIO_CODECS else 0,
                 _int_or_none(derivative.get("height")) or 0,
                 _int_or_none(derivative.get("width")) or 0,
                 url,
@@ -1837,19 +1977,29 @@ class WikimediaSource(_BaseSource):
             best_rank = min(item[0] for item in candidates)
             pool = [item for item in candidates if item[0] == best_rank]
 
+            # SOUND FIRST, THEN SIZE.
+            #
+            # Two candidates of the same codec family, one with an audio
+            # track and one without: the one with sound is the one the
+            # reader can actually hear, so it wins before the resolution
+            # is even looked at.
+            with_audio = [item for item in pool if item[1]]
+            if with_audio:
+                pool = with_audio
+
             # A rendition below MIN_HEIGHT is a thumbnail and looks like
             # one, but it still beats a 4K master: the card is 420px wide.
-            usable = [item for item in pool if item[1] >= MIN_HEIGHT] or pool
+            usable = [item for item in pool if item[2] >= MIN_HEIGHT] or pool
 
             # Largest that does not exceed PREFERRED_HEIGHT, or the
-            # smallest that does. Downloading 1080p to fill a 420px card
-            # is how a reels feed becomes the most expensive page on the
-            # site.
-            below = [item for item in usable if item[1] <= PREFERRED_HEIGHT]
+            # smallest that does. Downloading a 4K master to fill a 420px
+            # card is how a reels feed becomes the most expensive page on
+            # the site.
+            below = [item for item in usable if item[2] <= PREFERRED_HEIGHT]
             chosen = (max if below else min)(
-                below or usable, key=lambda item: (item[1], item[2])
+                below or usable, key=lambda item: (item[2], item[3])
             )
-            return chosen[3], chosen[2] or None, chosen[1] or None
+            return chosen[4], chosen[3] or None, chosen[2] or None
 
         # No usable transcode, or the transcode ladder tops out below
         # the quality we want. Consider the MASTER.
@@ -1923,15 +2073,28 @@ class WikimediaSource(_BaseSource):
         """
         The still frame MediaWiki generated for the video.
 
-        `thumburl` is the real poster when it is there. The reconstructed
-        URL is only a fallback: its exact filename convention is a
-        detail of MediaWiki's thumbnailing, and if it ever changes the
-        worst case is a card that renders without a poster rather than a
-        broken request.
+        `thumburl` is the real poster when it is there, and it is the
+        BEST one the provider has: the API generates it at the widest
+        rung of its ladder that is no wider than the original, so it is
+        never an upscale. Measured — a 1918-wide clip asked for at
+        1440 comes back as the 1280 rung, a 1920-wide one as the 1920
+        rung, and a 720-wide one as the 500 rung.
+
+        The reconstructed URL is only a fallback, and it used to be
+        WRONG: it repeated the hash directory (`.../a/ab/thumb/ab/...`),
+        which is a 400 with an HTML body rather than a picture. The
+        shape is the one MediaWiki actually serves:
+        `/wikipedia/commons/thumb/<hash>/<sub>/<FILE>/<rung>px--<FILE>.jpg`.
         """
         thumb = _absolute((imageinfo or {}).get("thumburl"))
         if thumb and self._is_allowed_host(thumb):
-            return thumb
+            # The API's own tracking parameters are dropped. They are
+            # for the API's callers, not for a reader's browser, and the
+            # URL is shorter and easier to recognise without them.
+            return self._at_best_rung(
+                thumb.split("?", 1)[0],
+                _int_or_none((imageinfo or {}).get("width")),
+            )
 
         if not original_url or not self._is_allowed_host(original_url):
             return None
@@ -1942,15 +2105,54 @@ class WikimediaSource(_BaseSource):
         if len(parts) < 5 or parts[0] != "wikipedia":
             return None
 
-        thumb_dir = parts[:-1]
+        # The hash directory is parts[3:5] — `a/ab` — and the file name
+        # is the last segment. The old code took everything before the
+        # file name and then dropped its first two segments, which kept
+        # the hash directory twice and lost half of it.
         file_name = parts[-1]
+        directory = "/".join(parts[3:5])
+        width = commons_poster_width(_int_or_none((imageinfo or {}).get("width")))
+
+        # The file name is NOT quoted again: it comes straight out of the
+        # URL path, so it is already percent-encoded, and a second pass
+        # would turn `%2C` into `%252C` and ask for a file that does not
+        # exist.
         return (
-            "https://upload.wikimedia.org/"
-            + "/".join(thumb_dir)
-            + "/thumb"
-            + "/" + "/".join(thumb_dir[1:])
-            + f"/720px--{quote(file_name)}.jpg"
+            "https://upload.wikimedia.org/wikipedia/commons/thumb/"
+            f"{directory}/{file_name}/{width}px--{file_name}.jpg"
         )
+
+    @staticmethod
+    def _at_best_rung(thumb_url: str, source_width: int | None) -> str:
+        """
+        The poster at the widest rung we want, from the URL the API built.
+
+        The rung is IN the URL — `.../<rung>px--<FILE>.jpg` — so the
+        rest of it (the host, the hash directory, the file name) is
+        left exactly as MediaWiki produced it and only the rung is
+        replaced.
+
+        Why replace it at all? Because the API's own choice is "the
+        widest rung that is no wider than the original", which for a
+        1920-wide file is the 1920 rung — 555 KB of JPEG for a card
+        that is 420 CSS pixels wide. We want the 1440 we asked the
+        operator for, and the widest rung at or below it is 1280
+        (157 KB), which is also what a 3x phone screen can actually
+        resolve.
+        """
+        head, separator, tail = thumb_url.rpartition("/")
+        if not separator:
+            return thumb_url
+
+        match = re.match(r"(\d+)px--(.+)$", tail)
+        if not match:
+            return thumb_url
+
+        wanted = commons_poster_width(source_width)
+        if int(match.group(1)) == wanted:
+            return thumb_url
+
+        return f"{head}/{wanted}px--{match.group(2)}"
 
     def _creator(self, meta: dict) -> tuple[str, str | None]:
         """
@@ -2896,10 +3098,27 @@ ARTICLE_CANDIDATE_POOL = 200
 #: apps/web/components/NewsCard.tsx): the high-resolution rendition is
 #: the one the outlet renders at full size, and the featured one is
 #: often a smaller crop of the same photograph.
+#:
+#: `video_url` and `video_embed_url` are the outlets' own media, which
+#: the ingestion already extracted from the story's page: a direct
+#: media file, and a YouTube/Vimeo player respectively. They are what
+#: turns a story into a CLIP rather than a picture.
 ARTICLE_COLUMNS = (
     "id, headline, excerpt, featured_image_url, image_highres_url, "
-    "source_name_snapshot, source_article_url, published_at, ingested_at"
+    "source_name_snapshot, source_article_url, published_at, ingested_at, "
+    "video_url, video_embed_url"
 )
+
+#: A direct media file, by extension.
+#:
+#: The ingestion stores whatever `og:video` pointed at, and that is not
+#: always a file: it can be a share page, an HLS playlist, or an HTML
+#: document. A `<video src>` pointed at any of those refuses to load,
+#: so only the extensions a browser can decode are treated as video.
+#:
+#: The same rule the site's own news cards use (see `directVideo` in
+#: apps/web/components/NewsCard.tsx).
+_DIRECT_VIDEO_RE = re.compile(r"\.(mp4|webm|mov|m4v|ogv|ogg)(\?|$)", re.IGNORECASE)
 
 #: How much of the excerpt a reel carries.
 #:
@@ -2936,11 +3155,25 @@ class ArticlesSource(_BaseSource):
 
     WHAT A REEL IS HERE
     -------------------
-    There is no video. A reel is the story's own photograph and its
-    headline. `video_url` carries the photograph because the reels
-    table has exactly one media column and it may not be null; the web
-    reads `poster_url` for the picture and knows that an `articles` row
-    is an image card rather than a video (see apps/web/lib/reels.ts).
+    Two kinds, and the difference matters:
+
+      - A story that carries a VIDEO of its own becomes a CLIP. The
+        reel's `video_url` is that video — the outlet's own file, or
+        the outlet's own player — and its `poster_url` is the
+        story's verified photograph, which is the frame the reader sees
+        before the clip starts.
+
+      - A story with no video of its own becomes a PICTURE: the
+        photograph and the headline, with the photograph carried in
+        `video_url` because the reels table has exactly one media
+        column and it may not be null.
+
+    The web keeps the picture rows OUT of the video feed (see
+    apps/web/lib/reels.ts): the operator asked for the Reels page to
+    show clips ("the middle reels must only show the video"), and a
+    still photograph in a video feed reads as a broken player. The
+    rows stay in the catalogue because the catalogue is the site's own
+    news, and the feed is the video.
 
     THE ID IS THE ARTICLE'S
     -----------------------
@@ -2954,6 +3187,27 @@ class ArticlesSource(_BaseSource):
     requires_key = False
     provider_name = "News outlets"
 
+    #: The database handle, when the store has handed one over.
+    _db = None
+
+    async def prepare(self, db) -> None:
+        """
+        Take the database handle the store already has.
+
+        The store owns the database and passes the handle in, and this
+        provider used to open its OWN connection instead — a second
+        connection pool for the same database, and worse than that: a
+        test that fakes the store's handle was still reading the real
+        `articles` table, so the pass invented reels out of whatever
+        the production feed happened to hold.
+
+        The store calls `prepare` before it asks for anything, so the
+        handle is here by the time `fetch` runs. `get_db()` remains
+        the fallback for the case where the provider is used on its
+        own.
+        """
+        self._db = db
+
     async def _fetch(self, limit: int) -> list[Reel]:
         """
         The newest articles that have a verified picture and have not
@@ -2963,12 +3217,17 @@ class ArticlesSource(_BaseSource):
         if limit <= 0:
             return []
 
-        from app.database import get_db
+        if self._db is not None:
+            db = self._db
+        else:
+            from app.database import get_db
 
-        # One client for the whole pass. `get_db()` builds a client and
-        # a connection pool, and there is no reason to build two of
-        # them for two queries that are a few milliseconds apart.
-        db = get_db()
+            # No handle was handed over, so this provider is being used
+            # on its own. One client for the whole pass: `get_db()`
+            # builds a client and a connection pool, and there is no
+            # reason to build two of them for two queries that are a
+            # few milliseconds apart.
+            db = get_db()
 
         rows = await self._candidate_articles(db)
         if not rows:
@@ -3070,7 +3329,27 @@ class ArticlesSource(_BaseSource):
     # -------------------------------------------------
 
     def _to_reel(self, row: dict) -> Reel | None:
-        """One article -> one reel, or None when it cannot be one."""
+        """
+        One article -> one reel, or None when it cannot be one.
+
+        ONLY A STORY THAT CARRIES ITS OWN VIDEO IS A REEL.
+
+        A story with no video of its own is a picture. It used to
+        become an image reel, with the photograph in the media column
+        and the card in front of it unable to play anything - a "Replay
+        unavailable" panel over the picture, which is what the reader
+        was shown and what they complained about. And the catalogue
+        grew with the news for nothing: a hundred rows a pass that no
+        card could play.
+
+        So a story without a video of its own is not a reel. The
+        photograph still reaches the reader, on the news page, where it
+        belongs.
+        """
+        video, embed = self._video(row)
+        if not video and not embed:
+            return None
+
         image = _absolute(row.get("image_highres_url")) or _absolute(
             row.get("featured_image_url")
         )
@@ -3088,11 +3367,14 @@ class ArticlesSource(_BaseSource):
         return Reel(
             source_key=self.key,
             external_id=str(row.get("id") or ""),
-            # There is no video file to point at, and the reels table
-            # has one media column that may not be null. The photograph
-            # is the reel's media; the web renders it as a picture and
-            # never asks a browser to decode it.
-            video_url=image,
+            # The clip is the outlet's own file, or its own player.
+            # A story that has neither is not a reel at all (above), so
+            # the media column always carries something playable.
+            video_url=video,
+            # Set ONLY when the video needs a player rather than a file:
+            # an embed URL is an HTML document, and `<video src>` pointed
+            # at one refuses to load.
+            embed_url=embed,
             poster_url=image,
             title=headline,
             description=excerpt or None,
@@ -3107,6 +3389,39 @@ class ArticlesSource(_BaseSource):
             attribution_required=True,
             published_at=_iso(row.get("published_at")) or _iso(row.get("ingested_at")),
         )
+
+    def _video(self, row: dict) -> tuple[str | None, str | None]:
+        """
+        The story's own video, and the player it needs.
+
+        Returns (video_url, embed_url).
+
+        `video_embed_url` is a YouTube/Vimeo player and `video_url` is
+        usually the same thing — the ingestion copies the embed into
+        both — but a direct media file is stored in `video_url` alone.
+
+        So:
+
+          - a direct file  -> (the file, None): a `<video>` plays it;
+          - a player URL   -> (the player, the player): an `<iframe>`
+            plays it, because a player URL is an HTML document and
+            `<video src>` refuses one;
+          - anything else   -> (None, None): the story has no video of
+            its own, and a reel that points a browser at a share page
+            is a card that never plays.
+        """
+        embed = _absolute(row.get("video_embed_url"))
+        candidate = _absolute(row.get("video_url"))
+
+        # A direct file wins over the player: it plays in every browser
+        # and needs no third-party script.
+        if candidate and _DIRECT_VIDEO_RE.search(candidate):
+            return candidate, embed
+
+        if embed:
+            return embed, embed
+
+        return None, None
 
     # -------------------------------------------------
     # Budget

@@ -18,7 +18,15 @@ import "server-only";
 import type { PostgrestError, SupabaseClient } from "@supabase/supabase-js";
 
 import { isSupabaseConfigured } from "@/lib/news";
-import { ARTICLE_REELS_SOURCE_KEY, isArticleReel } from "@/lib/reel-codec";
+import {
+  ARTICLE_REELS_SOURCE_KEY,
+  isArticleReel,
+  posterWidthFor,
+  sortByArrival,
+  storyLink,
+  storyMedia,
+  type VideoStory,
+} from "@/lib/reel-codec";
 import { createPublicSupabaseClient } from "@/lib/supabase/server";
 
 /**
@@ -69,6 +77,15 @@ export interface Reel {
    * own news, stored as a reel. See ARTICLE_REELS_SOURCE_KEY.
    */
   source_key: string | null;
+  /**
+   * The provider's own id for this clip.
+   *
+   * For the `articles` source it is the ARTICLE's uuid, and that is
+   * what lets the feed resolve the story: one query on the articles
+   * table turns these ids into slugs, and a clip that is one of our
+   * own stories can then link to the story on this site.
+   */
+  external_id: string | null;
   video_url: string;
   /**
    * Official provider embed-player src, present only when `video_url`
@@ -94,7 +111,30 @@ export interface Reel {
   height: number | null;
   duration_seconds: number | null;
   published_at: string | null;
+  /**
+   * When the worker stored this row.
+   *
+   * It is the feed's real order — a Commons clip's `published_at` is
+   * its upload date, which for this subject means 2011 Everest
+   * footage — and it is what the two halves of the feed are merged
+   * on.
+   */
+  ingested_at: string | null;
   like_count: number;
+  /**
+   * This site's own story for this clip, when there is one.
+   *
+   * Set for a clip built from one of our articles: the article's uuid
+   * IS the clip's `external_id`, so the feed resolves it to a slug and
+   * the card links to `/article/<slug>`. The operator's complaint was
+   * that the story cards "are also not clickable and not redirecting
+   * on mysite news" — this is the fix.
+   *
+   * It is NOT a database column: the reels table has no slug and no
+   * article reference, and adding one is a migration, which is the
+   * operator's job. The link is computed at read time instead.
+   */
+  link?: string | null;
 }
 
 export interface ReelFeedResult {
@@ -160,56 +200,79 @@ export { ARTICLE_REELS_SOURCE_KEY, isArticleReel };
 const WIKIMEDIA_ORIGINALS = "https://upload.wikimedia.org/wikipedia/commons/";
 
 /**
- * The thumbnail width the poster is asked for.
+ * The thumbnail origin Wikimedia now answers `thumburl` with.
  *
- * Wikimedia only serves a fixed set of thumbnail widths — 120, 250, 330,
- * 500, 960, 1280, 1920, 3840 — and answers anything else with HTTP 400
- * and an HTML error page. A reel card is about 420 pixels wide, so 500
- * is the smallest width that is not visibly soft.
+ * Same bytes, newer name. A poster that is refused because of its
+ * host is a card with no picture at all, so both are served.
  */
-const WIKIMEDIA_POSTER_WIDTH = 500;
+const WIKIMEDIA_THUMBNAIL_ORIGIN = "https://thumb.wikimedia.org/wikipedia/commons/";
 
 /**
- * The poster frame for a Wikimedia clip, rebuilt from the clip's own URL.
+ * A poster URL that Wikimedia will actually serve.
  *
- * THE POSTER URL STORED IN THE DATABASE DOES NOT WORK
- * ---------------------------------------------------
- * Every Wikimedia row in `reels` carries a `poster_url` of the shape
+ * The shape is `/wikipedia/commons/thumb/<hash>/<sub>/<FILE>/<rung>px--<FILE>.jpg`,
+ * and a rung that is not on the ladder answers HTTP 400 with an HTML
+ * body — which Chrome blocks outright (net::ERR_BLOCKED_BY_ORB) rather
+ * than showing a broken-image icon.
+ *
+ * The API's own URL carries an analytics query string
+ * (`?utm_source=commons.wikimedia.org&utm_campaign=imageinfo`), so the
+ * pattern ends at the query rather than at the end of the string.
+ */
+const WIKIMEDIA_THUMBNAIL_RE =
+  /\/wikipedia\/commons\/thumb\/[^/]+\/[^/]+\/[^/]+\/\d+px--[^/]+\.jpg(\?|$)/;
+
+/**
+ * The poster frame for a Wikimedia clip.
+ *
+ * THE STORED POSTER IS THE BEST ONE
+ * ---------------------------------
+ * The worker stores the URL MediaWiki itself generated, and that is
+ * the best the provider has: the API picks the widest rung of its
+ * ladder that is no wider than the original, so a 1918-wide clip
+ * comes back as a 1280-wide poster and a 720-wide one as a 500-wide
+ * poster, never as an upscale. Measured on the live API.
+ *
+ * The rows written before the worker was fixed carry a broken URL —
+ * the path repeated the hash directory, and the width was not a rung
+ * at all:
  *
  *   /wikipedia/commons/c/ce/thumb/commons/c/ce/720px--NAME.ogv.jpg
  *
- * which is wrong twice over. The path repeats the hash directory
- * (`c/ce` twice), and the width — 720 — is not one of the widths
- * Wikimedia serves. The result is HTTP 400 with an HTML error body, and
- * because the browser asked for an image and got text, Chrome blocks
- * the response outright (net::ERR_BLOCKED_BY_ORB) rather than showing a
- * broken-image icon.
+ * which is HTTP 400 and an HTML error page, and the whole page was
+ * failing its own network audit because of it (400 distinct broken
+ * poster URLs, 579 blocked responses).
  *
- * Measured on the live reels page: 400 distinct broken poster URLs, 579
- * blocked responses, and the whole page was failing its own network
- * audit because of them.
- *
- * The original file is not hard to find, because the clip's own URL
- * says where it is:
+ * So a stored poster that is a real thumbnail is used as it is, and a
+ * broken one is rebuilt from the clip's own URL:
  *
  *   /wikipedia/commons/transcoded/c/ce/NAME.ogv/NAME.ogv.480p.vp9.webm
  *
  * The transcoded derivative is filed under the same hash directory as
  * the original, and MediaWiki's thumbnail of a video is
  *
- *   /wikipedia/commons/thumb/<hash>/<FILE>/<width>px-<FILE>.jpg
+ *   /wikipedia/commons/thumb/<hash>/<FILE>/<rung>px-<FILE>.jpg
  *
- * so the poster follows from the clip's URL with no guesswork. This
- * rebuilds it. The stored URL is used only when the clip is not a
- * Wikimedia one, or when its URL is a shape this does not recognise.
+ * so the poster follows from the clip's URL with no guesswork.
  */
 function wikimediaPosterUrl(
   videoUrl: string,
-  posterUrl: string | null
+  posterUrl: string | null,
+  reelWidth: number | null
 ): string | null {
-  if (!videoUrl.startsWith(WIKIMEDIA_ORIGINALS)) return posterUrl;
+  const isWikimedia =
+    videoUrl.startsWith(WIKIMEDIA_ORIGINALS) ||
+    videoUrl.startsWith(WIKIMEDIA_THUMBNAIL_ORIGIN);
 
-  const rest = videoUrl.slice(WIKIMEDIA_ORIGINALS.length);
+  // The stored poster, when it is one Wikimedia will serve. It is the
+  // provider's own choice of rung and therefore the best one.
+  if (posterUrl && WIKIMEDIA_THUMBNAIL_RE.test(posterUrl)) return posterUrl;
+
+  if (!isWikimedia) return posterUrl;
+
+  const rest = videoUrl.startsWith(WIKIMEDIA_THUMBNAIL_ORIGIN)
+    ? videoUrl.slice(WIKIMEDIA_THUMBNAIL_ORIGIN.length)
+    : videoUrl.slice(WIKIMEDIA_ORIGINALS.length);
   const withoutTranscoded = rest.startsWith("transcoded/")
     ? rest.slice("transcoded/".length)
     : rest;
@@ -223,8 +286,12 @@ function wikimediaPosterUrl(
   const file = parts[2];
   if (!file || !file.includes(".")) return posterUrl;
 
+  // The rung. The clip's own width is the ceiling, so the poster is
+  // never wider than the picture it is cut from — the same rule the
+  // ingestion applies when it has the original's width to hand.
+  const width = posterWidthFor(reelWidth);
   const directory = `${parts[0]}/${parts[1]}`;
-  return `${WIKIMEDIA_ORIGINALS}thumb/${directory}/${file}/${WIKIMEDIA_POSTER_WIDTH}px-${file}.jpg`;
+  return `${WIKIMEDIA_ORIGINALS}thumb/${directory}/${file}/${width}px--${file}.jpg`;
 }
 
 /**
@@ -241,12 +308,113 @@ export function isMissingReelsTable(error: PostgrestError): boolean {
 }
 
 /**
+ * The columns one feed row is read with.
+ *
+ * `reel_likes(count)` is a PostgREST aggregate embed: the count comes
+ * back with the reels in the same round trip rather than as one query
+ * per clip. It rides on the public select policy 0014 grants on both
+ * tables, so no service-role key is involved.
+ */
+const FEED_SELECT =
+  "id, source_key, external_id, video_url, embed_url, poster_url, title, description, " +
+  "creator_name, creator_url, license_name, license_url, attribution_required, " +
+  "width, height, duration_seconds, published_at, ingested_at, reel_likes(count)";
+
+/**
+ * How many of this site's own stories are looked at for clips.
+ *
+ * The stories are the ones that carry a VIDEO, and their videos are
+ * the only thing that makes one of them a clip rather than a
+ * photograph. The number bounds the uuid list that goes into the reels
+ * query: a list of uuids travels in the query string, and a few
+ * hundred is already past what a proxy in front of Supabase is
+ * entitled to answer.
+ */
+const ARTICLE_VIDEO_POOL = 100;
+
+/**
+ * The stories that carry a video of their own.
+ *
+ * ONE query on the articles table, and it is the query the whole feed
+ * hangs on: the reels table holds a row for every story this site has
+ * published with a verified picture — a PHOTOGRAPH, not a clip — and
+ * those rows are the newest rows in the table, because a new article
+ * is a new row. Reading the feed newest-first and dropping the
+ * photographs afterwards would leave an EMPTY page: the operator's
+ * screenshot showed a column of "News" cards and not one video, and
+ * that is exactly what a newest-first feed full of photographs looks
+ * like.
+ *
+ * So the photographs are never fetched. The stories that carry a video
+ * are asked for first, and only their reels are read.
+ */
+async function loadVideoStories(
+  supabase: SupabaseClient
+): Promise<Map<string, VideoStory>> {
+  const stories = new Map<string, VideoStory>();
+
+  const { data, error } = await supabase
+    .from("articles")
+    .select("id, slug, video_url, video_embed_url")
+    .or("video_url.not.is.null,video_embed_url.not.is.null")
+    /*
+      Newest first, and bounded: this is the pool of stories whose
+      video can be shown, and the uuid list it produces travels in the
+      next query's string.
+    */
+    .order("ingested_at", { ascending: false, nullsFirst: false })
+    .limit(ARTICLE_VIDEO_POOL);
+
+  if (error) {
+    // A read that fails is a feed of the other clips, not an empty
+    // page: the stories are an addition to the feed, never the whole
+    // of it.
+    console.error("[reels] the stories with video could not be read:", error.message);
+    return stories;
+  }
+
+  for (const row of (data ?? []) as unknown as VideoStory[]) {
+    if (!row?.id) continue;
+    stories.set(String(row.id), {
+      id: String(row.id),
+      slug: String(row.slug ?? ""),
+      video_url: row.video_url ?? null,
+      video_embed_url: row.video_embed_url ?? null,
+    });
+  }
+
+  return stories;
+}
+
+/**
  * The Reels feed, newest first.
  *
- * `reel_likes(count)` is a PostgREST aggregate embed: the count comes back
- * with the reels in the same round trip rather than as one query per
- * clip. It rides on the public select policy 0014 grants on both tables,
- * so no service-role key is involved.
+ * THE FEED IS VIDEO ONLY
+ * ----------------------
+ * The operator asked for it twice, in the same words both times: "the
+ * middle reels must only show the video". A still photograph in a
+ * vertical video feed reads as a broken player — the reader scrolls
+ * to it, nothing plays, and the feature looks broken.
+ *
+ * So the feed is built from two queries and merged:
+ *
+ *   1. the clips every provider brought (Wikimedia, Pexels, Pixabay,
+ *      YouTube) — every one of them is a playable file or a player;
+ *   2. the reels built from this site's own stories that carry a
+ *      VIDEO, resolved through the articles table.
+ *
+ * The photographs are in neither. They stay in the catalogue — the
+ * catalogue is the site's own news — but they are not in the feed.
+ *
+ * THE ORDER
+ * ---------
+ * Newest first, by the moment the worker stored the row. That is not
+ * the same as "newest publication": a Commons clip's `published_at` is
+ * its upload date, which for this subject means 2011 Everest footage,
+ * and ordering by that left the top of the page permanently occupied
+ * by whichever clips had the newest upload. `ingested_at` is monotonic
+ * and is what the reader is actually promised: the newest thing we
+ * have, on top.
  *
  * The read IS cached, for fifteen seconds, and the window is
  * `REELS_READ_REVALIDATE_SECONDS` above. It used to be cached for ever
@@ -271,37 +439,18 @@ export async function getReels(opts?: { limit?: number }): Promise<ReelFeedResul
 
   const supabase = createReelsClient();
 
-  const { data, error } = await supabase
+  // The stories that carry a video of their own. Read first, because
+  // their reels are the ones that have to be asked for by id.
+  const stories = await loadVideoStories(supabase);
+
+  // 1. The clips the providers brought.
+  const clipsQuery = supabase
     .from("reels")
-    .select(
-      "id, source_key, video_url, embed_url, poster_url, title, description, creator_name, creator_url, license_name, license_url, attribution_required, width, height, duration_seconds, published_at, reel_likes(count)"
-    )
-    /*
-      Order by WHEN WE FETCHED IT, not by when it was published.
-
-      This was `published_at DESC, ingested_at DESC`, and on a feed of
-      Wikimedia clips it produced a page that never changed. A Commons
-      clip's `published_at` is its upload date, which for this subject
-      means 2011 and 2014 Everest footage. Those dates are frozen for
-      ever, so the top of the feed was permanently occupied by whichever
-      clips happened to have the newest upload — and every clip the
-      worker has ingested since sorts BELOW them. A reader could watch
-      the worker add rows all day and the first twelve cards would not
-      move.
-
-      `ingested_at` is monotonic and is what the reader is actually
-      being promised: the newest thing we have on top. It is the same
-      rule the articles feed uses, and for the same reason.
-
-      Note this is arrival order, not novelty order — an evergreen clip
-      discovered for the first time today rightly appears at the top,
-      because from the reader's point of view it is new. That is what
-      makes the page move on every pass.
-
-      `published_at` remains as the tiebreak: providers publish at
-      whole-second resolution, so two clips routinely share a value, and
-      without a second key the order would shuffle between renders.
-    */
+    .select(FEED_SELECT)
+    // Everything that is not one of our own stories. The stories are
+    // asked for by id below, because a story's clip is only a clip
+    // when the story carries a video.
+    .neq("source_key", ARTICLE_REELS_SOURCE_KEY)
     .order("ingested_at", { ascending: false, nullsFirst: false })
     .order("published_at", { ascending: false, nullsFirst: false })
     // Over-fetched so that filtering out unplayable clips still fills
@@ -309,6 +458,26 @@ export async function getReels(opts?: { limit?: number }): Promise<ReelFeedResul
     // would shorten the page every time a provider contributed a few.
     .limit(limit * 2);
 
+  // 2. The reels built from the stories that carry a video.
+  const storyIds = [...stories.keys()];
+  const storyQuery =
+    storyIds.length > 0
+      ? supabase
+          .from("reels")
+          .select(FEED_SELECT)
+          .eq("source_key", ARTICLE_REELS_SOURCE_KEY)
+          .in("external_id", storyIds)
+          .order("ingested_at", { ascending: false, nullsFirst: false })
+          .order("published_at", { ascending: false, nullsFirst: false })
+          .limit(limit)
+      : null;
+
+  const [clips, storyReels] = await Promise.all([
+    clipsQuery,
+    storyQuery ? storyQuery : Promise.resolve({ data: [], error: null }),
+  ]);
+
+  const error = clips.error ?? storyReels.error;
   if (error) {
     // Migration 0014 not applied yet. An empty feed and an explanation,
     // never an exception: the homepage renders the news feed too, and one
@@ -320,10 +489,17 @@ export async function getReels(opts?: { limit?: number }): Promise<ReelFeedResul
     return { reels: [], error: error.message, configured: true };
   }
 
+  const rows = [
+    ...(((clips.data ?? []) as unknown[]) ?? []),
+    ...(((storyReels.data ?? []) as unknown[]) ?? []),
+  ];
+
+  const shaped = rows
+    .map((row) => mapReelRow(row, stories))
+    .filter(isPlayableReel);
+
   return {
-    reels: dropRepeatedClips(
-      ((data ?? []) as unknown[]).map(mapReelRow).filter(isPlayableReel)
-    ).slice(0, limit),
+    reels: sortByArrival(dropRepeatedClips(shaped)).slice(0, limit),
     error: null,
     configured: true,
   };
@@ -418,27 +594,55 @@ function isPlayableReel(reel: Reel): boolean {
 }
 
 /** Map a raw `reels` row to the shape the feed renders. */
-function mapReelRow(row: unknown): Reel {
+function mapReelRow(row: unknown, stories: Map<string, VideoStory>): Reel {
   const item = row as Record<string, unknown>;
   const videoUrl = String(item.video_url);
+
+  const sourceKey = (item.source_key as string) ?? null;
+  const externalId = (item.external_id as string) ?? null;
+
+  /*
+    A clip built from one of our own stories.
+
+    The story is the authority on its own media: the reels row is a
+    cache of it, and a row stored before the story carried a video
+    holds the STORY'S PHOTOGRAPH in `video_url`. A photograph handed
+    to a `<video>` element is a card that says "Replay unavailable",
+    so the story's own video is used here — and the story's slug
+    becomes the link out, which is what the operator asked for ("not
+    clickable and not redirecting on mysite news").
+  */
+  const story = externalId ? stories.get(externalId) : undefined;
+  let clipUrl = videoUrl;
+  let embedUrl = (item.embed_url as string) ?? null;
+
+  if (story) {
+    const media = storyMedia(story);
+    clipUrl = media.videoUrl ?? videoUrl;
+    embedUrl = media.embedUrl ?? embedUrl;
+  }
 
   return {
     id: String(item.id),
     // Present since 0014, so no absent-column concern here — but a row
     // written by a hand or an import may still carry a null, and the
     // card renders nothing rather than "null" in that case.
-    source_key: (item.source_key as string) ?? null,
+    source_key: sourceKey,
+    // The provider's own id, and — for our own stories — the article's
+    // uuid, which is how the story behind the clip is found.
+    external_id: externalId,
     // The only two columns the schema declares NOT NULL, and the player
     // cannot start without them.
-    video_url: videoUrl,
+    video_url: clipUrl,
     // Absent on every database that has not had 0015 applied, which is
     // the whole point of it being nullable: reading a column that does
     // not exist is a PGRST error, and a column that is there but null is
     // just "this clip is a plain media file".
-    embed_url: (item.embed_url as string) ?? null,
+    embed_url: embedUrl,
     poster_url: wikimediaPosterUrl(
-      videoUrl,
-      (item.poster_url as string) ?? null
+      clipUrl,
+      (item.poster_url as string) ?? null,
+      toNumberOrNull(item.width)
     ),
     title: (item.title as string) ?? null,
     description: (item.description as string) ?? null,
@@ -457,7 +661,10 @@ function mapReelRow(row: unknown): Reel {
     // proxy that stringifies it must not blank the duration readout.
     duration_seconds: toNumberOrNull(item.duration_seconds),
     published_at: (item.published_at as string) ?? null,
+    ingested_at: (item.ingested_at as string) ?? null,
     like_count: readLikeCount(item.reel_likes),
+    // The story behind the clip, when the clip is one of our stories.
+    link: storyLink(externalId, stories),
   };
 }
 

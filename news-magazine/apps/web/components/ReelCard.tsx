@@ -1,9 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 
 import { SafeImage } from "@/components/SafeImage";
-import { playsHere } from "@/lib/reel-codec";
+import {
+  audioState,
+  isArticleReel,
+  playsHere,
+  type AudioState,
+} from "@/lib/reel-codec";
 import type { Reel } from "@/lib/reels";
 import { SITE_URL } from "@/lib/site";
 
@@ -58,9 +64,19 @@ function formatDuration(seconds: number | null): string | null {
  * satisfy the letter of the rule on the day a new provider ships and
  * break it on the day it is used, which is the failure mode worth
  * designing against.
+ *
+ * A clip built from one of our own stories is not from a library at all:
+ * the OUTLET is the source of the footage, and the outlet's name is what
+ * the badge shows. It is the same duty, answered with the truth.
  */
-function providerLabel(sourceKey: string | null): string | null {
+function providerLabel(reel: Reel): string | null {
+  const sourceKey = reel.source_key;
   if (!sourceKey) return null;
+
+  if (isArticleReel(reel)) {
+    return reel.creator_name ?? "This site's news";
+  }
+
   const known: Record<string, string> = {
     pixabay: "Pixabay",
     pexels: "Pexels",
@@ -70,6 +86,26 @@ function providerLabel(sourceKey: string | null): string | null {
   const label = known[sourceKey];
   if (label) return label;
   return sourceKey.charAt(0).toUpperCase() + sourceKey.slice(1);
+}
+
+/**
+ * The resolution of the file the card will actually play.
+ *
+ * The stored row carries the dimensions of the RENDITION — the file the
+ * browser fetches — not of the master it was cut from, so this is the
+ * real number and not a claim about it. A clip the provider only has at
+ * 480p says 480p; it is never passed off as HD.
+ *
+ * The short side is the one that counts: a 1080x1920 vertical clip is
+ * 1080p, not 1920p.
+ */
+function resolutionLabel(reel: Reel): string | null {
+  const width = reel.width;
+  const height = reel.height;
+  if (!width || !height) return null;
+  const short = Math.min(width, height);
+  if (short <= 0) return null;
+  return `${Math.round(short)}p`;
 }
 
 /**
@@ -215,6 +251,16 @@ export function ReelCard({
   };
   const [failed, setFailed] = useState(false);
   /**
+   * Whether this clip has an audio track, as far as the browser knows.
+   *
+   * "unknown" until the browser says otherwise, and a sound control on
+   * a clip with no sound is a promise the file cannot keep — the reader
+   * taps the speaker and nothing happens, which reads as a broken
+   * player. So the control is HIDDEN once the browser can prove there
+   * is no audio track, and shown until then.
+   */
+  const [audio, setAudio] = useState<AudioState>("unknown");
+  /**
    * Whether THIS browser can decode THIS clip's container.
    *
    * Starts true and is corrected after mount, so the server render and
@@ -262,6 +308,35 @@ export function ReelCard({
     const embedded = typeof embed === "string" && embed.length > 0;
     setPlayableHere(playsHere(reel.video_url, embedded));
   }, [reel.video_url, reel.embed_url]);
+
+  /**
+   * Ask the browser whether this clip carries sound.
+   *
+   * The reels table has no column for it and cannot have one without a
+   * migration, but the browser already knows: Firefox answers
+   * `mozHasAudio` outright, and Chrome and Safari count the audio
+   * bytes they have decoded. See `audioState` in lib/reel-codec.ts.
+   *
+   * An embedded player brings its own volume control, so there is
+   * nothing to probe there.
+   */
+  useEffect(() => {
+    if (embedded) return;
+    const video = videoRef.current;
+    if (!video) return;
+
+    const probe = () => setAudio(audioState(video));
+    video.addEventListener("loadedmetadata", probe);
+    video.addEventListener("playing", probe);
+    video.addEventListener("timeupdate", probe);
+    probe();
+
+    return () => {
+      video.removeEventListener("loadedmetadata", probe);
+      video.removeEventListener("playing", probe);
+      video.removeEventListener("timeupdate", probe);
+    };
+  }, [embedded, reel.video_url]);
 
   /**
    * Send a command to the embedded player.
@@ -384,7 +459,14 @@ export function ReelCard({
       video.muted = next;
       // Unmuting a clip that autoplay blocked is a user gesture, which is
       // exactly the permission play() was missing a moment ago.
-      if (next && video.paused) play();
+      //
+      // The test is `NOT next`: `next` is the NEW muted state, so it is
+      // false when the reader has just turned the sound ON. The old code
+      // asked `if (next && video.paused)`, which was true only when the
+      // reader turned the sound OFF — so tapping the speaker on a blocked
+      // clip muted it again and left it still, and the reader's one tap
+      // did nothing at all.
+      if (!next && video.paused) play();
     }
   };
 
@@ -481,7 +563,17 @@ export function ReelCard({
 
   const duration = formatDuration(reel.duration_seconds);
   const caption = reel.title ?? reel.description;
-  const provider = providerLabel(reel.source_key);
+  const provider = providerLabel(reel);
+  const resolution = resolutionLabel(reel);
+  /**
+   * Whether the sound control is shown.
+   *
+   * It is hidden ONLY when the browser has proved there is no audio
+   * track. "Unknown" keeps it, because a control that turns out to be
+   * unnecessary is a smaller fault than a reader tapping a speaker
+   * button that does nothing.
+   */
+  const soundControl = audio !== "no";
 
   // Overlay button styling, repeated so each control is self-describing.
   //
@@ -666,6 +758,19 @@ export function ReelCard({
             </span>
           )}
           {/*
+            The resolution, as a fact rather than a claim.
+
+            The row carries the dimensions of the file the browser will
+            fetch, so this is what the reader is actually getting. A
+            clip the provider only has at 480p says 480p — it is never
+            passed off as HD, which is what the operator asked for.
+          */}
+          {resolution && (
+            <span className="pointer-events-none rounded bg-black/60 px-2 py-1 text-xs font-medium tabular-nums text-white backdrop-blur">
+              {resolution}
+            </span>
+          )}
+          {/*
             The library, always visible. Not in the credit block and not
             behind a tap: Pixabay's API terms ask for the origin of every
             result to be shown to the user, which a disclosure nobody opens
@@ -676,39 +781,58 @@ export function ReelCard({
               {provider}
             </span>
           )}
+          {/*
+            SOUND OFF, SAID OUT LOUD.
+
+            The feed starts muted, because every current autoplay policy
+            requires it and a phone that starts making noise in a scroll
+            feed is hostile. But a reader who does not realise the
+            sound is off concludes that the clip has no audio at all —
+            which is exactly the "is the sound broken?" feeling the
+            operator reported. So the state is stated, in words, on the
+            card, and it goes away the moment the reader turns the sound
+            on.
+          */}
+          {muted && soundControl && (
+            <span className="pointer-events-none rounded bg-black/60 px-2 py-1 text-xs font-medium uppercase tracking-wide text-white/90 backdrop-blur">
+              Sound off
+            </span>
+          )}
         </div>
 
         <div className="ml-auto flex gap-2">
-          <button
-            type="button"
-            onClick={toggleSound}
-            aria-pressed={!muted}
-            aria-label={muted ? "Unmute reel" : "Mute reel"}
-            title={muted ? "Unmute reel" : "Mute reel"}
-            className={control}
-          >
-            {muted ? (
-              <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M11 5 6.5 9H3v6h3.5L11 19V5Z" fill="currentColor" />
-                <path
-                  d="M15.5 9.5 21 15m0-5.5L15.5 15"
-                  stroke="currentColor"
-                  strokeWidth="1.9"
-                  strokeLinecap="round"
-                />
-              </svg>
-            ) : (
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M11 5 6.5 9H3v6h3.5L11 19V5Z" fill="currentColor" />
-                <path
-                  d="M14.6 8.8a4.4 4.4 0 0 1 0 6.4M17.6 5.9a8.8 8.8 0 0 1 0 12.2"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                />
-              </svg>
-            )}
-          </button>
+          {soundControl && (
+            <button
+              type="button"
+              onClick={toggleSound}
+              aria-pressed={!muted}
+              aria-label={muted ? "Unmute reel" : "Mute reel"}
+              title={muted ? "Unmute reel" : "Mute reel"}
+              className={control}
+            >
+              {muted ? (
+                <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M11 5 6.5 9H3v6h3.5L11 19V5Z" fill="currentColor" />
+                  <path
+                    d="M15.5 9.5 21 15m0-5.5L15.5 15"
+                    stroke="currentColor"
+                    strokeWidth="1.9"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              ) : (
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M11 5 6.5 9H3v6h3.5L11 19V5Z" fill="currentColor" />
+                  <path
+                    d="M14.6 8.8a4.4 4.4 0 0 1 0 6.4M17.6 5.9a8.8 8.8 0 0 1 0 12.2"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              )}
+            </button>
+          )}
 
           {/* Mobile only. In a phone feed this clip is the whole screen
               and there is no browser UI left to tap; on a desktop grid the
@@ -790,6 +914,32 @@ export function ReelCard({
           <p className="line-clamp-2 text-sm font-semibold leading-snug text-white">
             {caption}
           </p>
+        )}
+
+        {/*
+          ================= THE STORY BEHIND THE CLIP =================
+
+          A clip built from one of our own stories links to that story
+          on THIS site, not to the outlet's page. The operator's words
+          were "not clickable and not redirecting on mysite news", and
+          this is the answer: the reel's external_id IS the article's
+          uuid, the feed resolves it to a slug, and this is the link.
+
+          It is a real link — an <a> in the tab order, with the same
+          focus-visible treatment as every other control on the card —
+          and not a tap target on the picture, which is where a reader
+          would never find it.
+
+          The outlet's own page stays in the credit block below, which
+          is where the attribution lives.
+        */}
+        {reel.link && (
+          <Link
+            href={reel.link}
+            className="pointer-events-auto inline-flex min-h-[48px] items-center text-xs font-medium uppercase tracking-wider text-white underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+          >
+            Read the story
+          </Link>
         )}
 
         {/*

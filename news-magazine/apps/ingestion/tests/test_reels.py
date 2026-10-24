@@ -1002,6 +1002,101 @@ async def test_a_provider_error_does_not_lose_the_providers_that_worked(monkeypa
     assert [row["source_key"] for row in reels_rows] == ["wikimedia"]
 
 
+async def test_a_pass_stores_a_clip_for_an_article_with_a_video(monkeypatch):
+    """
+    The site's own news reaches the reels table.
+
+    This provider is the one that cannot run dry: every other reels
+    source is a search over somebody else's finished catalogue, and a
+    search over a finished catalogue returns the same hundred clips
+    for ever. This one reads the articles the site has published, so
+    a new article is a new reel by construction.
+
+    The reel's identity is the ARTICLE's uuid — that is what makes it
+    idempotent, and it is half of the store's unique constraint.
+    """
+    import httpx
+
+    from app.workers import scheduler as sched
+
+    ARTICLE_UUID = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+
+    sent: list[dict] = []
+    article = {
+        "id": ARTICLE_UUID,
+        "headline": "कोशीले बाढीले दर्जन घर जग्‍गा",
+        "excerpt": "बाढीले तीन वडामा जनजीवन प्रभावित।",
+        "featured_image_url": "https://cdn.example.test/story.jpg",
+        "image_highres_url": "https://cdn.example.test/story-hi.jpg",
+        "image_verified_at": "2026-10-24T05:00:00Z",
+        "source_name_snapshot": "Nagarik News",
+        "source_article_url": "https://example.test/story",
+        "published_at": "2026-10-24T05:00:00Z",
+        "ingested_at": "2026-10-24T05:10:00Z",
+        "video_url": "https://cdn.example.test/clip.mp4",
+        "video_embed_url": None,
+    }
+
+    db = FakeDB(rows=[{"id": GOOD_UUID}], table_rows={"articles": [article]})
+    client = FakeAsyncClient(COMMONS_RESPONSE, sent)
+
+    monkeypatch.setattr(sched, "get_settings", lambda: _reels_settings())
+    monkeypatch.setattr(sched, "get_db", lambda: db)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+
+    await sched._sync_reels()
+
+    article_rows = [
+        row
+        for row in db.upsert_rows
+        if row.get("source_key") == "articles" and row.get("title")
+    ]
+    assert len(article_rows) == 1, db.upsert_rows
+    row = article_rows[0]
+
+    assert row["external_id"] == ARTICLE_UUID
+    assert row["title"] == article["headline"]
+    # The picture is the reel's media, because the reels table has one
+    # media column and it may not be null.
+    assert row["poster_url"] == article["image_highres_url"]
+    # And the outlet is credited: the content is theirs.
+    assert row["creator_name"] == "Nagarik News"
+    assert row["attribution_required"] is True
+
+
+async def test_a_pass_does_not_invent_a_reel_for_an_article_that_is_not_there(
+    monkeypatch,
+):
+    """
+    The regression this fake exists for.
+
+    `FakeDB` used to answer EVERY select with the reels' rows, so the
+    articles query came back with a reel row and the provider turned
+    it into a story — a reel for an article that does not exist. The
+    pass then stored four rows where the test expected one, and the
+    failure read like "the articles provider is broken" rather than
+    "the fake is lying".
+    """
+    import httpx
+
+    from app.workers import scheduler as sched
+
+    sent: list[dict] = []
+    db = FakeDB(rows=[{"id": GOOD_UUID}])
+    client = FakeAsyncClient(COMMONS_RESPONSE, sent)
+
+    monkeypatch.setattr(sched, "get_settings", lambda: _reels_settings())
+    monkeypatch.setattr(sched, "get_db", lambda: db)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+
+    await sched._sync_reels()
+
+    # The pass writes a health row for every source as well as the reels
+    # themselves, so the reels are the rows that carry a title.
+    stored = [row["source_key"] for row in db.upsert_rows if row.get("title")]
+    assert stored == ["wikimedia"]
+
+
 # =============================================================
 # Fake supabase-py client
 #
@@ -1064,6 +1159,18 @@ class FakeQuery:
         self.db.calls.append(("select", columns))
         return self
 
+    def eq(self, column, value):
+        self.db.calls.append(("eq", column, value))
+        return self
+
+    def is_(self, column, value):
+        self.db.calls.append(("is_", column, value))
+        return self
+
+    def or_(self, condition):
+        self.db.calls.append(("or_", condition))
+        return self
+
     def order(self, column, desc=False):
         self.db.calls.append(("order", column, desc))
         return self
@@ -1097,13 +1204,19 @@ class FakeQuery:
 
 class FakeDB:
     """
-    A database that answers every select with the same rows.
+    A database that answers a select with that table's own rows.
 
     `table_rows` gives a table its own rows, for the tables whose
     contents matter to what the pass does: the pass now also builds
     reels from this site's own articles, and a fake that answered the
     articles query with the reels' rows would have the pass inventing
-    reels out of nothing.
+    reels out of nothing — a reel for an article that does not exist,
+    stored beside the clip the test was actually about.
+
+    A table with no rows of its own answers with the REELS' rows,
+    which is what the fake has always done for `reels`; every other
+    table answers empty. That is the honest default: a table nobody
+    gave any rows for has nothing in it.
     """
 
     def __init__(self, rows=None, fail_ids=(), table_rows=None):
@@ -1118,7 +1231,9 @@ class FakeDB:
     def rows_for(self, table):
         if table in self.table_rows:
             return self.table_rows[table]
-        return self.rows
+        if table == "reels":
+            return self.rows
+        return []
 
     def table(self, name):
         self.table_name = name

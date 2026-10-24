@@ -100,6 +100,8 @@ def article(
     headline: str = "सडक सुरक्षित गर्न के गर्नुपर्छ?",
     image: str = "https://cdn.example.test/photo.jpg",
     verified: bool = True,
+    video: str | None = None,
+    embed: str | None = None,
 ) -> dict:
     row = {
         "id": uuid,
@@ -111,6 +113,9 @@ def article(
         "source_name_snapshot": "Nagarik News",
         "source_article_url": "https://example.test/story",
         "published_at": "2026-10-24T05:00:00Z",
+        "ingested_at": "2026-10-24T05:10:00Z",
+        "video_url": video,
+        "video_embed_url": embed,
     }
     return row
 
@@ -131,7 +136,9 @@ def source(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_new_article_becomes_a_reel(source):
-    provider, db = source(articles=[article()])
+    provider, db = source(
+        articles=[article(video="https://cdn.example.test/clip.mp4")]
+    )
 
     reels = await provider.fetch(limit=10)
 
@@ -142,16 +149,35 @@ async def test_a_new_article_becomes_a_reel(source):
     # it idempotent, and it is half of the store's unique constraint.
     assert reel.external_id == ARTICLE_UUID
     assert reel.title == "सडक सुरक्षित गर्न के गर्नुपर्छ?"
-    assert reel.video_url == "https://cdn.example.test/photo.jpg"
+    assert reel.video_url == "https://cdn.example.test/clip.mp4"
     assert reel.poster_url == "https://cdn.example.test/photo.jpg"
     assert "articles" in db.calls
     assert "reels" in db.calls
 
 
 @pytest.mark.asyncio
+async def test_a_story_with_no_video_of_its_own_is_not_a_reel(source):
+    """
+    A picture is not a reel.
+
+    It used to become one, with the photograph in the media column and
+    a card in front of it that could not play anything - a "Replay
+    unavailable" panel over the picture. And the catalogue grew with
+    the news for nothing: a hundred rows a pass that no card could
+    play.
+
+    The photograph still reaches the reader, on the news page, where it
+    belongs.
+    """
+    provider, _db = source(articles=[article()])
+
+    assert await provider.fetch(limit=10) == []
+
+
+@pytest.mark.asyncio
 async def test_an_article_that_is_already_a_reel_is_not_made_into_another(source):
     provider, _db = source(
-        articles=[article()],
+        articles=[article(video="https://cdn.example.test/clip.mp4")],
         reels=[{"external_id": ARTICLE_UUID, "source_key": "articles"}],
     )
 
@@ -162,14 +188,18 @@ async def test_an_article_that_is_already_a_reel_is_not_made_into_another(source
 
 @pytest.mark.asyncio
 async def test_an_article_with_no_picture_is_not_a_reel(source):
-    provider, _db = source(articles=[article(image="")])
+    provider, _db = source(
+        articles=[article(image="", video="https://cdn.example.test/clip.mp4")]
+    )
 
     assert await provider.fetch(limit=10) == []
 
 
 @pytest.mark.asyncio
 async def test_an_article_with_no_headline_is_not_a_reel(source):
-    provider, _db = source(articles=[article(headline="")])
+    provider, _db = source(
+        articles=[article(headline="", video="https://cdn.example.test/clip.mp4")]
+    )
 
     assert await provider.fetch(limit=10) == []
 
@@ -177,7 +207,10 @@ async def test_an_article_with_no_headline_is_not_a_reel(source):
 @pytest.mark.asyncio
 async def test_the_pass_is_bounded(source):
     provider, _db = source(
-        articles=[article(uuid=ARTICLE_UUID), article(uuid=OTHER_UUID)]
+        articles=[
+            article(uuid=ARTICLE_UUID, video="https://cdn.example.test/a.mp4"),
+            article(uuid=OTHER_UUID, video="https://cdn.example.test/b.mp4"),
+        ]
     )
 
     assert len(await provider.fetch(limit=1)) == 1
@@ -189,7 +222,9 @@ async def test_a_limit_of_zero_means_zero(source):
     # A pass that has spent its budget asks for nothing. A provider
     # that answered that with a hundred reels would spend budget the
     # pass had already given away.
-    provider, _db = source(articles=[article()])
+    provider, _db = source(
+        articles=[article(video="https://cdn.example.test/clip.mp4")]
+    )
 
     assert await provider.fetch(limit=0) == []
 
@@ -199,3 +234,104 @@ async def test_no_articles_means_no_reels(source):
     provider, _db = source(articles=[])
 
     assert await provider.fetch(limit=10) == []
+
+
+# =============================================================
+# A STORY WITH A VIDEO OF ITS OWN
+#
+# The operator asked for two things at once: "make sure the reels have
+# videos" and "the middle reels must only show the video". A story
+# that carries its own clip is the one reel that is BOTH ours and
+# playable, so it is the one the feed can show as a clip with the
+# story's own picture as its poster.
+# =============================================================
+
+
+@pytest.mark.asyncio
+async def test_a_story_with_a_video_becomes_a_clip_with_the_picture_as_its_poster(
+    source,
+):
+    provider, _db = source(
+        articles=[
+            article(
+                video="https://cdn.example.test/clip.mp4",
+            )
+        ]
+    )
+
+    reels = await provider.fetch(limit=10)
+
+    assert len(reels) == 1
+    reel = reels[0]
+    # The clip is the media; the photograph is what the reader sees
+    # before it starts.
+    assert reel.video_url == "https://cdn.example.test/clip.mp4"
+    assert reel.poster_url == "https://cdn.example.test/photo.jpg"
+    # A direct file plays in a <video>; there is no player involved.
+    assert reel.embed_url is None
+
+
+@pytest.mark.asyncio
+async def test_a_story_with_a_player_carries_the_player_as_an_embed(source):
+    """
+    An embed URL is an HTML document, not a media file.
+
+    `<video src>` pointed at one refuses to load and the card says
+    "Replay unavailable", so the embed is recorded in `embed_url` —
+    which is what tells the player to use an <iframe> instead.
+    """
+    player = "https://www.youtube.com/embed/dQw4w9WgXcQ"
+
+    provider, _db = source(articles=[article(embed=player)])
+
+    reels = await provider.fetch(limit=10)
+
+    assert len(reels) == 1
+    reel = reels[0]
+    assert reel.video_url == player
+    assert reel.embed_url == player
+    assert reel.poster_url == "https://cdn.example.test/photo.jpg"
+
+
+@pytest.mark.asyncio
+async def test_a_direct_file_wins_over_the_player(source):
+    """
+    Both are present on plenty of stories: the outlet publishes a file
+    AND embeds a player. The file plays in every browser and needs no
+    third-party script, so it is the one that is played.
+    """
+    provider, _db = source(
+        articles=[
+            article(
+                video="https://cdn.example.test/clip.mp4",
+                embed="https://www.youtube.com/embed/dQw4w9WgXcQ",
+            )
+        ]
+    )
+
+    reels = await provider.fetch(limit=10)
+
+    assert len(reels) == 1
+    assert reels[0].video_url == "https://cdn.example.test/clip.mp4"
+    # The player is still recorded: it is where the story's own video
+    # can be watched with its own captions and its own channel.
+    assert reels[0].embed_url == "https://www.youtube.com/embed/dQw4w9WgXcQ"
+
+
+@pytest.mark.asyncio
+async def test_a_url_that_is_not_a_media_file_is_not_a_clip(source):
+    """
+    The ingestion stores whatever `og:video` pointed at, and that is
+    sometimes a share page rather than a file. A `<video>` pointed at
+    an HTML document never plays, so such a story is a picture row
+    and not a broken clip.
+    """
+    provider, _db = source(
+        articles=[article(video="https://example.test/watch/the-story")]
+    )
+
+    reels = await provider.fetch(limit=10)
+
+    # A share page is not a file, so it is not a clip, and a story
+    # whose only "video" is a share page is not a reel at all.
+    assert reels == []

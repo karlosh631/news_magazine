@@ -1,6 +1,11 @@
 /**
  * What this browser can actually decode.
  *
+ * This file is the CLIENT-SAFE half of the reels rules: the parts the
+ * browser and the server both have to agree on, kept out of
+ * lib/reels.ts because that one is `server-only` — it holds the
+ * database client, and a client component importing it does not build.
+ *
  * WHY THIS EXISTS, IN ONE PARAGRAPH
  *
  * Wikimedia Commons publishes no H.264 mp4. Checked against the live API
@@ -147,5 +152,236 @@ export function isArticleReel(reel: {
   source_key: string | null | undefined;
 }): boolean {
   return reel.source_key === ARTICLE_REELS_SOURCE_KEY;
+}
+
+/**
+ * One of this site's own stories, as the reels feed needs it.
+ *
+ * The article's uuid IS the reel's `external_id`, so this is how a
+ * clip is matched to the story it came from.
+ */
+export interface VideoStory {
+  id: string;
+  slug: string;
+  video_url: string | null;
+  video_embed_url: string | null;
+}
+
+/**
+ * A direct media file, by extension.
+ *
+ * The same rule the site's own news cards use: an `og:video` can point
+ * at a share page or a playlist, and a `<video>` pointed at one never
+ * plays.
+ */
+const DIRECT_VIDEO_RE = /\.(mp4|webm|mov|m4v|ogv|ogg)(\?|$)/i;
+
+/**
+ * The clip a story carries, and the player it needs.
+ *
+ * The STORY is the authority on its own media: the reels row is a
+ * cache of it, and a row stored before the story carried a video holds
+ * the story's PHOTOGRAPH in `video_url`. A photograph handed to a
+ * `<video>` element is a card that says "Replay unavailable", so the
+ * story's own video is used.
+ *
+ * Returns (videoUrl, embedUrl):
+ *
+ *   - a direct file -> (the file, null): a `<video>` plays it;
+ *   - a player URL  -> (the player, the player): an `<iframe>` plays
+ *     it, because a player URL is an HTML document and `<video src>`
+ *     refuses one;
+ *   - neither        -> (null, null): the story has no clip, and the
+ *     row is a picture and not a broken video.
+ */
+export function storyMedia(
+  story: VideoStory | undefined | null
+): { videoUrl: string | null; embedUrl: string | null } {
+  if (!story) return { videoUrl: null, embedUrl: null };
+
+  const file =
+    story.video_url && DIRECT_VIDEO_RE.test(story.video_url)
+      ? story.video_url
+      : null;
+  const player = story.video_embed_url ?? null;
+
+  if (file) return { videoUrl: file, embedUrl: player };
+  if (player) return { videoUrl: player, embedUrl: player };
+  return { videoUrl: null, embedUrl: null };
+}
+
+/**
+ * The link to the story behind a clip.
+ *
+ * The operator's complaint was that the story cards "are also not
+ * clickable and not redirecting on mysite news". This is the answer:
+ * the clip's `external_id` is the article's uuid, the feed resolves it
+ * to a slug, and the card links to `/article/<slug>`.
+ *
+ * It is not a database column: the reels table has no slug and no
+ * article reference, and adding one is a migration, which is the
+ * operator's job. The link is computed at read time instead.
+ */
+export function storyLink(
+  externalId: string | null | undefined,
+  stories: Map<string, VideoStory> | Record<string, VideoStory>
+): string | null {
+  if (!externalId) return null;
+  const story =
+    stories instanceof Map ? stories.get(externalId) : stories[externalId];
+  if (!story?.slug) return null;
+  return `/article/${story.slug}`;
+}
+
+/**
+ * THE POSTER, AT THE WIDTH THE PROVIDER ACTUALLY HAS
+ *
+ * Wikimedia serves a video's poster at a fixed ladder of widths and
+ * answers HTTP 400 for anything else. Measured against the live CDN,
+ * one width at a time:
+ *
+ *   120, 250, 330, 500, 960, 1280, 1920, 3840 -> a JPEG of that width
+ *   everything else                          -> HTTP 400, an HTML body
+ *
+ * So "1440" — the width the operator asked for — is not a rung. The
+ * best rung at or below 1440 is 1280, and the best at or below 1080 is
+ * 960. A rung wider than the source is never chosen either: the thumb
+ * handler will happily scale a 720-wide frame up to 1280, and a poster
+ * that claims detail the footage does not have is a picture of
+ * something that is not there.
+ *
+ * These are the same numbers the ingestion uses (see
+ * `commons_poster_width` in app/services/reels/providers.py). They live
+ * here as well because this file is safe for the browser and the
+ * poster URL is built on the server, and a rule that has to be written
+ * down twice should at least be written down in the same words.
+ */
+export const WIKIMEDIA_THUMBNAIL_WIDTHS: readonly number[] = [
+  120, 250, 330, 500, 960, 1280, 1920, 3840,
+];
+
+/** The poster width we would like. */
+export const WIKIMEDIA_PREFERRED_POSTER_WIDTH = 1440;
+
+/** The poster width we settle for. */
+export const WIKIMEDIA_FALLBACK_POSTER_WIDTH = 1080;
+
+/**
+ * The widest poster the provider has for a source this wide.
+ *
+ * `sourceWidth` is the width of the picture the poster is cut from,
+ * and `null` means "we do not know" — in which case the conservative
+ * answer is the fallback, because a smaller real picture beats a
+ * larger invented one.
+ */
+export function posterWidthFor(sourceWidth: number | null | undefined): number {
+  const ladder = WIKIMEDIA_THUMBNAIL_WIDTHS;
+  const limit = Number(sourceWidth);
+  const known = Number.isFinite(limit) && limit > 0;
+
+  /*
+    An unknown width is answered with the fallback alone: we cannot
+    tell whether the provider has a wider poster, and a smaller real
+    picture beats a larger invented one.
+  */
+  const ceilings = known
+    ? [WIKIMEDIA_PREFERRED_POSTER_WIDTH, WIKIMEDIA_FALLBACK_POSTER_WIDTH]
+    : [WIKIMEDIA_FALLBACK_POSTER_WIDTH];
+
+  for (const ceiling of ceilings) {
+    const allowed = known ? Math.min(ceiling, limit) : ceiling;
+    const rungs = ladder.filter((width) => width <= allowed);
+    if (rungs.length > 0) return Math.max(...rungs);
+  }
+
+  return ladder[0] as number;
+}
+
+/**
+ * What the browser knows about a clip's audio.
+ *
+ * "yes"  — there is an audio track;
+ * "no"   — there is provably not one;
+ * "unknown" — the browser has not told us yet, or cannot.
+ *
+ * WHY IT IS ASKED OF THE BROWSER
+ * ------------------------------
+ * The reels table has no column for it, and it cannot have one: a
+ * migration is the operator's job and a silent clip is not worth a
+ * schema change. But the browser already knows the answer, and it
+ * knows it from the file itself:
+ *
+ *   - Firefox answers `mozHasAudio` outright;
+ *   - Chrome and Safari expose `webkitAudioDecodedByteCount`, which
+ *     counts the audio bytes actually decoded — zero for a silent
+ *     clip, and it only means anything once the clip has played;
+ *   - the standard `audioTracks` list, where an engine has it.
+ *
+ * So a card that shows a speaker button on a clip with no sound is
+ * making a promise the file cannot keep, and this is what stops it.
+ */
+export type AudioState = "yes" | "no" | "unknown";
+
+export function audioState(video: HTMLVideoElement): AudioState {
+  const probe = video as HTMLVideoElement & {
+    mozHasAudio?: boolean;
+    webkitAudioDecodedByteCount?: number;
+    audioTracks?: { length: number };
+  };
+
+  // Firefox answers the question directly.
+  if (typeof probe.mozHasAudio === "boolean") {
+    return probe.mozHasAudio ? "yes" : "no";
+  }
+
+  // The standard track list, where an engine has one.
+  if (probe.audioTracks && typeof probe.audioTracks.length === "number") {
+    return probe.audioTracks.length > 0 ? "yes" : "no";
+  }
+
+  // Chrome and Safari count the audio bytes they have decoded.
+  if (typeof probe.webkitAudioDecodedByteCount === "number") {
+    if (probe.webkitAudioDecodedByteCount > 0) return "yes";
+    // Zero only means "silent" once the clip has been playing: before
+    // that, nothing has been decoded at all.
+    if (video.currentTime > 0) return "no";
+    return "unknown";
+  }
+
+  return "unknown";
+}
+
+/**
+ * Newest first, by the moment the worker stored the row.
+ *
+ * The feed is read in two queries — the clips the providers brought,
+ * and the clips built from this site's own stories — so the two halves
+ * are merged here rather than in the database.
+ *
+ * `ingested_at` is the order, and `published_at` breaks the tie:
+ * providers publish at whole-second resolution, so two clips routinely
+ * share a value, and without a second key the order would shuffle
+ * between renders.
+ *
+ * It is arrival order, not novelty order: an evergreen clip discovered
+ * for the first time today rightly appears at the top, because from
+ * the reader's point of view it is new. That is what makes the page
+ * move on every pass.
+ */
+export function sortByArrival<
+  T extends { ingested_at?: string | null; published_at?: string | null }
+>(reels: T[]): T[] {
+  return [...reels].sort((a, b) => {
+    const left = a.ingested_at ?? "";
+    const right = b.ingested_at ?? "";
+    if (left !== right) return left < right ? 1 : -1;
+
+    const leftPublished = a.published_at ?? "";
+    const rightPublished = b.published_at ?? "";
+    if (leftPublished !== rightPublished) {
+      return leftPublished < rightPublished ? 1 : -1;
+    }
+    return 0;
+  });
 }
 

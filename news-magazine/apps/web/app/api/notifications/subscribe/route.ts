@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { createPublicSupabaseClient } from "@/lib/supabase/server";
+import { createServiceRoleClient } from "@/lib/supabase/server";
 
 /**
  * Where a device's push subscription is kept.
@@ -57,7 +57,11 @@ export async function POST(request: Request) {
   }
 
   try {
-    const supabase = createPublicSupabaseClient();
+    // The SERVICE role key, not the anon key. The table has row level
+    // security on and no policy for the anonymous role - deliberately:
+    // a subscription is a way of reaching a person's device, and
+    // nothing in the public site needs to know who has one.
+    const supabase = createServiceRoleClient();
     const { error } = await supabase.from("push_subscriptions").upsert(
       {
         endpoint,

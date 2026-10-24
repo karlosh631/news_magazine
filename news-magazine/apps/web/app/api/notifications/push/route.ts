@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { createPublicSupabaseClient } from "@/lib/supabase/server";
+import { createServiceRoleClient } from "@/lib/supabase/server";
 
 /**
  * Raise a notification on every device that asked for one.
@@ -106,7 +106,7 @@ export async function POST(request: Request) {
   // place to ask.
   if (!title || title === "नयाँ समाचार") {
     try {
-      const supabase = createPublicSupabaseClient();
+      const supabase = createServiceRoleClient();
       const { data } = await supabase
         .from("articles")
         .select("headline, slug")
@@ -147,7 +147,7 @@ export async function POST(request: Request) {
   // ---- 5. Who is listening? --------------------------------------
   let subscriptions: StoredSubscription[] = [];
   try {
-    const supabase = createPublicSupabaseClient();
+    const supabase = createServiceRoleClient();
     const { data, error } = await supabase
       .from("push_subscriptions")
       .select("id, endpoint, p256dh, auth");
@@ -202,7 +202,7 @@ export async function POST(request: Request) {
 
   if (dead.length > 0) {
     try {
-      const supabase = createPublicSupabaseClient();
+      const supabase = createServiceRoleClient();
       await supabase.from("push_subscriptions").delete().in("id", dead);
     } catch {
       // The rows will be pruned by age instead.

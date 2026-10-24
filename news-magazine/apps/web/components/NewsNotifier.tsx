@@ -67,7 +67,6 @@ interface NewStory {
 
 export function NewsNotifier() {
   const [state, setState] = useState<NotifierState>("off");
-  const [ready, setReady] = useState(false);
 
   /*
     THE NEWEST STORY SEEN.
@@ -107,7 +106,6 @@ export function NewsNotifier() {
     if (typeof window === "undefined") return;
     if (!("Notification" in window)) {
       setState("unsupported");
-      setReady(true);
       return;
     }
 
@@ -116,7 +114,6 @@ export function NewsNotifier() {
 
     if (permission === "denied") {
       setState("blocked");
-      setReady(true);
       return;
     }
 
@@ -126,7 +123,6 @@ export function NewsNotifier() {
     } else {
       setState("off");
     }
-    setReady(true);
   }, [register]);
 
   /*
@@ -301,7 +297,11 @@ export function NewsNotifier() {
     lastSeen.current = null;
   }, [state, register]);
 
-  if (!ready || state === "unsupported") return null;
+  // The bell is in the server-rendered HTML, not something that
+  // appears a moment after the page has loaded. A control that is
+  // not there until the page settles is a control nobody finds, and
+  // it moves the page when it appears.
+  if (state === "unsupported") return null;
 
   const on = state === "on";
   const blocked = state === "blocked";

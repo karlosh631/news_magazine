@@ -558,7 +558,7 @@ class HtmlListingAdapter(SourceAdapter):
         return None
 
     async def verify_entries(
-        self, entries: list[dict], max_checks: int = 40
+        self, entries: list[dict], max_checks: int = 8
     ) -> list[dict]:
         """
         Confirm each candidate URL is actually an article before we store it.
@@ -575,6 +575,23 @@ class HtmlListingAdapter(SourceAdapter):
         site's markup changed or the listing is client-rendered, and the
         operator needs to write a selector_config rather than have the
         pipeline quietly invent articles.
+
+        HOW MANY ARE PROBED, AND WHY IT IS EIGHT
+        -----------------------------------------
+        The window used to be forty. It is eight now, because the
+        probe is the most expensive thing this adapter does: a
+        client-rendered outlet has to be read through the reader, and
+        the reader serves twenty pages a minute to everybody. Eight
+        outlets at forty probes each is three hundred and twenty reader
+        reads - sixteen minutes of the pass, spent confirming links
+        that the listing itself already vouches for.
+
+        Eight is enough to decide the one thing the probe decides: is
+        this outlet readable from here? The candidates past the window
+        are KEPT - the code has always kept them, flagged as
+        unverified - so the outlet still contributes its stories; the
+        probe is there to catch an outlet whose links are chrome, not
+        to hold the outlet hostage.
         """
         if not entries:
             return []

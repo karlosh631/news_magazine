@@ -61,6 +61,9 @@ Two fetchers, one database, one site, and no human in the loop.
                    │   against its own page. Otherwise it│
                    │   is LEFT OUT, never shown with     │
                    │   someone else's picture.           │
+                   │ ► THE CALENDAR on /category/rashifal│
+                   │  ► THE BELL: a notification in the  │
+                   │   device's own bar when news lands  │
                    └──────────────┬──────────────────────┘
                                   ▼
                            THE READER (browser)
@@ -1008,12 +1011,32 @@ jumped to the top. A resurrected story now keeps its publication time as
 its arrival time; the re-fetch is still recorded, in `resurrected_at`
 and `last_seen_at`.
 
-The keyset cursor addresses `published_at` for the same reason as the
-ordering: a cursor that addresses a different ordering than the query
-runs puts the page boundary in the wrong place, and the reader loses
-stories with no error and no empty page — just rows that were never
-shown. `lib/feed-cursor.ts` holds the order and the cursor together,
-because they are one decision.
+### The page is CUT by arrival and DISPLAYED by publication
+
+Those are two different orders, and both of them are right, for two
+different jobs.
+
+The **cursor pages by arrival** — by `ingested_at`, when we fetched the
+story. The keyset filter has to address the order the query returns
+its rows in, or the page boundary falls in the wrong place and the
+reader silently loses stories: no error, no empty page, just rows that
+were never shown. `lib/feed-cursor.ts` holds the cursor and the order
+it pages in together, because they are one decision.
+
+The **page is displayed by publication**. The rows are cut in arrival
+order, the cursor is taken from the cut, and the rows are then sorted
+for the reader. The two have to be applied in that order: a page cut
+in publication order and paged by arrival loses every row between the
+cut and the display.
+
+This is not a subtlety for its own sake. The feed was ordered by
+arrival for a while, and the measurement said it was wrong: the top
+card of the live feed carried a publication time of **nine minutes and
+forty seconds** old while the cards directly beneath it carried four
+minutes. A page whose first headline is older than its second headline
+reads as ten minutes behind, and the reader was right to say so — "too
+much gap between the new news and real time". It was not that the site
+was slow. It was that the top of it *looked* slow.
 
 ### How fast the pages are
 
@@ -1239,6 +1262,148 @@ empty page.
 
 ---
 
+## The Nepali calendar
+
+`/category/rashifal` carries a Bikram Sambat calendar, and it is the
+first thing on that page.
+
+### WHY IT IS READ AND NOT COMPUTED
+
+A Bikram Sambat month is 29 to 32 days long, its leap years are
+irregular, and a month occasionally repeats. A calendar that worked
+its way out would eventually tell a Nepali reader that today is the
+wrong day, and a wrong date is worse than no date at all.
+
+So the calendar is read from the publisher that publishes it, which
+server-renders it as a JSON island, and the site keeps no copy of its
+own. `lib/calendar.ts` reads it (with a reader-proxy fallback for the
+addresses the publisher refuses) and `lib/calendar-core.ts` holds the
+shapes and the arithmetic, so the whole of it is testable without a
+browser and without the network.
+
+### FOUR READINGS
+
+`दिन` · `हप्ता` · `महिना` · `वर्ष` — the day, the week, the month and
+the year — because a reader arrives with one of four questions.
+
+The year is four reads of the publisher's calendar page (the first
+month, the fourth, the seventh and the tenth) and they are made at
+once, and only when the reader asks for the year.
+
+### THE CELLS CARRY BOTH DATES
+
+Every cell shows the Bikram Sambat day, the Gregorian day in the
+corner, the tithi, and **what happens that day** — a festival, a
+public holiday, a fast. The events are why anybody is looking at a
+calendar at all.
+
+The colours are this site's, not the publisher's: the events in the
+site's blue, the tithi in the site's grey, the holiday mark in the
+site's red. The English dates are built from the ISO string rather
+than from `toLocaleDateString`, because the calendar is rendered on
+the server *and* in the browser and the two must agree exactly.
+
+### THE ATTRIBUTION IS ONE LINE
+
+The publisher is credited once, at the foot of the page, in the
+smallest type the site uses. It was printed twice — once inside the
+calendar and once under the page — and two credit lines read as a
+banner.
+
+---
+
+## Telling the reader when the news arrives
+
+There is a bell in the header. Turn it on and a new story raises a
+notification in the device's own notification bar — the one on a
+phone, the one on a laptop.
+
+### THE BELL IS OFF UNTIL IT IS CLICKED
+
+Every browser requires the reader's permission before a site may raise
+a notification, and no site may ask without a gesture. The click *is*
+the ask. A site that asks on load is a site nobody allows, and one
+that keeps asking after a refusal is a site that has been told no.
+
+### IT NEEDS NO SERVER FOR THAT
+
+The notification the browser raises from the page is the platform's own
+Notification API. No key, no push service, no subscription store. The
+service worker (`public/sw.js`) raises it; the page tells the worker
+when a story has arrived, which it knows because the site already
+polls its own feed.
+
+The worker also handles a *server-pushed* notification, and the route
+that sends one is at `/api/notifications/push`, so the day the site is
+given a VAPID key pair the same bell starts working with the tab
+closed. That path needs the `web-push` package and two keys, which are
+the operator's to add; until then the route says so plainly and does
+nothing, and the reader's own notification does not need any of it.
+
+The ingestion pings the site at the end of a pass that published
+something. It is a short, bounded call at the end of the pass, and it
+can never fail the pass: a notification that cannot be sent is not a
+reason to fail a pass that fetched two hundred stories.
+
+`push_subscriptions` is migration **0035**. The route reports plainly
+when the table has not been created, and the reader's own notification
+does not need it.
+
+---
+
+## The tier that cannot expire
+
+A page the worker cannot reach directly is read through a **reader
+proxy** (`app/sources/reader_proxy.py`) — a service that fetches a
+public URL from an address the publisher does not refuse. It is a free
+service with a free-tier ceiling: twenty pages a minute without a key,
+sixty with one, and when its quota runs out it answers "slow down" and
+the page is simply not read.
+
+Under it there is now a tier that cannot be exhausted:
+**`app/sources/local_reader.py`**, which is `httpx` plus `trafilatura`
+— a fetch and a text extraction, running on the worker, with no key,
+no quota and no third party. `trafilatura` was already a dependency of
+this service; it is what extracts the body of every article that is
+read.
+
+The order is always:
+
+1. ask the publisher, directly
+2. ask the reader proxy
+3. read it ourselves, here, on this machine
+
+The third tier cannot do what the second one does, and the difference
+matters: a publisher that refuses *this address* refuses us too. What
+it can do is everything the proxy was being used for that is not
+really about the refusal — proving that a candidate link is an article
+page (one request, no quota), and extracting the text of a page we can
+already reach.
+
+---
+
+## Reels that move with the news
+
+Every reels provider is a **search over somebody else's fixed
+catalogue**, and a search over a fixed catalogue runs out. Wikimedia
+Commons is asked for the newest Nepal videos, gets the same hundred
+files back for ever, finds them all already stored, and adds nothing
+— so the Reels page said "245 clips in the catalogue, 0 clips fetched
+today" while the ingestion log said the pass was fine. The search was
+not broken, the store was not broken, and the corpus was finished.
+
+So there is a provider that searches nothing at all: `ArticlesSource`,
+which reads the articles this site has already published and turns the
+newest ones that carry a **verified** photograph into reels. A new
+article is a new reel by construction, so the category moves in step
+with the news page, and it cannot be exhausted. The id of the reel is
+the id of the article, which is what makes it idempotent.
+
+The reels table grows with the news now, so the storage guard prunes it
+twice: by age (three days) and by count (twenty thousand rows).
+
+---
+
 ## Deployment
 
 ### The one thing you must set up
@@ -1398,8 +1563,32 @@ none of them can be done from inside a deployment:
    migration 0017, which is in a public repository, and PBKDF2 at
    210,000 iterations is recoverable offline by anybody with it.
 4. **Apply the migrations** — `supabase db push`, or the SQL by hand.
+5. **Give the site a push key, if the reader should be told about the
+   news with the tab closed.** The notification the browser raises
+   from the page needs nothing; the one the *server* pushes needs the
+   `web-push` package (`npm install web-push` in `apps/web`) and a
+   VAPID key pair in the site's environment (`VAPID_PUBLIC_KEY`,
+   `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`). Until then the bell still
+   works — it raises the notification from the page — and the route at
+   `/api/notifications/push` says plainly that the push path is not
+   configured.
 
 ### Environment
+
+The site's own environment (Vercel → Settings → Environment Variables):
+
+| Variable | What it is |
+| --- | --- |
+| `NEXT_PUBLIC_SUPABASE_URL` | The database. The anon key reads it. |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | The anon key, safe in the browser. RLS is what protects the data. |
+| `SUPABASE_SERVICE_ROLE_KEY` | The service role key. Server-only — it bypasses RLS. |
+| `API_ACCESS_TOKEN` | Supabase → Account → Access Tokens. Used by the admin panel. |
+| `INGESTION_SECRET` | The shared secret between the worker and the site. The worker pings the site with it when it has published something. |
+| `CRON_SECRET` | The shared secret for the ingestion endpoints. |
+| `VAPID_PUBLIC_KEY` | Optional. The push service's public key. Without it the bell still works — it raises the notification from the page. |
+| `VAPID_PRIVATE_KEY` | Optional. The push service's private key. |
+| `VAPID_SUBJECT` | Optional. A `mailto:` address for the push service. |
+
 
 **Vercel** (`apps/web`): `NEXT_PUBLIC_SUPABASE_URL`,
 `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_SITE_URL`, and optionally

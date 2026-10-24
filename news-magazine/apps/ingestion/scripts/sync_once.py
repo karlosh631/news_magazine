@@ -312,6 +312,23 @@ async def main() -> int:
     )
     print(f"SOURCES_OK={ok}")
 
+    # ------------------------------------------------------------
+    # TELL THE READERS
+    # ------------------------------------------------------------
+    # A reader who asked to be told when the news arrives should be
+    # told, and the moment to tell them is the moment a story is
+    # stored. The site knows which devices asked; this pass only has
+    # to say that there is something.
+    #
+    # It is a courtesy ping at the end of the pass, so it is short,
+    # it is bounded, and it can never fail the pass.
+    try:
+        from app.services.notifications import notify_new_news
+
+        await notify_new_news(totals["new"], settings)
+    except Exception as exc:  # noqa: BLE001 — a ping must never fail a pass
+        print(f"::warning::The news notification could not be sent: {exc}")
+
     return 0 if ok > 0 else 3
 
 

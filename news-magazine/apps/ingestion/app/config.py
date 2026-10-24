@@ -51,6 +51,19 @@ class Settings(BaseSettings):
     cron_secret: str
 
     # ---------------------------------------------------------
+    # The site, for the notifications
+    # ---------------------------------------------------------
+    # The worker tells the site when it has published something, and
+    # the site tells the readers' devices. The two already trust each
+    # other - the same secret is on both sides - so nothing new has to
+    # be configured for this to work.
+    web_app_url: str = "https://new24hr.vercel.app"
+
+    # Whether the worker pings the site at all. It is a switch, not a
+    # secret: turning it off stops the pings and nothing else.
+    push_notifications_enabled: bool = True
+
+    # ---------------------------------------------------------
     # Networking / politeness
     # ---------------------------------------------------------
     # Identify yourself honestly to every outlet. Several Nepali

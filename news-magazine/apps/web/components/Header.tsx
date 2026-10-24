@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { NepalClock } from "@/components/NepalClock";
+import { NewsNotifier } from "@/components/NewsNotifier";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { SearchModal } from "@/components/SearchModal";
 
@@ -468,6 +469,16 @@ export function Header({ categories }: { categories: NavCategory[] }) {
           </button>
 
           <ThemeToggle />
+
+          {/*
+            THE BELL.
+
+            Tell the reader when the news arrives, in the device's own
+            notification bar. It is off until it is clicked, because
+            every browser requires the reader to be asked, and a site
+            that asks on its own is a site nobody allows.
+          */}
+          <NewsNotifier />
 
           <button
             type="button"

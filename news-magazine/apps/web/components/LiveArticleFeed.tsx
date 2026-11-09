@@ -471,13 +471,10 @@ export function LiveArticleFeed({
       setChecking(true);
       try {
         const params = new URLSearchParams({
-          // The poll window has to be wide enough to hold a whole
-          // fetch. A pass brings about two hundred and fifty rows, and
-          // the reader asked for every one of them to appear at the
-          // top - so a window of a hundred meant a hundred and fifty
-          // of the batch stayed hidden until the next poll, and the
-          // next poll's window had pushed them out of reach entirely.
-          limit: "250",
+          // Poll only the latest page. Older stories are loaded through
+          // the cursor as the reader scrolls, so a large polling window
+          // only multiplies database egress for every open tab.
+          limit: "24",
           // Defeats any intermediary cache. A cached poll is a
           // homepage frozen at whatever was newest when it was stored.
           t: String(Date.now()),

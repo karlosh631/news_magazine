@@ -40,6 +40,13 @@ OUT_DIR = REPO / "data" / "daily"
 KATHMANDU = timezone(timedelta(hours=5, minutes=45))
 
 
+def is_quota_restriction_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "exceed_egress_quota" in message or (
+        "service for this project is restricted" in message
+    )
+
+
 def run_git(args: list[str]) -> tuple[int, str]:
     result = subprocess.run(
         ["git", *args],
@@ -69,6 +76,9 @@ def main() -> int:
         ).execute()
         rows = response.data or []
     except Exception as exc:  # noqa: BLE001
+        if is_quota_restriction_error(exc):
+            print(f"Supabase is currently quota-restricted; skipping archive: {exc}")
+            return 0
         print(f"Could not read articles: {exc}")
         return 2
 
